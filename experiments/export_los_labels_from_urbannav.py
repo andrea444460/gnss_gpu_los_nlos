@@ -47,6 +47,15 @@ class ReferenceTrack:
     rx_ecef: np.ndarray
 
 
+@dataclass
+class EpochJob:
+    gps_week: int
+    gps_tow: float
+    rx_xyz: np.ndarray
+    sat_ids: list[str]
+    pseudoranges: list[float]
+
+
 def _datetime_to_gps_week_tow(dt: datetime) -> tuple[int, float]:
     delta_s = (dt - GPS_EPOCH).total_seconds()
     week = int(delta_s // GPS_WEEK_SECONDS)
@@ -122,6 +131,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane-rectangular coordinate zone")
     parser.add_argument("--epoch-step", type=int, default=1, help="Use every Nth epoch from OBS")
     parser.add_argument("--max-epochs", type=int, default=0, help="0 means all, otherwise cap processed epochs")
+    parser.add_argument("--batch-size", type=int, default=128, help="Epoch batch size for ephemeris.compute_batch")
     return parser.parse_args()
 
 
@@ -146,16 +156,72 @@ def main() -> None:
     print(f"  triangles: {len(building.triangles)}")
     print(f"  bvh nodes: {bvh.n_nodes}")
 
-    print("[3/5] Processing epochs...")
+    print("[3/5] Preparing epoch jobs...")
+    jobs: list[EpochJob] = []
+    skipped_no_rx = 0
+    skipped_no_obs = 0
+    for epoch_idx, epoch in enumerate(obs.epochs):
+        if args.epoch_step > 1 and (epoch_idx % args.epoch_step != 0):
+            continue
+
+        gps_week, gps_tow = _datetime_to_gps_week_tow(epoch.time)
+        rx_xyz = _nearest_reference_xyz(track, gps_week, gps_tow)
+        if rx_xyz is None:
+            skipped_no_rx += 1
+            continue
+
+        selected_sat_ids: list[str] = []
+        selected_pr: list[float] = []
+        for sat_id, sat_obs in epoch.observations.items():
+            sat = _parse_sat_id(sat_id)
+            if sat is None:
+                continue
+            system, _ = sat
+            if system not in systems:
+                continue
+            pr = float(sat_obs.get(args.obs_code, 0.0))
+            if not np.isfinite(pr) or pr <= 0.0:
+                continue
+            selected_sat_ids.append(sat_id.strip().upper())
+            selected_pr.append(pr)
+
+        if not selected_sat_ids:
+            skipped_no_obs += 1
+            continue
+
+        jobs.append(
+            EpochJob(
+                gps_week=gps_week,
+                gps_tow=gps_tow,
+                rx_xyz=np.asarray(rx_xyz, dtype=np.float64),
+                sat_ids=selected_sat_ids,
+                pseudoranges=selected_pr,
+            )
+        )
+
+    if args.max_epochs > 0:
+        jobs = jobs[: args.max_epochs]
+
+    if not jobs:
+        raise RuntimeError("No valid epochs to process after filtering. Check input paths/flags.")
+
+    print(f"  queued epochs: {len(jobs)}")
+    print(f"  skipped (no matching reference week): {skipped_no_rx}")
+    print(f"  skipped (no usable observations): {skipped_no_obs}")
+
+    print("[4/5] Processing epoch batches...")
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     written = 0
     processed_epochs = 0
-    skipped_no_rx = 0
-    skipped_no_obs = 0
-    total_epochs = len(obs.epochs)
+    total_epochs = len(jobs)
     t_start = time.time()
     last_log_t = t_start
     last_log_rows = 0
+
+    prn_pool = [str(p).strip().upper() for p in eph.available_prns if _parse_sat_id(str(p)) is not None]
+    prn_pool_set = set(prn_pool)
+    if not prn_pool:
+        raise RuntimeError("No valid PRN identifiers found in NAV ephemeris pool.")
 
     with open(args.output_csv, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -180,120 +246,90 @@ def main() -> None:
         )
         writer.writeheader()
 
-        for epoch_idx, epoch in enumerate(obs.epochs):
-            if args.epoch_step > 1 and (epoch_idx % args.epoch_step != 0):
-                continue
-            if args.max_epochs > 0 and processed_epochs >= args.max_epochs:
-                break
+        for start in range(0, len(jobs), max(1, args.batch_size)):
+            batch = jobs[start : start + max(1, args.batch_size)]
+            batch_tows = np.asarray([j.gps_tow for j in batch], dtype=np.float64)
+            sat_ecef_batch, sat_clk_batch, used_prns = eph.compute_batch(batch_tows, prn_list=prn_pool)
+            used_ids = [str(p).strip().upper() for p in used_prns]
+            idx_by_sat = {sid: i for i, sid in enumerate(used_ids)}
 
-            gps_week, gps_tow = _datetime_to_gps_week_tow(epoch.time)
-            rx_xyz = _nearest_reference_xyz(track, gps_week, gps_tow)
-            if rx_xyz is None:
-                skipped_no_rx += 1
-                continue
-
-            selected_sat_ids: list[str] = []
-            selected_pr: list[float] = []
-            for sat_id, sat_obs in epoch.observations.items():
-                sat = _parse_sat_id(sat_id)
-                if sat is None:
+            for bi, job in enumerate(batch):
+                selected_ids = [sid for sid in job.sat_ids if sid in prn_pool_set and sid in idx_by_sat]
+                if not selected_ids:
                     continue
-                system, _ = sat
-                if system not in systems:
-                    continue
-                pr = float(sat_obs.get(args.obs_code, 0.0))
-                if not np.isfinite(pr) or pr <= 0.0:
-                    continue
-                selected_sat_ids.append(sat_id.strip().upper())
-                selected_pr.append(pr)
+                indices = [idx_by_sat[sid] for sid in selected_ids]
+                sat_ecef = sat_ecef_batch[bi][indices]
+                sat_clk = sat_clk_batch[bi][indices]
 
-            if not selected_sat_ids:
-                skipped_no_obs += 1
-                continue
+                prn_ints: list[int] = []
+                for sat_id in selected_ids:
+                    parsed = _parse_sat_id(sat_id)
+                    prn_ints.append(parsed[1] if parsed is not None else 0)
 
-            sat_ecef, sat_clk, used_ids = eph.compute(
-                gps_tow,
-                prn_list=selected_sat_ids,
-                obs_codes=[args.obs_code] * len(selected_sat_ids),
-            )
-            if len(used_ids) == 0:
-                continue
-
-            prn_ints: list[int] = []
-            for sat_id in used_ids:
-                parsed = _parse_sat_id(str(sat_id))
-                prn_ints.append(parsed[1] if parsed is not None else 0)
-
-            result = usim.compute_epoch(
-                rx_ecef=rx_xyz,
-                sat_ecef=sat_ecef,
-                sat_clk=sat_clk,
-                prn_list=prn_ints,
-            )
-
-            pr_by_sat = {sid: pr for sid, pr in zip(selected_sat_ids, selected_pr)}
-            for i, sat_id in enumerate(used_ids):
-                sat_str = str(sat_id).strip().upper()
-                parsed = _parse_sat_id(sat_str)
-                if parsed is None:
-                    continue
-                system, prn = parsed
-                elev_deg = math.degrees(float(result["elevations"][i]))
-                az_deg = math.degrees(float(result["azimuths"][i]))
-                if az_deg < 0.0:
-                    az_deg += 360.0
-                writer.writerow(
-                    {
-                        "gps_week": gps_week,
-                        "gps_tow": f"{gps_tow:.3f}",
-                        "sat_id": sat_str,
-                        "system": system,
-                        "prn": prn,
-                        "obs_code": args.obs_code,
-                        "pseudorange_m": f"{pr_by_sat.get(sat_str, float('nan')):.3f}",
-                        "is_los": int(bool(result["is_los"][i])),
-                        "is_visible": int(bool(result["visible"][i])),
-                        "elevation_deg": f"{elev_deg:.3f}",
-                        "azimuth_deg": f"{az_deg:.3f}",
-                        "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
-                        "rx_x_m": f"{float(rx_xyz[0]):.3f}",
-                        "rx_y_m": f"{float(rx_xyz[1]):.3f}",
-                        "rx_z_m": f"{float(rx_xyz[2]):.3f}",
-                    }
+                result = usim.compute_epoch(
+                    rx_ecef=job.rx_xyz,
+                    sat_ecef=sat_ecef,
+                    sat_clk=sat_clk,
+                    prn_list=prn_ints,
                 )
-                written += 1
 
-            processed_epochs += 1
-            now = time.time()
-            if processed_epochs % 25 == 0 or (now - last_log_t) >= 15.0:
-                elapsed = max(now - t_start, 1e-6)
-                eps = processed_epochs / elapsed
-                rows_per_s = (written - last_log_rows) / max(now - last_log_t, 1e-6)
-                if args.max_epochs > 0:
-                    total_target = min(args.max_epochs, total_epochs)
-                else:
-                    total_target = total_epochs
-                pct = 100.0 * processed_epochs / max(total_target, 1)
-                remaining = max(total_target - processed_epochs, 0)
-                eta_s = remaining / max(eps, 1e-9)
-                eta_m = eta_s / 60.0
-                print(
-                    f"  epoch {processed_epochs}/{total_target} ({pct:.1f}%)"
-                    f" | rows={written}"
-                    f" | speed={eps:.2f} ep/s"
-                    f" | rows/s={rows_per_s:.1f}"
-                    f" | ETA={eta_m:.1f} min"
-                )
-                last_log_t = now
-                last_log_rows = written
+                pr_by_sat = {sid: pr for sid, pr in zip(job.sat_ids, job.pseudoranges)}
+                for i, sat_id in enumerate(selected_ids):
+                    sat_str = sat_id
+                    parsed = _parse_sat_id(sat_str)
+                    if parsed is None:
+                        continue
+                    system, prn = parsed
+                    elev_deg = math.degrees(float(result["elevations"][i]))
+                    az_deg = math.degrees(float(result["azimuths"][i]))
+                    if az_deg < 0.0:
+                        az_deg += 360.0
+                    writer.writerow(
+                        {
+                            "gps_week": job.gps_week,
+                            "gps_tow": f"{job.gps_tow:.3f}",
+                            "sat_id": sat_str,
+                            "system": system,
+                            "prn": prn,
+                            "obs_code": args.obs_code,
+                            "pseudorange_m": f"{pr_by_sat.get(sat_str, float('nan')):.3f}",
+                            "is_los": int(bool(result["is_los"][i])),
+                            "is_visible": int(bool(result["visible"][i])),
+                            "elevation_deg": f"{elev_deg:.3f}",
+                            "azimuth_deg": f"{az_deg:.3f}",
+                            "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
+                            "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
+                            "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
+                            "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
+                        }
+                    )
+                    written += 1
 
-    print("[4/5] Done.")
+                processed_epochs += 1
+                now = time.time()
+                if processed_epochs % 25 == 0 or (now - last_log_t) >= 15.0:
+                    elapsed = max(now - t_start, 1e-6)
+                    eps = processed_epochs / elapsed
+                    rows_per_s = (written - last_log_rows) / max(now - last_log_t, 1e-6)
+                    pct = 100.0 * processed_epochs / max(total_epochs, 1)
+                    remaining = max(total_epochs - processed_epochs, 0)
+                    eta_s = remaining / max(eps, 1e-9)
+                    eta_m = eta_s / 60.0
+                    print(
+                        f"  epoch {processed_epochs}/{total_epochs} ({pct:.1f}%)"
+                        f" | rows={written}"
+                        f" | speed={eps:.2f} ep/s"
+                        f" | rows/s={rows_per_s:.1f}"
+                        f" | ETA={eta_m:.1f} min"
+                    )
+                    last_log_t = now
+                    last_log_rows = written
+
+    print("[5/5] Done.")
     print(f"  processed epochs: {processed_epochs}")
-    print(f"  skipped (no matching reference week): {skipped_no_rx}")
-    print(f"  skipped (no usable observations): {skipped_no_obs}")
     print(f"  written rows: {written}")
     print(f"  output: {args.output_csv}")
-    print("[5/5] You can now compare this CSV against your ML predictions.")
+    print("You can now compare this CSV against your ML predictions.")
 
 
 if __name__ == "__main__":

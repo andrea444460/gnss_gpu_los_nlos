@@ -17,6 +17,7 @@ import argparse
 import csv
 import math
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -151,6 +152,10 @@ def main() -> None:
     processed_epochs = 0
     skipped_no_rx = 0
     skipped_no_obs = 0
+    total_epochs = len(obs.epochs)
+    t_start = time.time()
+    last_log_t = t_start
+    last_log_rows = 0
 
     with open(args.output_csv, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -259,8 +264,28 @@ def main() -> None:
                 written += 1
 
             processed_epochs += 1
-            if processed_epochs % 200 == 0:
-                print(f"  processed epochs: {processed_epochs}  rows: {written}")
+            now = time.time()
+            if processed_epochs % 25 == 0 or (now - last_log_t) >= 15.0:
+                elapsed = max(now - t_start, 1e-6)
+                eps = processed_epochs / elapsed
+                rows_per_s = (written - last_log_rows) / max(now - last_log_t, 1e-6)
+                if args.max_epochs > 0:
+                    total_target = min(args.max_epochs, total_epochs)
+                else:
+                    total_target = total_epochs
+                pct = 100.0 * processed_epochs / max(total_target, 1)
+                remaining = max(total_target - processed_epochs, 0)
+                eta_s = remaining / max(eps, 1e-9)
+                eta_m = eta_s / 60.0
+                print(
+                    f"  epoch {processed_epochs}/{total_target} ({pct:.1f}%)"
+                    f" | rows={written}"
+                    f" | speed={eps:.2f} ep/s"
+                    f" | rows/s={rows_per_s:.1f}"
+                    f" | ETA={eta_m:.1f} min"
+                )
+                last_log_t = now
+                last_log_rows = written
 
     print("[4/5] Done.")
     print(f"  processed epochs: {processed_epochs}")

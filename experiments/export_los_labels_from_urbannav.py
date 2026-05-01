@@ -34,7 +34,7 @@ from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.io.rinex import read_rinex_obs
-from gnss_gpu.urban_signal_sim import UrbanSignalSimulator
+from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, _sat_elevation_azimuth
 
 GPS_EPOCH = datetime(1980, 1, 6)
 GPS_WEEK_SECONDS = 604800.0
@@ -155,6 +155,8 @@ def main() -> None:
     usim = UrbanSignalSimulator(building_model=bvh, noise_floor_db=-35.0)
     print(f"  triangles: {len(building.triangles)}")
     print(f"  bvh nodes: {bvh.n_nodes}")
+    has_bvh_batch = hasattr(bvh, "check_los_batch") and hasattr(bvh, "compute_multipath_batch")
+    print(f"  BVH batch path: {'enabled' if has_bvh_batch else 'disabled (fallback per-epoch)'}")
 
     print("[3/5] Preparing epoch jobs...")
     jobs: list[EpochJob] = []
@@ -253,57 +255,125 @@ def main() -> None:
             used_ids = [str(p).strip().upper() for p in used_prns]
             idx_by_sat = {sid: i for i, sid in enumerate(used_ids)}
 
+            selected_ids_per_epoch: list[list[str]] = []
+            sat_sel_per_epoch: list[np.ndarray] = []
             for bi, job in enumerate(batch):
                 selected_ids = [sid for sid in job.sat_ids if sid in prn_pool_set and sid in idx_by_sat]
+                selected_ids_per_epoch.append(selected_ids)
                 if not selected_ids:
+                    sat_sel_per_epoch.append(np.empty((0, 3), dtype=np.float64))
                     continue
                 indices = [idx_by_sat[sid] for sid in selected_ids]
-                sat_ecef = sat_ecef_batch[bi][indices]
-                sat_clk = sat_clk_batch[bi][indices]
+                sat_sel_per_epoch.append(np.asarray(sat_ecef_batch[bi][indices], dtype=np.float64))
 
-                prn_ints: list[int] = []
-                for sat_id in selected_ids:
-                    parsed = _parse_sat_id(sat_id)
-                    prn_ints.append(parsed[1] if parsed is not None else 0)
+            if has_bvh_batch:
+                max_sat = max((len(x) for x in selected_ids_per_epoch), default=0)
+                if max_sat > 0:
+                    rx_batch = np.ascontiguousarray(
+                        np.stack([np.asarray(j.rx_xyz, dtype=np.float64) for j in batch], axis=0)
+                    )
+                    sat_pad = np.full((len(batch), max_sat, 3), np.nan, dtype=np.float64)
+                    for bi, sat_sel in enumerate(sat_sel_per_epoch):
+                        if sat_sel.shape[0] > 0:
+                            sat_pad[bi, : sat_sel.shape[0], :] = sat_sel
+                    los_pad = np.asarray(bvh.check_los_batch(rx_batch, sat_pad), dtype=bool)
+                    delay_pad, _ = bvh.compute_multipath_batch(rx_batch, sat_pad)
+                    delay_pad = np.asarray(delay_pad, dtype=np.float64)
+                else:
+                    los_pad = np.zeros((len(batch), 0), dtype=bool)
+                    delay_pad = np.zeros((len(batch), 0), dtype=np.float64)
+            else:
+                los_pad = None
+                delay_pad = None
 
-                result = usim.compute_epoch(
-                    rx_ecef=job.rx_xyz,
-                    sat_ecef=sat_ecef,
-                    sat_clk=sat_clk,
-                    prn_list=prn_ints,
-                )
+            for bi, job in enumerate(batch):
+                selected_ids = selected_ids_per_epoch[bi]
+                sat_ecef = sat_sel_per_epoch[bi]
+                if not selected_ids:
+                    continue
 
                 pr_by_sat = {sid: pr for sid, pr in zip(job.sat_ids, job.pseudoranges)}
-                for i, sat_id in enumerate(selected_ids):
-                    sat_str = sat_id
-                    parsed = _parse_sat_id(sat_str)
-                    if parsed is None:
-                        continue
-                    system, prn = parsed
-                    elev_deg = math.degrees(float(result["elevations"][i]))
-                    az_deg = math.degrees(float(result["azimuths"][i]))
-                    if az_deg < 0.0:
-                        az_deg += 360.0
-                    writer.writerow(
-                        {
-                            "gps_week": job.gps_week,
-                            "gps_tow": f"{job.gps_tow:.3f}",
-                            "sat_id": sat_str,
-                            "system": system,
-                            "prn": prn,
-                            "obs_code": args.obs_code,
-                            "pseudorange_m": f"{pr_by_sat.get(sat_str, float('nan')):.3f}",
-                            "is_los": int(bool(result["is_los"][i])),
-                            "is_visible": int(bool(result["visible"][i])),
-                            "elevation_deg": f"{elev_deg:.3f}",
-                            "azimuth_deg": f"{az_deg:.3f}",
-                            "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
-                            "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
-                            "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
-                            "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
-                        }
+                if has_bvh_batch and los_pad is not None and delay_pad is not None:
+                    el, az = _sat_elevation_azimuth(job.rx_xyz, sat_ecef)
+                    visible = el >= usim.elevation_mask_rad
+                    is_los = np.ones(len(selected_ids), dtype=bool)
+                    is_los[visible] = los_pad[bi, : len(selected_ids)][visible]
+                    excess_delays = np.zeros(len(selected_ids), dtype=np.float64)
+                    excess_delays[visible] = delay_pad[bi, : len(selected_ids)][visible]
+
+                    for i, sat_id in enumerate(selected_ids):
+                        parsed = _parse_sat_id(sat_id)
+                        if parsed is None:
+                            continue
+                        system, prn = parsed
+                        elev_deg = math.degrees(float(el[i]))
+                        az_deg = math.degrees(float(az[i]))
+                        if az_deg < 0.0:
+                            az_deg += 360.0
+                        writer.writerow(
+                            {
+                                "gps_week": job.gps_week,
+                                "gps_tow": f"{job.gps_tow:.3f}",
+                                "sat_id": sat_id,
+                                "system": system,
+                                "prn": prn,
+                                "obs_code": args.obs_code,
+                                "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
+                                "is_los": int(bool(is_los[i])),
+                                "is_visible": int(bool(visible[i])),
+                                "elevation_deg": f"{elev_deg:.3f}",
+                                "azimuth_deg": f"{az_deg:.3f}",
+                                "excess_delay_m": f"{float(excess_delays[i]):.3f}",
+                                "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
+                                "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
+                                "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
+                            }
+                        )
+                        written += 1
+                else:
+                    prn_ints: list[int] = []
+                    for sat_id in selected_ids:
+                        parsed = _parse_sat_id(sat_id)
+                        prn_ints.append(parsed[1] if parsed is not None else 0)
+
+                    indices = [idx_by_sat[sid] for sid in selected_ids]
+                    sat_clk = sat_clk_batch[bi][indices]
+                    result = usim.compute_epoch(
+                        rx_ecef=job.rx_xyz,
+                        sat_ecef=sat_ecef,
+                        sat_clk=sat_clk,
+                        prn_list=prn_ints,
                     )
-                    written += 1
+
+                    for i, sat_id in enumerate(selected_ids):
+                        parsed = _parse_sat_id(sat_id)
+                        if parsed is None:
+                            continue
+                        system, prn = parsed
+                        elev_deg = math.degrees(float(result["elevations"][i]))
+                        az_deg = math.degrees(float(result["azimuths"][i]))
+                        if az_deg < 0.0:
+                            az_deg += 360.0
+                        writer.writerow(
+                            {
+                                "gps_week": job.gps_week,
+                                "gps_tow": f"{job.gps_tow:.3f}",
+                                "sat_id": sat_id,
+                                "system": system,
+                                "prn": prn,
+                                "obs_code": args.obs_code,
+                                "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
+                                "is_los": int(bool(result["is_los"][i])),
+                                "is_visible": int(bool(result["visible"][i])),
+                                "elevation_deg": f"{elev_deg:.3f}",
+                                "azimuth_deg": f"{az_deg:.3f}",
+                                "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
+                                "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
+                                "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
+                                "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
+                            }
+                        )
+                        written += 1
 
                 processed_epochs += 1
                 now = time.time()

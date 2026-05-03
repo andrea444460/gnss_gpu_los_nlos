@@ -15,7 +15,7 @@ The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
 By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
-Visualization epochs default to **at most 1 Hz** along GPS time (``--epoch-min-interval-s``, default 1; use ``0`` for evenly spaced indices regardless of Δt).
+``--epoch-min-interval-s`` (default 1 s) caps how fast consecutive **viz** epochs advance in GPS time; the script still targets ``--n-epochs`` samples by spreading picks along the run (use smaller ``--traj-step`` if you need more rows than subsampled).
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
 When the compiled BVH module exposes ``check_los_batch``, LOS intersection uses one CUDA launch per ephemeris chunk instead of per-epoch ``UrbanSignalSimulator.compute_epoch`` ray tests.
 The HTML viewer
@@ -133,61 +133,84 @@ def select_viz_epoch_indices(
     times: np.ndarray,
     n_epochs: int,
     min_interval_s: float,
-) -> np.ndarray:
-    """Pick indices along ``times`` so consecutive picks are ≥ ``min_interval_s`` apart in GPS time.
+) -> tuple[np.ndarray, dict]:
+    """Pick ``min(n_epochs, n_rows)`` trajectory indices spread along time.
 
-    Targets are spaced uniformly along the trajectory time span; each target is snapped to the
-    nearest eligible row **after** the previous pick so batches never advance faster than the
-    requested rate. If ``min_interval_s`` <= 0, uses evenly spaced row indices (legacy behaviour).
+    When ``min_interval_s`` > 0, builds the maximal **1 / min_interval_s** ladder along GPS time
+    (greedy forward on ``times``), then subsamples ``need`` rungs uniformly so consecutive picks stay
+    ≥ ``min_interval_s`` apart while targeting ``n_epochs`` epochs. If the trajectory span or row
+    density cannot supply that many spaced slots, returns fewer and reports via the dict.
+
+    Returns:
+        (indices, info) where ``info`` has keys ``requested``, ``used``, ``max_spaced_slots``,
+        ``traj_rows``, ``span_s``.
     """
     times = np.asarray(times, dtype=np.float64)
     n = int(times.shape[0])
+    info = {
+        "requested": max(1, int(n_epochs)),
+        "used": 0,
+        "max_spaced_slots": 0,
+        "traj_rows": n,
+        "span_s": 0.0,
+    }
     if n == 0:
-        return np.array([], dtype=int)
-    need = max(1, min(int(n_epochs), n))
+        return np.array([], dtype=int), info
+
+    need_target = max(1, min(int(n_epochs), n))
+    info["requested"] = int(n_epochs)
+
     if min_interval_s <= 0.0:
-        return np.linspace(0, n - 1, need, dtype=int)
+        out = np.linspace(0, n - 1, need_target, dtype=int)
+        info["used"] = int(out.shape[0])
+        info["max_spaced_slots"] = n
+        offs = _cumulative_track_time_s(times)
+        info["span_s"] = float(offs[-1]) if offs.size else 0.0
+        return out, info
 
     offs = _cumulative_track_time_s(times)
     span = float(offs[-1])
     if span <= 0.0:
         span = abs(float(times[-1] - times[0]))
+    info["span_s"] = span
 
-    targets_off = np.linspace(0.0, span, need)
-    selected: list[int] = []
-    selected_offs: list[float] = []
-    last_j = -1
+    greedy_idx: list[int] = []
+    last_t: Optional[float] = None
+    for i in range(n):
+        tt = float(offs[i])
+        if last_t is None or tt >= last_t + float(min_interval_s) - 1e-9:
+            greedy_idx.append(i)
+            last_t = tt
 
-    for k in range(need):
-        lo = 0.0 if not selected_offs else selected_offs[-1] + min_interval_s
-        tg = max(float(targets_off[k]), lo)
-        eligible = np.where((np.arange(n) > last_j) & (offs >= lo - 1e-9))[0]
-        if eligible.size == 0:
-            break
-        closest = eligible[np.argmin(np.abs(offs[eligible] - tg))]
-        sj = int(closest)
-        selected.append(sj)
-        selected_offs.append(float(offs[sj]))
-        last_j = sj
+    mf = len(greedy_idx)
+    info["max_spaced_slots"] = mf
+    if mf == 0:
+        info["used"] = 1
+        return np.array([0], dtype=int), info
 
-    if not selected:
-        return np.array([0], dtype=int)
+    need_eff = min(need_target, mf)
+    info["used"] = need_eff
 
-    out = np.asarray(selected, dtype=int)
-    if out.size < need:
-        last_j = int(out[-1])
-        last_off = float(offs[last_j])
-        while out.size < need:
-            lo = last_off + min_interval_s
-            eligible = np.where((np.arange(n) > last_j) & (offs >= lo - 1e-9))[0]
-            if eligible.size == 0:
-                break
-            sj = int(eligible[0])
-            out = np.append(out, sj)
-            last_j = sj
-            last_off = float(offs[sj])
+    if need_eff < need_target:
+        print(
+            f"  WARNING: asked {need_target} viz epochs at ≥{float(min_interval_s):g}s GPS spacing; "
+            f"only {mf} spaced slots exist (~{span:.0f}s span, {n} traj rows after step). Using {need_eff}."
+        )
 
-    return out
+    if need_eff == 1:
+        return np.asarray([greedy_idx[0]], dtype=int), info
+
+    slot_i = np.linspace(0, mf - 1, need_eff)
+    slot_i = np.round(slot_i).astype(np.int64)
+    slot_i = np.clip(slot_i, 0, mf - 1)
+    for k in range(1, need_eff):
+        if slot_i[k] <= slot_i[k - 1]:
+            slot_i[k] = min(slot_i[k - 1] + 1, mf - 1)
+
+    if slot_i[-1] >= mf:
+        slot_i = np.clip(slot_i, 0, mf - 1)
+
+    return np.asarray([greedy_idx[int(s)] for s in slot_i], dtype=int), info
 
 
 def compute_all_epochs(
@@ -217,9 +240,11 @@ def compute_all_epochs(
     when available (same CUDA extension as single-ray LOS); otherwise
     :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator` per epoch.
 
-    ``epoch_min_interval_s`` enforces a minimum GPS-time spacing between consecutive
-    visualization epochs (default 1 s). Use ``0`` to pick evenly spaced row indices
-    regardless of sampling rate.
+    ``epoch_min_interval_s`` (default 1 s) is the minimum GPS-time gap between **consecutive**
+    visualization epochs. The run still **targets** ``n_epochs`` samples by spreading picks along
+    the trajectory (uniform subsample of a maximal 1/interval ladder). You only get fewer epochs
+    if the trajectory span or ``step`` subsampling yields fewer spaced slots than requested (see
+    WARNING). Use ``0`` for evenly spaced row indices ignoring Δt.
     """
     print(f"[{area_name}] Loading PLATEAU...")
     loader = PlateauLoader(zone=int(plateau_zone))
@@ -232,10 +257,16 @@ def compute_all_epochs(
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
     positions, times = load_trajectory(traj_csv, step=step)
-    indices = select_viz_epoch_indices(times, n_epochs, epoch_min_interval_s)
+    indices, sel_info = select_viz_epoch_indices(times, n_epochs, epoch_min_interval_s)
+    if int(n_epochs) > len(times):
+        print(
+            f"  Note: --n-epochs={int(n_epochs)} > trajectory rows ({len(times)}) after traj-step; "
+            f"capped at {len(times)} samples."
+        )
     if epoch_min_interval_s > 0:
         print(
-            f"  Viz epochs: {len(indices)} (min GPS Δt ≥ {epoch_min_interval_s:g} s between consecutive epochs)"
+            f"  Viz epochs: {len(indices)} (GPS Δt ≥ {epoch_min_interval_s:g}s between consecutive; "
+            f"{sel_info['traj_rows']} traj rows, ~{sel_info['span_s']:.0f}s span)"
         )
     else:
         print(f"  Viz epochs: {len(indices)} (evenly spaced rows; no min Δt constraint)")
@@ -940,8 +971,9 @@ def main(argv=None):
         "--epoch-min-interval-s",
         type=float,
         default=1.0,
-        help="Minimum GPS-time spacing [s] between consecutive viz epochs (default 1 Hz cap). "
-        "Use 0 for evenly spaced indices ignoring Δt.",
+        help="Minimum GPS-time spacing [s] between consecutive viz epochs (default 1 s). "
+        "Still targets --n-epochs by spreading along the run; 0 = ignore Δt (row linspace only). "
+        "Need enough traj rows / duration or fewer epochs are used (WARNING).",
     )
     parser.add_argument("--traj-step", type=int, default=300, help="Sample every N rows from reference.csv")
     parser.add_argument(

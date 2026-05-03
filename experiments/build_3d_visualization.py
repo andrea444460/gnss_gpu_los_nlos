@@ -11,7 +11,8 @@ Then uses Playwright to record a video of the visualization.
 
 The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 **broadcast RINEX navigation** file next to the trajectory (``base.nav``) or
-``--nav``; all constellation blocks present in that file are parsed. LOS/NLOS rays
+``--nav``; constellation blocks **G/R/E/J/C/I** from that file are parsed (SBAS omitted).
+LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
 By default there is **no elevation mask** (``--elevation-mask-deg -90``).
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
@@ -53,8 +54,8 @@ from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, ecef_to_lla
 
-# RINEX 3 navigation systems to retain from mixed ``.nav`` files (all supported letters).
-RINEX_NAV_SYSTEMS_ALL = ("G", "R", "E", "J", "C", "S", "I")
+# RINEX 3 navigation systems retained for this viewer (SBAS ``S`` excluded for now).
+RINEX_NAV_SYSTEMS_VIZ = ("G", "R", "E", "J", "C", "I")
 
 
 def _normalize_csv_row(row: dict) -> dict:
@@ -131,7 +132,7 @@ def compute_all_epochs(
 
     nav_file = _resolve_nav_path(traj_csv, nav_path)
     print(f"[{area_name}] Loading broadcast ephemeris: {nav_file}")
-    nav_messages = read_nav_rinex_multi(nav_file, systems=RINEX_NAV_SYSTEMS_ALL)
+    nav_messages = read_nav_rinex_multi(nav_file, systems=RINEX_NAV_SYSTEMS_VIZ)
     eph = Ephemeris(nav_messages)
     prn_catalog = eph.available_prns
     print(f"  Satellites in NAV: {len(prn_catalog)}")

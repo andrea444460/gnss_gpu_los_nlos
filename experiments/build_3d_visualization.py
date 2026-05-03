@@ -71,10 +71,15 @@ def _normalize_csv_row(row: dict) -> dict:
 
 
 def load_trajectory(csv_path, step=200):
+    """Return positions, GPS TOW times, and raw CSV row count.
+
+    Points loaded ≈ ``ceil(n_csv_rows / step)`` (every ``step``-th row, zero-based).
+    """
     with open(csv_path, encoding="utf-8") as f:
         rows = [_normalize_csv_row(r) for r in csv.DictReader(f)]
+    n_csv = len(rows)
     positions, times = [], []
-    for i in range(0, len(rows), step):
+    for i in range(0, n_csv, step):
         r = rows[i]
         positions.append(
             [
@@ -84,7 +89,7 @@ def load_trajectory(csv_path, step=200):
             ]
         )
         times.append(float(r["GPS TOW (s)"]))
-    return np.array(positions), np.array(times)
+    return np.array(positions), np.array(times), int(n_csv)
 
 
 def _resolve_nav_path(traj_csv: str, nav_path: Optional[str]) -> str:
@@ -254,12 +259,19 @@ def compute_all_epochs(
     has_bvh_los_batch = hasattr(bvh, "check_los_batch")
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
-    positions, times = load_trajectory(traj_csv, step=step)
+    positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
+    n_loaded = len(times)
+    print(
+        f"  Trajectory CSV: {n_csv_rows} rows; --traj-step={step} → {n_loaded} positions loaded "
+        f"(cannot viz more epochs than this)."
+    )
     indices, sel_info = select_viz_epoch_indices(times, n_epochs, epoch_min_interval_s)
-    if int(n_epochs) > len(times):
+    if int(n_epochs) > n_loaded:
+        sug = max(1, n_csv_rows // max(int(n_epochs), 1))
+        approx_pts = (n_csv_rows + sug - 1) // sug
         print(
-            f"  Note: --n-epochs={int(n_epochs)} > trajectory rows ({len(times)}) after traj-step; "
-            f"capped at {len(times)} samples."
+            f"  Note: --n-epochs={int(n_epochs)} > loaded positions ({n_loaded}). "
+            f"Lower --traj-step (e.g. --traj-step {sug} → ~{approx_pts} positions) or reduce --n-epochs."
         )
     if epoch_min_interval_s > 0:
         print(

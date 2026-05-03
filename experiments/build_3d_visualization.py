@@ -11,13 +11,31 @@ Then uses Playwright to record a video of the visualization.
 
 The receiver trajectory is sourced from UrbanNav, while satellite rays use
 a synthetic sky geometry to sanity-check LOS/NLOS behavior against buildings.
+
+**Google Colab / CLI**
+
+For terrain + OSM buildings you need a **Cesium ion** access token (free tier):
+https://cesium.com/ion/signup — then either:
+
+  export CESIUM_ION_TOKEN="your_token"
+  python experiments/build_3d_visualization.py --area-name Shinjuku \\
+      --plateau-dir experiments/data/plateau_shinjuku \\
+      --reference-csv experiments/data/urbannav/Shinjuku/Shinjuku/reference.csv \\
+      --out-html cesium_shinjuku.html
+
+Or pass ``--cesium-ion-token ...`` (injected into the HTML).
+
+Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
 """
 
+import argparse
 import csv
 import json
 import math
 import os
+import sys
 import time
+from typing import Optional
 
 import numpy as np
 
@@ -26,13 +44,23 @@ from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, ecef_to_lla
 
 
+def _normalize_csv_row(row: dict) -> dict:
+    return {k.strip(): v for k, v in row.items()}
+
+
 def load_trajectory(csv_path, step=200):
-    with open(csv_path) as f:
-        rows = list(csv.DictReader(f))
+    with open(csv_path, encoding="utf-8") as f:
+        rows = [_normalize_csv_row(r) for r in csv.DictReader(f)]
     positions, times = [], []
     for i in range(0, len(rows), step):
         r = rows[i]
-        positions.append([float(r[" ECEF X (m)"]), float(r[" ECEF Y (m)"]), float(r[" ECEF Z (m)"])])
+        positions.append(
+            [
+                float(r["ECEF X (m)"]),
+                float(r["ECEF Y (m)"]),
+                float(r["ECEF Z (m)"]),
+            ]
+        )
         times.append(float(r["GPS TOW (s)"]))
     return np.array(positions), np.array(times)
 
@@ -58,10 +86,10 @@ def generate_sats(rx_ecef, n_sat=10, time_offset=0.0):
     return sat_ecef
 
 
-def compute_all_epochs(area_name, plateau_dir, traj_csv, n_epochs=15, step=200):
+def compute_all_epochs(area_name, plateau_dir, traj_csv, n_epochs=15, step=200, plateau_zone=9):
     """Compute LOS/NLOS for all epochs and return visualization data."""
     print(f"[{area_name}] Loading PLATEAU...")
-    loader = PlateauLoader(zone=9)
+    loader = PlateauLoader(zone=int(plateau_zone))
     building = loader.load_directory(plateau_dir)
     print(f"  {len(building.triangles)} triangles")
 
@@ -117,14 +145,18 @@ def compute_all_epochs(area_name, plateau_dir, traj_csv, n_epochs=15, step=200):
     return {"epochs": epochs_data, "trajectory": traj, "area": area_name}
 
 
-def generate_html(datasets, output_path):
+def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None):
     """Generate standalone HTML with CesiumJS visualization."""
     data_json = json.dumps(datasets)
+    tok = (cesium_ion_token or os.environ.get("CESIUM_ION_TOKEN", "") or "").strip()
+    token_script = ""
+    if tok:
+        token_script = f"<script>window.CESIUM_ION_TOKEN = {json.dumps(tok)};</script>\n"
 
     html = f"""<!DOCTYPE html>
 <html>
 <head>
-<meta charset="utf-8">
+{token_script}<meta charset="utf-8">
 <title>GPU Urban GNSS Signal Simulator — LOS/NLOS 3D Verification</title>
 <script src="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Cesium.js"></script>
 <link href="https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
@@ -346,34 +378,99 @@ const {{ chromium }} = require('playwright');
         print("Video recording failed — HTML file can still be opened in a browser")
 
 
-def main():
-    out_dir = os.path.join(os.path.dirname(__file__), "results", "los_nlos_verification")
+def _default_legacy_paths():
+    root = os.path.join(os.path.dirname(__file__), "..")
+    return {
+        "shinjuku_plateau": os.path.join(root, "experiments/data/plateau_shinjuku"),
+        "shinjuku_ref": os.path.join(root, "experiments/data/urbannav/Shinjuku/reference.csv"),
+        "odaiba_plateau": os.path.join(root, "experiments/data/plateau_odaiba"),
+        "odaiba_ref": os.path.join(root, "experiments/data/urbannav/Odaiba/reference.csv"),
+        "out_dir": os.path.join(root, "experiments/results/los_nlos_verification"),
+    }
 
-    # Compute Shinjuku data
-    shinjuku = compute_all_epochs(
-        "Shinjuku", "experiments/data/plateau_shinjuku",
-        "experiments/data/urbannav/Shinjuku/reference.csv",
-        n_epochs=12, step=300,
+
+def main(argv=None):
+    argv = argv if argv is not None else sys.argv[1:]
+    parser = argparse.ArgumentParser(description="CesiumJS LOS/NLOS ray visualization (UrbanNav + PLATEAU)")
+    parser.add_argument(
+        "--legacy",
+        action="store_true",
+        help="Build default Shinjuku + Odaiba HTML under experiments/results/ (old behaviour)",
     )
-
-    # Compute Odaiba data
-    odaiba = compute_all_epochs(
-        "Odaiba", "experiments/data/plateau_odaiba",
-        "experiments/data/urbannav/Odaiba/reference.csv",
-        n_epochs=12, step=300,
+    parser.add_argument("--area-name", type=str, default="Area", help="Label shown in the viewer overlay")
+    parser.add_argument("--plateau-dir", type=str, default="", help="Directory with PLATEAU CityGML tiles")
+    parser.add_argument("--reference-csv", type=str, default="", help="UrbanNav reference.csv (ECEF trajectory)")
+    parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane zone (Tokyo area = 9)")
+    parser.add_argument("--n-epochs", type=int, default=12, help="Number of epochs along trajectory")
+    parser.add_argument("--traj-step", type=int, default=300, help="Sample every N rows from reference.csv")
+    parser.add_argument("--out-html", type=str, default="cesium_los_nlos.html", help="Output HTML path")
+    parser.add_argument(
+        "--cesium-ion-token",
+        type=str,
+        default=os.environ.get("CESIUM_ION_TOKEN", ""),
+        help="Cesium ion token for terrain + OSM buildings (or set CESIUM_ION_TOKEN)",
     )
+    parser.add_argument("--record-video", action="store_true", help="Try Playwright screen recording (needs Node)")
+    args = parser.parse_args(argv)
 
-    # Generate HTML
-    html_path = os.path.join(out_dir, "los_nlos_3d.html")
-    generate_html([shinjuku, odaiba], html_path)
+    tok = args.cesium_ion_token.strip() if args.cesium_ion_token else ""
 
-    # Record video
-    video_path = os.path.join(out_dir, "los_nlos_3d.webm")
-    try:
-        record_video(html_path, video_path, duration_ms=35000)
-    except Exception as e:
-        print(f"Video recording skipped: {e}")
-        print("Open the HTML file in a browser to view the 3D visualization")
+    if args.legacy:
+        p = _default_legacy_paths()
+        os.makedirs(p["out_dir"], exist_ok=True)
+        shinjuku = compute_all_epochs(
+            "Shinjuku",
+            p["shinjuku_plateau"],
+            p["shinjuku_ref"],
+            n_epochs=12,
+            step=300,
+            plateau_zone=9,
+        )
+        odaiba = compute_all_epochs(
+            "Odaiba",
+            p["odaiba_plateau"],
+            p["odaiba_ref"],
+            n_epochs=12,
+            step=300,
+            plateau_zone=9,
+        )
+        html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
+        generate_html([shinjuku, odaiba], html_path, cesium_ion_token=tok or None)
+        print(f"HTML: {html_path}")
+        if args.record_video:
+            video_path = os.path.join(p["out_dir"], "los_nlos_3d.webm")
+            try:
+                record_video(html_path, video_path, duration_ms=35000)
+            except Exception as e:
+                print(f"Video recording skipped: {e}")
+        if not tok:
+            print("Tip: set CESIUM_ION_TOKEN or --cesium-ion-token for terrain + OSM buildings.")
+        return
+
+    if not args.plateau_dir or not args.reference_csv:
+        parser.error("--plateau-dir and --reference-csv are required unless --legacy is set.")
+
+    ds = compute_all_epochs(
+        args.area_name,
+        args.plateau_dir,
+        args.reference_csv,
+        n_epochs=max(1, args.n_epochs),
+        step=max(1, args.traj_step),
+        plateau_zone=args.plateau_zone,
+    )
+    out_html = os.path.abspath(args.out_html)
+    _out_dir = os.path.dirname(out_html)
+    if _out_dir:
+        os.makedirs(_out_dir, exist_ok=True)
+    generate_html([ds], out_html, cesium_ion_token=tok or None)
+    print(f"HTML: {out_html}")
+    if not tok:
+        print("Tip: set CESIUM_ION_TOKEN or pass --cesium-ion-token for world terrain + OSM buildings.")
+    if args.record_video:
+        try:
+            record_video(out_html, out_html.replace(".html", ".webm"), duration_ms=25000)
+        except Exception as e:
+            print(f"Video recording skipped: {e}")
 
 
 if __name__ == "__main__":

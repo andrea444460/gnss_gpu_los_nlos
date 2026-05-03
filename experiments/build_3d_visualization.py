@@ -15,6 +15,7 @@ The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
 By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
+Visualization epochs default to **at most 1 Hz** along GPS time (``--epoch-min-interval-s``, default 1; use ``0`` for evenly spaced indices regardless of Δt).
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
 When the compiled BVH module exposes ``check_los_batch``, LOS intersection uses one CUDA launch per ephemeris chunk instead of per-epoch ``UrbanSignalSimulator.compute_epoch`` ray tests.
 The HTML viewer
@@ -36,6 +37,8 @@ https://cesium.com/ion/signup — then either:
 Or pass ``--cesium-ion-token ...`` (injected into the HTML).
 
 Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
+
+During **Play**, Cesium skips per-epoch ``sampleTerrainMostDetailed`` (uses ``globe.getHeight`` only) and omits PRN endpoint labels so redraw stays light; **Pause** or the epoch slider refines terrain and restores labels.
 """
 
 import argparse
@@ -105,6 +108,88 @@ def _sat_display_id(prn) -> str:
     return f"G{int(prn):02d}"
 
 
+def _tow_delta_sec(t_new: float, t_old: float) -> float:
+    """GPS TOW difference [s]; unwrap a single week rollover."""
+    d = float(t_new) - float(t_old)
+    if d < -302400.0:
+        d += 604800.0
+    elif d > 302400.0:
+        d -= 604800.0
+    return d
+
+
+def _cumulative_track_time_s(times: np.ndarray) -> np.ndarray:
+    """Monotonic time along trajectory [s] from the first row (handles TOW jumps)."""
+    t = np.asarray(times, dtype=np.float64)
+    if t.size == 0:
+        return t
+    offs = np.zeros_like(t, dtype=np.float64)
+    for i in range(1, t.shape[0]):
+        offs[i] = offs[i - 1] + _tow_delta_sec(float(t[i]), float(t[i - 1]))
+    return offs
+
+
+def select_viz_epoch_indices(
+    times: np.ndarray,
+    n_epochs: int,
+    min_interval_s: float,
+) -> np.ndarray:
+    """Pick indices along ``times`` so consecutive picks are ≥ ``min_interval_s`` apart in GPS time.
+
+    Targets are spaced uniformly along the trajectory time span; each target is snapped to the
+    nearest eligible row **after** the previous pick so batches never advance faster than the
+    requested rate. If ``min_interval_s`` <= 0, uses evenly spaced row indices (legacy behaviour).
+    """
+    times = np.asarray(times, dtype=np.float64)
+    n = int(times.shape[0])
+    if n == 0:
+        return np.array([], dtype=int)
+    need = max(1, min(int(n_epochs), n))
+    if min_interval_s <= 0.0:
+        return np.linspace(0, n - 1, need, dtype=int)
+
+    offs = _cumulative_track_time_s(times)
+    span = float(offs[-1])
+    if span <= 0.0:
+        span = abs(float(times[-1] - times[0]))
+
+    targets_off = np.linspace(0.0, span, need)
+    selected: list[int] = []
+    selected_offs: list[float] = []
+    last_j = -1
+
+    for k in range(need):
+        lo = 0.0 if not selected_offs else selected_offs[-1] + min_interval_s
+        tg = max(float(targets_off[k]), lo)
+        eligible = np.where((np.arange(n) > last_j) & (offs >= lo - 1e-9))[0]
+        if eligible.size == 0:
+            break
+        closest = eligible[np.argmin(np.abs(offs[eligible] - tg))]
+        sj = int(closest)
+        selected.append(sj)
+        selected_offs.append(float(offs[sj]))
+        last_j = sj
+
+    if not selected:
+        return np.array([0], dtype=int)
+
+    out = np.asarray(selected, dtype=int)
+    if out.size < need:
+        last_j = int(out[-1])
+        last_off = float(offs[last_j])
+        while out.size < need:
+            lo = last_off + min_interval_s
+            eligible = np.where((np.arange(n) > last_j) & (offs >= lo - 1e-9))[0]
+            if eligible.size == 0:
+                break
+            sj = int(eligible[0])
+            out = np.append(out, sj)
+            last_j = sj
+            last_off = float(offs[sj])
+
+    return out
+
+
 def compute_all_epochs(
     area_name,
     plateau_dir,
@@ -115,6 +200,7 @@ def compute_all_epochs(
     nav_path: Optional[str] = None,
     elevation_mask_deg: float = 10.0,
     eph_batch_chunk: int = 64,
+    epoch_min_interval_s: float = 1.0,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -130,6 +216,10 @@ def compute_all_epochs(
     LOS rays against PLATEAU use :meth:`~gnss_gpu.bvh.BVHAccelerator.check_los_batch`
     when available (same CUDA extension as single-ray LOS); otherwise
     :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator` per epoch.
+
+    ``epoch_min_interval_s`` enforces a minimum GPS-time spacing between consecutive
+    visualization epochs (default 1 s). Use ``0`` to pick evenly spaced row indices
+    regardless of sampling rate.
     """
     print(f"[{area_name}] Loading PLATEAU...")
     loader = PlateauLoader(zone=int(plateau_zone))
@@ -142,7 +232,13 @@ def compute_all_epochs(
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
     positions, times = load_trajectory(traj_csv, step=step)
-    indices = np.linspace(0, len(positions) - 1, n_epochs, dtype=int)
+    indices = select_viz_epoch_indices(times, n_epochs, epoch_min_interval_s)
+    if epoch_min_interval_s > 0:
+        print(
+            f"  Viz epochs: {len(indices)} (min GPS Δt ≥ {epoch_min_interval_s:g} s between consecutive epochs)"
+        )
+    else:
+        print(f"  Viz epochs: {len(indices)} (evenly spaced rows; no min Δt constraint)")
 
     nav_file = _resolve_nav_path(traj_csv, nav_path)
     print(f"[{area_name}] Loading broadcast ephemeris: {nav_file}")
@@ -374,6 +470,7 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
       <button type="button" id="btnPlayPause">Pausa</button>
       <button type="button" id="btnPrev" title="Epoch precedente">◀ Indietro</button>
       <button type="button" id="btnNext" title="Epoch successiva">Avanti ▶</button>
+      <button type="button" id="btnNext10" title="Salta avanti di 10 epoch">Avanti +10</button>
       <label>Velocità <select id="speedSelect">
         <option value="4000">Lenta</option>
         <option value="2500">Media</option>
@@ -384,6 +481,9 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     <div class="row">
       <label for="epochSlider">Epoch</label>
       <input type="range" id="epochSlider" min="0" max="0" value="0" />
+    </div>
+    <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
+      In riproduzione: terreno approssimato e raggi senza etichette PRN (più fluido). In pausa o sullo slider: dettaglio pieno.
     </div>
   </div>
 </div>
@@ -477,7 +577,7 @@ function setPlayPauseUi() {{
   document.getElementById('btnPlayPause').textContent = playing ? 'Pausa' : 'Play';
 }}
 
-function goNextEpoch() {{
+function stepForwardCore() {{
   const ds = datasets[currentDataset];
   const n = ds.epochs.length;
 
@@ -493,13 +593,17 @@ function goNextEpoch() {{
       orientation: {{ heading: Cesium.Math.toRadians(20), pitch: Cesium.Math.toRadians(-38), roll: 0 }},
       duration: 2,
     }});
-    paintFrame();
     return datasetGapMs;
   }}
 
   displayedEpochIndex = (displayedEpochIndex + 1) % n;
-  paintFrame();
   return stepMs;
+}}
+
+function goNextEpoch() {{
+  const wait = stepForwardCore();
+  paintFrame();
+  return wait;
 }}
 
 function goPrevEpoch() {{
@@ -561,6 +665,9 @@ function showEpoch(ds, epochIdx) {{
   const lat = rx[0];
   const ellipsoidH = rx[2];
   const RX_ABOVE_GROUND_M = 2.0;
+  // Avoid sampleTerrainMostDetailed during auto-play (network + double redraw); pause/scrub uses HQ path.
+  const fastPlayback = playing;
+  const showSatLabels = !playing;
 
   function drawRxAndRays(rxH) {{
     if (gen !== terrainSnapGeneration) return;
@@ -591,17 +698,19 @@ function showEpoch(ds, epochIdx) {{
         }},
       }}));
 
-      rayEntities.push(viewer.entities.add({{
-        position: Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]),
-        label: {{
-          text: 'PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'),
-          font: '11px monospace',
-          fillColor: color,
-          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-          outlineWidth: 1,
-          scale: 0.8,
-        }},
-      }}));
+      if (showSatLabels) {{
+        rayEntities.push(viewer.entities.add({{
+          position: Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]),
+          label: {{
+            text: 'PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'),
+            font: '11px monospace',
+            fillColor: color,
+            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+            outlineWidth: 1,
+            scale: 0.8,
+          }},
+        }}));
+      }}
     }});
 
     updateEpochOverlay(ds, epoch, epochIdx);
@@ -610,6 +719,12 @@ function showEpoch(ds, epochIdx) {{
   const tp = viewer.scene.globe.terrainProvider;
   if (!tp || tp instanceof Cesium.EllipsoidTerrainProvider) {{
     drawRxAndRays(ellipsoidH);
+    return;
+  }}
+
+  if (fastPlayback) {{
+    const qh = viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat));
+    drawRxAndRays(Cesium.defined(qh) ? qh + RX_ABOVE_GROUND_M : ellipsoidH);
     return;
   }}
 
@@ -670,6 +785,9 @@ document.getElementById('btnPlayPause').addEventListener('click', () => {{
   playing = !playing;
   setPlayPauseUi();
   clearPlaybackTimer();
+  if (!playing) {{
+    paintFrame();
+  }}
   if (playing) {{
     playbackTimer = setTimeout(tickPlayback, stepMs);
   }}
@@ -678,6 +796,17 @@ document.getElementById('btnPlayPause').addEventListener('click', () => {{
 document.getElementById('btnNext').addEventListener('click', () => {{
   clearPlaybackTimer();
   goNextEpoch();
+  if (playing) {{
+    playbackTimer = setTimeout(tickPlayback, stepMs);
+  }}
+}});
+
+document.getElementById('btnNext10').addEventListener('click', () => {{
+  clearPlaybackTimer();
+  for (let k = 0; k < 10; k++) {{
+    stepForwardCore();
+  }}
+  paintFrame();
   if (playing) {{
     playbackTimer = setTimeout(tickPlayback, stepMs);
   }}
@@ -807,6 +936,13 @@ def main(argv=None):
     parser.add_argument("--reference-csv", type=str, default="", help="UrbanNav reference.csv (ECEF trajectory)")
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane zone (Tokyo area = 9)")
     parser.add_argument("--n-epochs", type=int, default=12, help="Number of epochs along trajectory")
+    parser.add_argument(
+        "--epoch-min-interval-s",
+        type=float,
+        default=1.0,
+        help="Minimum GPS-time spacing [s] between consecutive viz epochs (default 1 Hz cap). "
+        "Use 0 for evenly spaced indices ignoring Δt.",
+    )
     parser.add_argument("--traj-step", type=int, default=300, help="Sample every N rows from reference.csv")
     parser.add_argument(
         "--nav",
@@ -841,6 +977,7 @@ def main(argv=None):
     nav_opt = args.nav.strip() if getattr(args, "nav", "") else ""
     el_mask = float(getattr(args, "elevation_mask_deg", 10.0))
     eph_chunk = int(getattr(args, "eph_batch_chunk", 64))
+    epoch_gap_s = float(getattr(args, "epoch_min_interval_s", 1.0))
 
     if args.legacy:
         p = _default_legacy_paths()
@@ -849,23 +986,25 @@ def main(argv=None):
             "Shinjuku",
             p["shinjuku_plateau"],
             p["shinjuku_ref"],
-            n_epochs=12,
+            n_epochs=max(1, args.n_epochs),
             step=300,
             plateau_zone=9,
             nav_path=nav_opt or None,
             elevation_mask_deg=el_mask,
             eph_batch_chunk=eph_chunk,
+            epoch_min_interval_s=epoch_gap_s,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
             p["odaiba_plateau"],
             p["odaiba_ref"],
-            n_epochs=12,
+            n_epochs=max(1, args.n_epochs),
             step=300,
             plateau_zone=9,
             nav_path=nav_opt or None,
             elevation_mask_deg=el_mask,
             eph_batch_chunk=eph_chunk,
+            epoch_min_interval_s=epoch_gap_s,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         generate_html([shinjuku, odaiba], html_path, cesium_ion_token=tok or None)
@@ -893,6 +1032,7 @@ def main(argv=None):
         nav_path=nav_opt or None,
         elevation_mask_deg=el_mask,
         eph_batch_chunk=eph_chunk,
+        epoch_min_interval_s=epoch_gap_s,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

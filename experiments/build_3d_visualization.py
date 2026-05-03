@@ -501,28 +501,25 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     background: #252a38; color: #eee; border: 1px solid #556;
     border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 11px;
   }}
-  #playback input[type="number"] {{
-    background: #252a38; color: #eee; border: 1px solid #556;
-    border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 11px;
-    width: 4.5rem;
+  #btnToggleOverlay {{
+    position: fixed; top: 10px; right: 10px; z-index: 20;
+    cursor: pointer; font-family: monospace; font-size: 11px;
+    padding: 6px 12px; border-radius: 6px; border: 1px solid #556;
+    background: rgba(22, 27, 38, 0.92); color: #ddd;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   }}
-  .playback-toggle {{
-    margin-top: 8px; cursor: pointer; font-family: monospace; font-size: 11px;
-    padding: 4px 10px; border-radius: 6px; border: 1px solid #556;
-    background: #1e2433; color: #aab;
-  }}
-  .playback-toggle:hover {{ background: #2a3142; color: #eee; }}
+  #btnToggleOverlay:hover {{ background: rgba(42, 49, 66, 0.96); color: #fff; }}
 </style>
 </head>
 <body>
 <div id="fileProtocolWarn"><div class="inner">
-  <h2>Serve http://localhost — non file://</h2>
-  <p>I browser bloccano i <strong>Web Worker</strong> di Cesium per pagine aperte come file locale. Compare quindi
-  «Refused to cross-origin redirects of the top-level worker script» e «file: URLs are treated as unique security origins»:
-  non è il token Ion, è la sicurezza del protocollo <code>file:</code>.</p>
-  <p>Nella cartella di questo file (PowerShell o terminale):</p>
+  <h2>Use http://localhost — not file://</h2>
+  <p>Browsers block Cesium <strong>Web Workers</strong> for pages opened as local files. You may see messages such as
+  «Refused to cross-origin redirects of the top-level worker script» and «file: URLs are treated as unique security origins»:
+  this is not your Ion token; it is the browser security model for the <code>file:</code> protocol.</p>
+  <p>In this file’s folder (PowerShell or terminal):</p>
   <pre>python -m http.server 8765</pre>
-  <p>Poi apri nel browser un URL del tipo <code>http://localhost:8765/cesium_odaiba.html</code> (nome file come sulla lista).</p>
+  <p>Then open in your browser a URL such as <code>http://localhost:8765/cesium_odaiba.html</code> (use your actual file name from the directory listing).</p>
 </div></div>
 <div id="cesiumContainer"></div>
 <div id="overlay">
@@ -531,32 +528,35 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
   <div id="stats"></div>
   <div id="progress"></div>
   <div id="vizSources" style="font-size:10px;color:#889;line-height:1.35;margin-top:8px;max-width:280px;">
-    <strong>Fonti diverse:</strong> LOS/NLOS in Python usa la mesh <strong>PLATEAU</strong> locale.
-    Qui sotto vedi satellitare + terreno + edifici <strong>OSM/Ion</strong> (approssimati): non coincidono al mm con PLATEAU.</div>
-  <button type="button" id="btnTogglePlaybackBar" class="playback-toggle" title="Mostra/nascondi slider e pulsanti">Nascondi controlli ▴</button>
+    <strong>Different sources:</strong> LOS/NLOS in Python uses the local <strong>PLATEAU</strong> mesh.
+    Below you see satellite imagery + terrain + <strong>OSM/Ion</strong> buildings (approximate): they will not match PLATEAU millimeter-for-millimeter.</div>
   <div id="playback">
     <div class="row">
-      <button type="button" id="btnPlayPause">Pausa</button>
-      <button type="button" id="btnPrev" title="Epoch precedente">◀ Indietro</button>
-      <button type="button" id="btnPrev10" title="Salta indietro di 10 epoch">◀ −10</button>
-      <button type="button" id="btnNext" title="Epoch successiva">Avanti ▶</button>
-      <button type="button" id="btnNext10" title="Salta avanti di 10 epoch">Avanti +10</button>
-    </div>
-    <div class="row" style="flex-wrap: wrap; align-items: center;">
-      <label for="speedMsRange">Intervallo</label>
-      <input type="range" id="speedMsRange" min="200" max="60000" step="50" value="1500" title="Ms tra epoch (slider fino a 60 s; nel campo numero fino a 300 s)" />
-      <input type="number" id="speedMsInput" min="100" max="300000" step="50" value="1500" title="Millisecondi (100–300000)" />
-      <span style="font-size:10px;color:#889;">ms</span>
+      <button type="button" id="btnPlayPause">Pause</button>
+      <button type="button" id="btnPrev" title="Previous epoch">◀ Back</button>
+      <button type="button" id="btnPrev10" title="Skip back 10 epochs">◀ −10</button>
+      <button type="button" id="btnNext" title="Next epoch">Next ▶</button>
+      <button type="button" id="btnNext10" title="Skip forward 10 epochs">Next +10</button>
+      <label>Speed <select id="speedSelect">
+        <option value="4000">Slow</option>
+        <option value="2500">Medium</option>
+        <option value="1500" selected>Normal</option>
+        <option value="800">Fast</option>
+      </select></label>
+      <label title="Keep the camera framed on the receiver each epoch (preserves your zoom once enabled)">
+        <input type="checkbox" id="chkFollowRx"/> Follow RX
+      </label>
     </div>
     <div class="row">
       <label for="epochSlider">Epoch</label>
       <input type="range" id="epochSlider" min="0" max="0" value="0" />
     </div>
     <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
-      In riproduzione: terreno approssimato e raggi senza etichette PRN (più fluido). In pausa o sullo slider: dettaglio pieno.
+      While playing: approximate terrain and rays without PRN labels (smoother). When paused or dragging the slider: full detail.
     </div>
   </div>
 </div>
+<button type="button" id="btnToggleOverlay" title="Hide the entire info panel">Hide panel</button>
 <script>
 (function () {{
   var CESIUM_BASE = 'https://cesium.com/downloads/cesiumjs/releases/1.124/Build/Cesium/';
@@ -621,6 +621,9 @@ let stepMs = 1500;
 const datasetGapMs = 2500;
 let playbackTimer = null;
 let terrainSnapGeneration = 0;
+let followRxCam = false;
+let lastFollowRxCartesian = null;
+const followRxDeltaScratch = new Cesium.Cartesian3();
 
 function clearPlaybackTimer() {{
   if (playbackTimer !== null) {{
@@ -646,7 +649,7 @@ function paintFrame() {{
 }}
 
 function setPlayPauseUi() {{
-  document.getElementById('btnPlayPause').textContent = playing ? 'Pausa' : 'Play';
+  document.getElementById('btnPlayPause').textContent = playing ? 'Pause' : 'Play';
 }}
 
 function stepForwardCore() {{
@@ -665,6 +668,7 @@ function stepForwardCore() {{
       orientation: {{ heading: Cesium.Math.toRadians(20), pitch: Cesium.Math.toRadians(-38), roll: 0 }},
       duration: 2,
     }});
+    lastFollowRxCartesian = null;
     return datasetGapMs;
   }}
 
@@ -689,6 +693,7 @@ function stepBackwardCore() {{
       orientation: {{ heading: Cesium.Math.toRadians(20), pitch: Cesium.Math.toRadians(-38), roll: 0 }},
       duration: 2,
     }});
+    lastFollowRxCartesian = null;
     return datasetGapMs;
   }}
 
@@ -843,6 +848,7 @@ function showEpoch(ds, epochIdx) {{
     }}
 
     updateEpochOverlay(ds, epoch, epochIdx);
+    applyFollowRxCameraIfEnabled(lon, lat, rxH);
     viewer.scene.requestRender();
   }}
 
@@ -904,6 +910,19 @@ function frameCameraOnRx(rx) {{
   );
 }}
 
+function applyFollowRxCameraIfEnabled(lonDeg, latDeg, heightM) {{
+  if (!followRxCam) return;
+  viewer.camera.cancelFlight();
+  const newCenter = Cesium.Cartesian3.fromDegrees(lonDeg, latDeg, heightM);
+  if (!lastFollowRxCartesian) {{
+    lastFollowRxCartesian = Cesium.Cartesian3.clone(newCenter);
+    return;
+  }}
+  Cesium.Cartesian3.subtract(newCenter, lastFollowRxCartesian, followRxDeltaScratch);
+  Cesium.Cartesian3.add(viewer.camera.positionWC, followRxDeltaScratch, viewer.camera.positionWC);
+  Cesium.Cartesian3.clone(newCenter, lastFollowRxCartesian);
+}}
+
 drawTrajectory(datasets[0]);
 frameCameraOnRx(datasets[0].epochs[0].rx);
 displayedEpochIndex = 0;
@@ -960,38 +979,27 @@ document.getElementById('btnPrev10').addEventListener('click', () => {{
   }}
 }});
 
-function clampSpeedMs(v) {{
-  const n = parseInt(v, 10);
-  if (!Number.isFinite(n)) return 1500;
-  return Math.min(300000, Math.max(100, n));
-}}
+document.getElementById('speedSelect').addEventListener('change', (e) => {{
+  stepMs = parseInt(e.target.value, 10);
+}});
 
-function applySpeedMs(ms) {{
-  stepMs = clampSpeedMs(ms);
-  const rng = document.getElementById('speedMsRange');
-  const inp = document.getElementById('speedMsInput');
-  if (inp) inp.value = String(stepMs);
-  if (rng) {{
-    const lo = parseInt(rng.min, 10);
-    const hi = parseInt(rng.max, 10);
-    rng.value = String(Math.min(hi, Math.max(lo, stepMs)));
+document.getElementById('chkFollowRx').addEventListener('change', (e) => {{
+  followRxCam = e.target.checked;
+  if (!followRxCam) {{
+    lastFollowRxCartesian = null;
   }}
-}}
-
-document.getElementById('speedMsRange').addEventListener('input', (e) => {{
-  applySpeedMs(e.target.value);
-}});
-document.getElementById('speedMsInput').addEventListener('change', (e) => {{
-  applySpeedMs(e.target.value);
+  if (followRxCam) {{
+    paintFrame();
+  }}
 }});
 
-let playbackBarVisible = true;
-document.getElementById('btnTogglePlaybackBar').addEventListener('click', () => {{
-  playbackBarVisible = !playbackBarVisible;
-  const pb = document.getElementById('playback');
-  const btn = document.getElementById('btnTogglePlaybackBar');
-  pb.style.display = playbackBarVisible ? '' : 'none';
-  btn.textContent = playbackBarVisible ? 'Nascondi controlli ▴' : 'Mostra controlli ▾';
+let overlayPanelVisible = true;
+document.getElementById('btnToggleOverlay').addEventListener('click', () => {{
+  overlayPanelVisible = !overlayPanelVisible;
+  const ov = document.getElementById('overlay');
+  const btn = document.getElementById('btnToggleOverlay');
+  ov.style.display = overlayPanelVisible ? '' : 'none';
+  btn.textContent = overlayPanelVisible ? 'Hide panel' : 'Show panel';
 }});
 
 document.getElementById('epochSlider').addEventListener('input', (e) => {{
@@ -1020,7 +1028,7 @@ if (playing) {{
   scr.onload = function () {{ runApp(); }};
   scr.onerror = function () {{
     var inner = document.querySelector('#fileProtocolWarn .inner');
-    if (inner) inner.innerHTML = '<p>Impossibile caricare Cesium dal CDN (rete o firewall).</p>';
+    if (inner) inner.innerHTML = '<p>Unable to load Cesium from the CDN (network or firewall).</p>';
     showFileWarn();
   }};
   document.head.appendChild(scr);

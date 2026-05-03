@@ -17,6 +17,7 @@ import math
 import numpy as np
 
 from gnss_gpu.signal_sim import GNSS_GPS, SignalSimulator, prn_label_to_system
+from gnss_gpu.wgs84 import WGS84_FIRST_ECCENTRICITY_SQ, WGS84_SEMI_MAJOR_AXIS_M
 
 
 def _signal_sim_system_prn(prn_entry) -> tuple[int, int] | None:
@@ -29,7 +30,7 @@ def _signal_sim_system_prn(prn_entry) -> tuple[int, int] | None:
     return GNSS_GPS, int(prn_entry)
 
 
-C_LIGHT = 299792458.0
+C_LIGHT = 299792458.0  # exact m/s (SI definition of the metre via c)
 GPS_L1_FREQ = 1575.42e6
 GPS_L1_WAVELENGTH = C_LIGHT / GPS_L1_FREQ
 CA_CHIP_RATE = 1.023e6
@@ -37,9 +38,8 @@ CA_CHIP_RATE = 1.023e6
 
 def ecef_to_lla(x, y, z):
     """Convert ECEF to geodetic (lat, lon, alt) in radians and meters."""
-    a = 6378137.0
-    f = 1.0 / 298.257223563
-    e2 = 2 * f - f * f
+    a = WGS84_SEMI_MAJOR_AXIS_M
+    e2 = WGS84_FIRST_ECCENTRICITY_SQ
     lon = math.atan2(y, x)
     p = math.sqrt(x * x + y * y)
     lat = math.atan2(z, p * (1 - e2))

@@ -53,6 +53,18 @@ class NavMessage:
     sv_health: float = 0.0
     fit_interval: float = 0.0
     toc_seconds: float = 0.0  # toc as GPS seconds of week
+    # GLONASS broadcast (PZ-90): position / velocity / acceleration at ``toe`` [m], [m/s], [m/s²]
+    glo_px_m: float = 0.0
+    glo_py_m: float = 0.0
+    glo_pz_m: float = 0.0
+    glo_vx_m_s: float = 0.0
+    glo_vy_m_s: float = 0.0
+    glo_vz_m_s: float = 0.0
+    glo_ax_m_s2: float = 0.0
+    glo_ay_m_s2: float = 0.0
+    glo_az_m_s2: float = 0.0
+    glo_tau_n: float = 0.0  # SV clock bias τ_n [s] (RTKLIB taun)
+    glo_gamma_n: float = 0.0  # relative frequency offset γ_n [–]
 
     @property
     def sat_id(self) -> str:
@@ -174,7 +186,7 @@ def read_nav_rinex(
 
         try:
             if is_v3:
-                nav, consumed = _parse_v3_record(lines, idx, systems_set)
+                nav, consumed = _parse_v3_nav_record(lines, idx, systems_set)
             else:
                 nav, consumed = _parse_v2_record(lines, idx)
         except (ValueError, IndexError):
@@ -207,6 +219,96 @@ def _v3_record_length(sys_char: str) -> int:
     if sys_char in {"R", "S"}:
         return 4
     return 8
+
+
+def _parse_v3_nav_record(
+    lines: list[str], idx: int, systems_set: set[str]
+) -> tuple[NavMessage | None, int]:
+    """Dispatch RINEX 3 navigation record by constellation."""
+    if idx >= len(lines):
+        return None, 1
+    line0 = lines[idx]
+    sys_char = line0[0] if line0 and line0[0] != " " else "G"
+    if sys_char == "R":
+        return _parse_v3_glonass_record(lines, idx, systems_set)
+    # SBAS uses a short record; not modeled here — skip without mis-parsing as GPS.
+    if sys_char == "S":
+        return None, _v3_record_length("S")
+    return _parse_v3_record(lines, idx, systems_set)
+
+
+def _parse_v4_float_block(lines: list[str], idx: int, start_line: int, n_lines: int) -> list[float]:
+    vals: list[float] = []
+    for i in range(start_line, start_line + n_lines):
+        ln = lines[idx + i] if idx + i < len(lines) else ""
+        for j in range(4):
+            start = 4 + j * 19
+            end = start + 19
+            vals.append(_parse_nav_float(ln[start:end] if end <= len(ln) else ""))
+    return vals
+
+
+def _parse_v3_glonass_record(
+    lines: list[str], idx: int, systems_set: set[str]
+) -> tuple[NavMessage | None, int]:
+    """Parse RINEX 3 GLONASS navigation record (4 lines including header)."""
+    if idx >= len(lines):
+        return None, 1
+    line0 = lines[idx]
+    sys_char = line0[0] if line0 and line0[0] != " " else "G"
+    consumed = 4
+    if idx + consumed - 1 >= len(lines):
+        return None, 1
+    if sys_char not in systems_set:
+        return None, consumed
+
+    prn_str = line0[1:3].strip()
+    if not prn_str:
+        return None, consumed
+    prn = int(prn_str)
+
+    year = int(line0[4:8])
+    month = int(line0[9:11])
+    day = int(line0[12:14])
+    hour = int(line0[15:17])
+    minute = int(line0[18:20])
+    sec = int(float(line0[21:23]))
+    toc = datetime(year, month, day, hour, minute, sec)
+
+    tau_n = _parse_nav_float(line0[23:42])
+    gamma_n = _parse_nav_float(line0[42:61])
+    _parse_nav_float(line0[61:80])  # message frame time — unused here
+
+    orbit = _parse_v4_float_block(lines, idx, 1, 3)
+    # km, km/s, km/s² -> SI (RINEX 3.x Table A12)
+    px_km, vx_km_s, ax_km_s2, _health_x = orbit[0], orbit[1], orbit[2], orbit[3]
+    py_km, vy_km_s, ay_km_s2, _hy = orbit[4], orbit[5], orbit[6], orbit[7]
+    pz_km, vz_km_s, az_km_s2, _hz = orbit[8], orbit[9], orbit[10], orbit[11]
+
+    toe_sow = _datetime_to_gps_seconds_of_week(toc)
+    nav = NavMessage(
+        prn=prn,
+        toc=toc,
+        system="R",
+        af0=tau_n,
+        af1=gamma_n,
+        af2=0.0,
+        toe=toe_sow,
+        week=_datetime_to_gps_week(toc),
+        toc_seconds=toe_sow,
+        glo_px_m=px_km * 1000.0,
+        glo_py_m=py_km * 1000.0,
+        glo_pz_m=pz_km * 1000.0,
+        glo_vx_m_s=vx_km_s * 1000.0,
+        glo_vy_m_s=vy_km_s * 1000.0,
+        glo_vz_m_s=vz_km_s * 1000.0,
+        glo_ax_m_s2=ax_km_s2 * 1000.0,
+        glo_ay_m_s2=ay_km_s2 * 1000.0,
+        glo_az_m_s2=az_km_s2 * 1000.0,
+        glo_tau_n=tau_n,
+        glo_gamma_n=gamma_n,
+    )
+    return nav, consumed
 
 
 def _parse_v3_record(

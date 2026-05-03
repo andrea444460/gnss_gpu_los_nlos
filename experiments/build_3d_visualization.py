@@ -15,7 +15,7 @@ The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
 By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
-``--epoch-min-interval-s`` (default 1 s) caps how fast consecutive **viz** epochs advance in GPS time; the script still targets ``--n-epochs`` samples by spreading picks along the run (use smaller ``--traj-step`` if you need more rows than subsampled).
+Optional ``--epoch-min-interval-s`` > 0 enforces a minimum GPS-time gap between consecutive viz epochs; default is off (evenly spaced trajectory rows).
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
 When the compiled BVH module exposes ``check_los_batch``, LOS intersection uses one CUDA launch per ephemeris chunk instead of per-epoch ``UrbanSignalSimulator.compute_epoch`` ray tests.
 The HTML viewer
@@ -223,7 +223,7 @@ def compute_all_epochs(
     nav_path: Optional[str] = None,
     elevation_mask_deg: float = 10.0,
     eph_batch_chunk: int = 64,
-    epoch_min_interval_s: float = 1.0,
+    epoch_min_interval_s: float = 0.0,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -240,11 +240,9 @@ def compute_all_epochs(
     when available (same CUDA extension as single-ray LOS); otherwise
     :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator` per epoch.
 
-    ``epoch_min_interval_s`` (default 1 s) is the minimum GPS-time gap between **consecutive**
-    visualization epochs. The run still **targets** ``n_epochs`` samples by spreading picks along
-    the trajectory (uniform subsample of a maximal 1/interval ladder). You only get fewer epochs
-    if the trajectory span or ``step`` subsampling yields fewer spaced slots than requested (see
-    WARNING). Use ``0`` for evenly spaced row indices ignoring Δt.
+    ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
+    (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
+    **row index** after ``step`` (same as legacy ``np.linspace``).
     """
     print(f"[{area_name}] Loading PLATEAU...")
     loader = PlateauLoader(zone=int(plateau_zone))
@@ -970,10 +968,9 @@ def main(argv=None):
     parser.add_argument(
         "--epoch-min-interval-s",
         type=float,
-        default=1.0,
-        help="Minimum GPS-time spacing [s] between consecutive viz epochs (default 1 s). "
-        "Still targets --n-epochs by spreading along the run; 0 = ignore Δt (row linspace only). "
-        "Need enough traj rows / duration or fewer epochs are used (WARNING).",
+        default=0.0,
+        help="If > 0, minimum GPS Δt [s] between consecutive viz epochs (spread along run). "
+        "Default 0: evenly spaced row indices (legacy).",
     )
     parser.add_argument("--traj-step", type=int, default=300, help="Sample every N rows from reference.csv")
     parser.add_argument(
@@ -1009,7 +1006,7 @@ def main(argv=None):
     nav_opt = args.nav.strip() if getattr(args, "nav", "") else ""
     el_mask = float(getattr(args, "elevation_mask_deg", 10.0))
     eph_chunk = int(getattr(args, "eph_batch_chunk", 64))
-    epoch_gap_s = float(getattr(args, "epoch_min_interval_s", 1.0))
+    epoch_gap_s = float(getattr(args, "epoch_min_interval_s", 0.0))
 
     if args.legacy:
         p = _default_legacy_paths()

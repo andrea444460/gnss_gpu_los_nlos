@@ -14,7 +14,7 @@ The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 ``--nav``; constellation blocks **G/R/E/J/C/I** from that file are parsed (SBAS omitted).
 LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
-By default there is **no elevation mask** (``--elevation-mask-deg -90``).
+By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
 The HTML viewer
 uses **Cesium Ion imagery + World Terrain + OSM Buildings** for context only:
@@ -108,10 +108,13 @@ def compute_all_epochs(
     step=200,
     plateau_zone=9,
     nav_path: Optional[str] = None,
-    elevation_mask_deg: float = -90.0,
+    elevation_mask_deg: float = 10.0,
     eph_batch_chunk: int = 64,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
+
+    ``elevation_mask_deg`` is passed to :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator`
+    (default 10°; only satellites at or above that elevation get rays and LOS counts).
 
     Satellite positions use :meth:`~gnss_gpu.ephemeris.Ephemeris.compute_batch`
     in windows of ``eph_batch_chunk`` epochs (default 64). Batch keeps only PRNs
@@ -136,6 +139,7 @@ def compute_all_epochs(
     eph = Ephemeris(nav_messages)
     prn_catalog = eph.available_prns
     print(f"  Satellites in NAV: {len(prn_catalog)}")
+    print(f"  Elevation mask: {elevation_mask_deg:g}° above horizon")
 
     usim = UrbanSignalSimulator(
         building_model=bvh,
@@ -766,8 +770,8 @@ def main(argv=None):
     parser.add_argument(
         "--elevation-mask-deg",
         type=float,
-        default=-90.0,
-        help="Minimum elevation [deg] for including satellites (-90 ≈ no mask; typical receivers use ~5–10)",
+        default=10.0,
+        help="Minimum elevation [deg] for rays and LOS stats (default 10; 0 = horizon; -90 disables mask)",
     )
     parser.add_argument(
         "--eph-batch-chunk",
@@ -788,7 +792,7 @@ def main(argv=None):
 
     tok = args.cesium_ion_token.strip() if args.cesium_ion_token else ""
     nav_opt = args.nav.strip() if getattr(args, "nav", "") else ""
-    el_mask = float(getattr(args, "elevation_mask_deg", -90.0))
+    el_mask = float(getattr(args, "elevation_mask_deg", 10.0))
     eph_chunk = int(getattr(args, "eph_batch_chunk", 64))
 
     if args.legacy:

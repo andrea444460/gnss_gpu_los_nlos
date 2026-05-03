@@ -95,13 +95,16 @@ def load_trajectory(csv_path, step=200):
 
 
 def trajectory_row_stride(step_arg: float) -> int:
-    """Convert ``--traj-step`` to an integer row stride (minimum every row).
+    """Convert ``--traj-step`` to an integer CSV row stride (minimum every row).
 
-    Non-integers are rounded (e.g. ``0.5`` → stride ``1``). Values ≤ 0 are invalid.
+    ``0`` (or ``0.0``) means **no downsampling** — same as stride ``1`` (every row).
+    Other values are rounded to an integer; stride is always at least ``1``.
     """
     x = float(step_arg)
-    if x <= 0:
-        raise ValueError("--traj-step must be positive")
+    if x < 0:
+        raise ValueError("--traj-step must be >= 0 (0 = use every CSV row)")
+    if x == 0:
+        return 1
     return max(1, int(round(x)))
 
 
@@ -498,6 +501,17 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     background: #252a38; color: #eee; border: 1px solid #556;
     border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 11px;
   }}
+  #playback input[type="number"] {{
+    background: #252a38; color: #eee; border: 1px solid #556;
+    border-radius: 4px; padding: 4px 6px; font-family: monospace; font-size: 11px;
+    width: 4.5rem;
+  }}
+  .playback-toggle {{
+    margin-top: 8px; cursor: pointer; font-family: monospace; font-size: 11px;
+    padding: 4px 10px; border-radius: 6px; border: 1px solid #556;
+    background: #1e2433; color: #aab;
+  }}
+  .playback-toggle:hover {{ background: #2a3142; color: #eee; }}
 </style>
 </head>
 <body>
@@ -519,18 +533,20 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
   <div id="vizSources" style="font-size:10px;color:#889;line-height:1.35;margin-top:8px;max-width:280px;">
     <strong>Fonti diverse:</strong> LOS/NLOS in Python usa la mesh <strong>PLATEAU</strong> locale.
     Qui sotto vedi satellitare + terreno + edifici <strong>OSM/Ion</strong> (approssimati): non coincidono al mm con PLATEAU.</div>
+  <button type="button" id="btnTogglePlaybackBar" class="playback-toggle" title="Mostra/nascondi slider e pulsanti">Nascondi controlli ▴</button>
   <div id="playback">
     <div class="row">
       <button type="button" id="btnPlayPause">Pausa</button>
       <button type="button" id="btnPrev" title="Epoch precedente">◀ Indietro</button>
+      <button type="button" id="btnPrev10" title="Salta indietro di 10 epoch">◀ −10</button>
       <button type="button" id="btnNext" title="Epoch successiva">Avanti ▶</button>
       <button type="button" id="btnNext10" title="Salta avanti di 10 epoch">Avanti +10</button>
-      <label>Velocità <select id="speedSelect">
-        <option value="4000">Lenta</option>
-        <option value="2500">Media</option>
-        <option value="1500" selected>Normale</option>
-        <option value="800">Veloce</option>
-      </select></label>
+    </div>
+    <div class="row" style="flex-wrap: wrap; align-items: center;">
+      <label for="speedMsRange">Intervallo</label>
+      <input type="range" id="speedMsRange" min="200" max="60000" step="50" value="1500" title="Ms tra epoch (slider fino a 60 s; nel campo numero fino a 300 s)" />
+      <input type="number" id="speedMsInput" min="100" max="300000" step="50" value="1500" title="Millisecondi (100–300000)" />
+      <span style="font-size:10px;color:#889;">ms</span>
     </div>
     <div class="row">
       <label for="epochSlider">Epoch</label>
@@ -656,13 +672,7 @@ function stepForwardCore() {{
   return stepMs;
 }}
 
-function goNextEpoch() {{
-  const wait = stepForwardCore();
-  paintFrame();
-  return wait;
-}}
-
-function goPrevEpoch() {{
+function stepBackwardCore() {{
   const ds = datasets[currentDataset];
   const n = ds.epochs.length;
 
@@ -679,11 +689,21 @@ function goPrevEpoch() {{
       orientation: {{ heading: Cesium.Math.toRadians(20), pitch: Cesium.Math.toRadians(-38), roll: 0 }},
       duration: 2,
     }});
-    paintFrame();
-    return;
+    return datasetGapMs;
   }}
 
   displayedEpochIndex = (displayedEpochIndex - 1 + n) % n;
+  return stepMs;
+}}
+
+function goNextEpoch() {{
+  const wait = stepForwardCore();
+  paintFrame();
+  return wait;
+}}
+
+function goPrevEpoch() {{
+  stepBackwardCore();
   paintFrame();
 }}
 
@@ -929,8 +949,49 @@ document.getElementById('btnPrev').addEventListener('click', () => {{
   }}
 }});
 
-document.getElementById('speedSelect').addEventListener('change', (e) => {{
-  stepMs = parseInt(e.target.value, 10);
+document.getElementById('btnPrev10').addEventListener('click', () => {{
+  clearPlaybackTimer();
+  for (let k = 0; k < 10; k++) {{
+    stepBackwardCore();
+  }}
+  paintFrame();
+  if (playing) {{
+    playbackTimer = setTimeout(tickPlayback, stepMs);
+  }}
+}});
+
+function clampSpeedMs(v) {{
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return 1500;
+  return Math.min(300000, Math.max(100, n));
+}}
+
+function applySpeedMs(ms) {{
+  stepMs = clampSpeedMs(ms);
+  const rng = document.getElementById('speedMsRange');
+  const inp = document.getElementById('speedMsInput');
+  if (inp) inp.value = String(stepMs);
+  if (rng) {{
+    const lo = parseInt(rng.min, 10);
+    const hi = parseInt(rng.max, 10);
+    rng.value = String(Math.min(hi, Math.max(lo, stepMs)));
+  }}
+}}
+
+document.getElementById('speedMsRange').addEventListener('input', (e) => {{
+  applySpeedMs(e.target.value);
+}});
+document.getElementById('speedMsInput').addEventListener('change', (e) => {{
+  applySpeedMs(e.target.value);
+}});
+
+let playbackBarVisible = true;
+document.getElementById('btnTogglePlaybackBar').addEventListener('click', () => {{
+  playbackBarVisible = !playbackBarVisible;
+  const pb = document.getElementById('playback');
+  const btn = document.getElementById('btnTogglePlaybackBar');
+  pb.style.display = playbackBarVisible ? '' : 'none';
+  btn.textContent = playbackBarVisible ? 'Nascondi controlli ▴' : 'Mostra controlli ▾';
 }});
 
 document.getElementById('epochSlider').addEventListener('input', (e) => {{
@@ -1052,7 +1113,12 @@ def main(argv=None):
         help="If > 0, minimum GPS Δt [s] between consecutive viz epochs (spread along run). "
         "Default 0: evenly spaced row indices (legacy).",
     )
-    parser.add_argument("--traj-step", type=int, default=300, help="Sample every N rows from reference.csv")
+    parser.add_argument(
+        "--traj-step",
+        type=float,
+        default=300.0,
+        help="CSV row stride (≥0). 0 = every row (same as 1); default 300. Non-integers rounded.",
+    )
     parser.add_argument(
         "--nav",
         type=str,

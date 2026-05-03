@@ -9,6 +9,11 @@ Creates a standalone HTML file using CesiumJS (free tier) that shows:
 
 Then uses Playwright to record a video of the visualization.
 
+Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
+(``*_plateau.glb``) and the viewer loads it with ``eastNorthUpToFixedFrame`` at the trajectory
+centroid so rays and buildings share the same geometry. Use ``--plateau-glb-radius-m`` /
+``--plateau-glb-max-tris`` to control size. Serve the folder over HTTP so both HTML and GLB load.
+
 The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 **broadcast RINEX navigation** file next to the trajectory (``base.nav``) or
 ``--nav``; constellation blocks **G/R/E/J/C/I** from that file are parsed (SBAS omitted).
@@ -57,6 +62,7 @@ import numpy as np
 from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.plateau import PlateauLoader
+from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
@@ -443,12 +449,23 @@ def compute_all_epochs(
         lat, lon, alt = ecef_to_lla(*p)
         traj.append([math.degrees(lat), math.degrees(lon), alt + 1])
 
-    return {"epochs": epochs_data, "trajectory": traj, "area": area_name}
+    pivot_ecef = np.mean(positions, axis=0).tolist()
+
+    return {
+        "epochs": epochs_data,
+        "trajectory": traj,
+        "area": area_name,
+        "pivot_ecef": pivot_ecef,
+        "plateauModel": None,
+    }
 
 
 def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None):
     """Generate standalone HTML with CesiumJS visualization."""
-    data_json = json.dumps(datasets)
+    export_sets = []
+    for ds in datasets:
+        export_sets.append({k: v for k, v in ds.items() if k != "pivot_ecef"})
+    data_json = json.dumps(export_sets)
     tok = (cesium_ion_token or os.environ.get("CESIUM_ION_TOKEN", "") or "").strip()
     token_script = ""
     if tok:
@@ -591,7 +608,10 @@ viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a5270');
 viewer.scene.globe.showGroundAtmosphere = true;
 viewer.scene.globe.enableLighting = false;
 
+let osmBuildingsTileset = null;
 if (ionToken) {{
+  const osmRow = document.getElementById('osmToggleRow');
+  if (osmRow) osmRow.style.display = 'flex';
   try {{
     viewer.clock.shouldAnimate = false;
     viewer.clock.currentTime = Cesium.JulianDate.fromIso8601('2024-06-15T03:30:00Z');
@@ -604,13 +624,40 @@ if (ionToken) {{
     console.warn('World terrain failed:', e);
   }}
   Cesium.createOsmBuildingsAsync()
-    .then(tileset => {{ viewer.scene.primitives.add(tileset); }})
+    .then(tileset => {{
+      osmBuildingsTileset = tileset;
+      viewer.scene.primitives.add(tileset);
+      const chk = document.getElementById('chkHideOsm');
+      if (chk && chk.checked) tileset.show = false;
+    }})
     .catch(e => console.warn('OSM Buildings (check Ion token assets):', e));
 }} else {{
   console.warn('No CESIUM_ION_TOKEN — terrain/buildings disabled. Open via http://localhost if Ion fails on file://');
 }}
 
 const datasets = {data_json};
+const plateauSpec = datasets[0] && datasets[0].plateauModel;
+if (plateauSpec && plateauSpec.url) {{
+  const vs = document.getElementById('vizSources');
+  if (vs) {{
+    vs.innerHTML += '<br/><strong>PLATEAU GLB:</strong> Same mesh family as LOS/NLOS — hide OSM buildings to compare.';
+  }}
+  const origin = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
+  const fixMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
+  const glbUrl = new URL(plateauSpec.url, window.location.href).href;
+  Cesium.Model.fromGltfAsync({{
+    url: glbUrl,
+    modelMatrix: fixMatrix,
+  }})
+    .then(model => {{
+      viewer.scene.primitives.add(model);
+    }})
+    .catch(e => console.warn('PLATEAU GLB load failed (use http://localhost; GLB next to HTML):', e));
+}}
+
+document.getElementById('chkHideOsm').addEventListener('change', (e) => {{
+  if (osmBuildingsTileset) osmBuildingsTileset.show = !e.target.checked;
+}});
 let currentDataset = 0;
 let displayedEpochIndex = 0;
 let rxEntityRef = null;
@@ -1090,6 +1137,39 @@ const {{ chromium }} = require('playwright');
         print("Video recording failed — HTML file can still be opened in a browser")
 
 
+def _export_plateau_glb_sidecar(
+    ds: dict,
+    plateau_dir: str,
+    plateau_zone: int,
+    out_html: str,
+    *,
+    radius_m: float,
+    max_triangles: int,
+    glb_out_explicit: str,
+) -> None:
+    """Populate ``ds[\"plateauModel\"]`` and write ``*_plateau.glb`` next to HTML."""
+    pivot = np.asarray(ds["pivot_ecef"], dtype=np.float64).reshape(3)
+    loader = PlateauLoader(zone=int(plateau_zone))
+    building = loader.load_directory(plateau_dir)
+    base = os.path.splitext(os.path.abspath(out_html))[0]
+    glb_path = glb_out_explicit.strip() or (base + "_plateau.glb")
+    n_kept, n_tot = export_plateau_roi_glb(
+        building.triangles,
+        pivot,
+        glb_path,
+        radius_m=float(radius_m),
+        max_triangles=int(max_triangles),
+    )
+    lat, lon, h = ecef_to_lla(float(pivot[0]), float(pivot[1]), float(pivot[2]))
+    ds["plateauModel"] = {
+        "url": os.path.basename(glb_path),
+        "lat": math.degrees(lat),
+        "lon": math.degrees(lon),
+        "height": float(h),
+    }
+    print(f"PLATEAU GLB: {glb_path} ({n_kept} / {n_tot} triangles in ROI)")
+
+
 def _default_legacy_paths():
     root = os.path.join(os.path.dirname(__file__), "..")
     return {
@@ -1148,6 +1228,29 @@ def main(argv=None):
     )
     parser.add_argument("--out-html", type=str, default="cesium_los_nlos.html", help="Output HTML path")
     parser.add_argument(
+        "--export-plateau-glb",
+        action="store_true",
+        help="Write ROI-filtered PLATEAU mesh as GLB beside HTML and load it in Cesium (needs http://)",
+    )
+    parser.add_argument(
+        "--plateau-glb-radius-m",
+        type=float,
+        default=650.0,
+        help="Include triangles whose centroid is within this distance [m] of trajectory centroid (default 650)",
+    )
+    parser.add_argument(
+        "--plateau-glb-max-tris",
+        type=int,
+        default=150_000,
+        help="Maximum triangles in GLB after ROI filter (default 150000)",
+    )
+    parser.add_argument(
+        "--plateau-glb-out",
+        type=str,
+        default="",
+        help="Explicit output path for GLB (default: <out-html>_plateau.glb)",
+    )
+    parser.add_argument(
         "--cesium-ion-token",
         type=str,
         default=os.environ.get("CESIUM_ION_TOKEN", ""),
@@ -1195,6 +1298,8 @@ def main(argv=None):
             epoch_min_interval_s=epoch_gap_s,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
+        if getattr(args, "export_plateau_glb", False):
+            print("Note: --export-plateau-glb is ignored with --legacy (two areas); run without --legacy per scene.")
         generate_html([shinjuku, odaiba], html_path, cesium_ion_token=tok or None)
         print(f"HTML: {html_path}")
         if args.record_video:
@@ -1226,6 +1331,20 @@ def main(argv=None):
     _out_dir = os.path.dirname(out_html)
     if _out_dir:
         os.makedirs(_out_dir, exist_ok=True)
+    if getattr(args, "export_plateau_glb", False):
+        try:
+            _export_plateau_glb_sidecar(
+                ds,
+                args.plateau_dir,
+                args.plateau_zone,
+                out_html,
+                radius_m=float(getattr(args, "plateau_glb_radius_m", 650.0)),
+                max_triangles=int(getattr(args, "plateau_glb_max_tris", 150_000)),
+                glb_out_explicit=str(getattr(args, "plateau_glb_out", "") or ""),
+            )
+        except Exception as e:
+            print(f"PLATEAU GLB export failed: {e}")
+            ds["plateauModel"] = None
     generate_html([ds], out_html, cesium_ion_token=tok or None)
     print(f"HTML: {out_html}")
     if not tok:

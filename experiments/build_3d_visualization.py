@@ -16,6 +16,7 @@ LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
 By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
+When the compiled BVH module exposes ``check_los_batch``, LOS intersection uses one CUDA launch per ephemeris chunk instead of per-epoch ``UrbanSignalSimulator.compute_epoch`` ray tests.
 The HTML viewer
 uses **Cesium Ion imagery + World Terrain + OSM Buildings** for context only:
 those layers are **not** the same geometry as PLATEAU, so footprints/heights can
@@ -52,7 +53,11 @@ from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.bvh import BVHAccelerator
-from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, ecef_to_lla
+from gnss_gpu.urban_signal_sim import (
+    UrbanSignalSimulator,
+    _sat_elevation_azimuth,
+    ecef_to_lla,
+)
 
 # RINEX 3 navigation systems retained for this viewer (SBAS ``S`` excluded for now).
 RINEX_NAV_SYSTEMS_VIZ = ("G", "R", "E", "J", "C", "I")
@@ -121,6 +126,10 @@ def compute_all_epochs(
     with a valid ephemeris block for *every* epoch in that window; smaller windows
     preserve more satellites on long runs. Set ``eph_batch_chunk`` to 0 for one
     batch over the whole timeline (fastest, strictest PRN intersection).
+
+    LOS rays against PLATEAU use :meth:`~gnss_gpu.bvh.BVHAccelerator.check_los_batch`
+    when available (same CUDA extension as single-ray LOS); otherwise
+    :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator` per epoch.
     """
     print(f"[{area_name}] Loading PLATEAU...")
     loader = PlateauLoader(zone=int(plateau_zone))
@@ -129,6 +138,8 @@ def compute_all_epochs(
 
     print(f"[{area_name}] Building BVH...")
     bvh = BVHAccelerator.from_building_model(building)
+    has_bvh_los_batch = hasattr(bvh, "check_los_batch")
+    print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
     positions, times = load_trajectory(traj_csv, step=step)
     indices = np.linspace(0, len(positions) - 1, n_epochs, dtype=int)
@@ -169,9 +180,30 @@ def compute_all_epochs(
 
         if n_sat_chunk == 0:
             sat_rows = None
+            clk_rows = None
         else:
             sat_rows = sat_b
             clk_rows = clk_b
+
+        los_batch = None
+        el_batch = None
+        visible_batch = None
+        if (
+            sat_rows is not None
+            and has_bvh_los_batch
+            and len(chunk_idx) > 0
+        ):
+            rx_blk = np.ascontiguousarray(positions[chunk_idx], dtype=np.float64)
+            sat_blk = np.ascontiguousarray(sat_rows, dtype=np.float64)
+            n_b = sat_blk.shape[0]
+            n_sat_blk = sat_blk.shape[1]
+            el_batch = np.zeros((n_b, n_sat_blk), dtype=np.float64)
+            for i in range(n_b):
+                el_batch[i], _ = _sat_elevation_azimuth(rx_blk[i], sat_blk[i])
+            visible_batch = el_batch >= usim.elevation_mask_rad
+            sat_work = sat_blk.copy()
+            sat_work[~visible_batch] = np.nan
+            los_batch = np.asarray(bvh.check_los_batch(rx_blk, sat_work), dtype=bool)
 
         for local_i, ei in enumerate(chunk_idx):
             fi += 1
@@ -201,23 +233,38 @@ def compute_all_epochs(
                     print(f"  [{fi}/{len(idx_list)}] t={t:.0f}s — no ephemeris at this TOW")
                 continue
 
-            result = usim.compute_epoch(
-                rx_ecef=rx,
-                sat_ecef=sat_ecef,
-                sat_clk=sat_clk,
-                prn_list=used_prns_i,
-            )
+            if los_batch is not None:
+                visible = visible_batch[local_i]
+                el = el_batch[local_i]
+                is_los = np.ones(n_sat, dtype=bool)
+                vis_idx = np.where(visible)[0]
+                if len(vis_idx) > 0:
+                    is_los[vis_idx] = los_batch[local_i, vis_idx]
+                n_los_ep = int(np.sum(is_los & visible))
+                n_nlos_ep = int(np.sum(~is_los & visible))
+            else:
+                result = usim.compute_epoch(
+                    rx_ecef=rx,
+                    sat_ecef=sat_ecef,
+                    sat_clk=sat_clk,
+                    prn_list=used_prns_i,
+                )
+                visible = result["visible"]
+                el = result["elevations"]
+                is_los = result["is_los"]
+                n_los_ep = int(result["n_los"])
+                n_nlos_ep = int(result["n_nlos"])
 
             lat, lon, alt = ecef_to_lla(*rx)
             epoch = {
                 "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
                 "rays": [],
-                "n_los": result["n_los"],
-                "n_nlos": result["n_nlos"],
+                "n_los": n_los_ep,
+                "n_nlos": n_nlos_ep,
                 "t": t,
             }
             for i in range(n_sat):
-                if not result["visible"][i]:
+                if not visible[i]:
                     continue
                 direction = sat_ecef[i] - rx
                 dist = np.linalg.norm(direction)
@@ -225,15 +272,15 @@ def compute_all_epochs(
                 re_lat, re_lon, re_alt = ecef_to_lla(*ray_end)
                 epoch["rays"].append({
                     "prn": _sat_display_id(used_prns_i[i]),
-                    "los": bool(result["is_los"][i]),
-                    "el": float(np.degrees(result["elevations"][i])),
+                    "los": bool(is_los[i]),
+                    "el": float(np.degrees(el[i])),
                     "end": [math.degrees(re_lat), math.degrees(re_lon), re_alt],
                 })
             epochs_data.append(epoch)
             if fi % log_every == 0 or fi == len(idx_list):
                 print(
                     f"  [{fi}/{len(idx_list)}] t={t:.0f}s "
-                    f"LOS={result['n_los']} NLOS={result['n_nlos']} "
+                    f"LOS={n_los_ep} NLOS={n_nlos_ep} "
                     f"(batch PRNs={n_sat_chunk if sat_rows is not None else 'fallback'})"
                 )
 

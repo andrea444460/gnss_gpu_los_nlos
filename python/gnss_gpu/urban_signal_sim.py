@@ -16,7 +16,18 @@ import math
 
 import numpy as np
 
-from gnss_gpu.signal_sim import SignalSimulator
+from gnss_gpu.signal_sim import GNSS_GPS, SignalSimulator, prn_label_to_system
+
+
+def _signal_sim_system_prn(prn_entry) -> tuple[int, int] | None:
+    """Map trajectory/satellite label to (GnssSystem, PRN) for IQ synthesis."""
+    if isinstance(prn_entry, str):
+        try:
+            return prn_label_to_system(prn_entry)
+        except ValueError:
+            return None
+    return GNSS_GPS, int(prn_entry)
+
 
 C_LIGHT = 299792458.0
 GPS_L1_FREQ = 1575.42e6
@@ -103,7 +114,9 @@ class UrbanSignalSimulator:
             sat_vel: [n_sat, 3] satellite ECEF velocities [m/s] (for Doppler).
             rx_vel: [3] receiver velocity [m/s] (for Doppler).
             rx_clock_bias: Receiver clock bias [m].
-            prn_list: List of PRN numbers (1-32). Defaults to range(1, n_sat+1).
+            prn_list: Per-satellite id for IQ synthesis (GPS ints 1-32, or strings
+                like ``G05`` / ``E12``). Defaults to ``range(1, n_sat+1)``.
+                Labels with no GPU code mapping skip IQ channels only.
             gps_time: GPS time of week [s] (for ionosphere model).
             atmo_correction: AtmosphereCorrection instance (optional).
             iono_params: dict with 'alpha' and 'beta' arrays (Klobuchar).
@@ -208,33 +221,38 @@ class UrbanSignalSimulator:
             if not is_los[i]:
                 amplitude = 10.0 ** (-self.nlos_attenuation_db / 20.0)
 
-            ch = {
-                "prn": int(prn_list[i]),
-                "code_phase": float(code_phase),
-                "carrier_phase": float(carrier_phase),
-                "doppler_hz": float(doppler[i]),
-                "amplitude": float(amplitude),
-                "nav_bit": 1,
-            }
-            channels.append(ch)
-
-            # Add multipath replica (delayed + attenuated copy)
-            if excess_delays[i] > 0.1:  # >0.1m excess delay
-                mp_pr = pr + excess_delays[i]
-                mp_code_phase = ((mp_pr / C_LIGHT) * CA_CHIP_RATE) % 1023.0
-                mp_carrier_phase = (mp_pr / GPS_L1_WAVELENGTH) * 2.0 * math.pi
-                mp_carrier_phase = mp_carrier_phase % (2.0 * math.pi)
-                mp_amplitude = amplitude * self.fresnel_coeff
-
-                mp_ch = {
-                    "prn": int(prn_list[i]),
-                    "code_phase": float(mp_code_phase),
-                    "carrier_phase": float(mp_carrier_phase),
+            resolved = _signal_sim_system_prn(prn_list[i])
+            if resolved is not None:
+                sys_id, prn_num = resolved
+                ch = {
+                    "prn": int(prn_num),
+                    "system": int(sys_id),
+                    "code_phase": float(code_phase),
+                    "carrier_phase": float(carrier_phase),
                     "doppler_hz": float(doppler[i]),
-                    "amplitude": float(mp_amplitude),
+                    "amplitude": float(amplitude),
                     "nav_bit": 1,
                 }
-                channels.append(mp_ch)
+                channels.append(ch)
+
+                # Add multipath replica (delayed + attenuated copy)
+                if excess_delays[i] > 0.1:  # >0.1m excess delay
+                    mp_pr = pr + excess_delays[i]
+                    mp_code_phase = ((mp_pr / C_LIGHT) * CA_CHIP_RATE) % 1023.0
+                    mp_carrier_phase = (mp_pr / GPS_L1_WAVELENGTH) * 2.0 * math.pi
+                    mp_carrier_phase = mp_carrier_phase % (2.0 * math.pi)
+                    mp_amplitude = amplitude * self.fresnel_coeff
+
+                    mp_ch = {
+                        "prn": int(prn_num),
+                        "system": int(sys_id),
+                        "code_phase": float(mp_code_phase),
+                        "carrier_phase": float(mp_carrier_phase),
+                        "doppler_hz": float(doppler[i]),
+                        "amplitude": float(mp_amplitude),
+                        "nav_bit": 1,
+                    }
+                    channels.append(mp_ch)
 
         # --- Generate IQ signal ---
         iq = self.sim.generate_epoch(channels, n_samples=n_samples)

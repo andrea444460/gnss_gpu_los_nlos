@@ -40,7 +40,7 @@ Without a token the viewer still runs with the default ellipsoid (no world terra
 
 During **Play**, Cesium skips per-epoch ``sampleTerrainMostDetailed`` (uses ``globe.getHeight`` only) and omits PRN endpoint labels so redraw stays light; **Pause** or the epoch slider refines terrain and restores labels.
 
-Satellite rays are drawn as **one batched ``Primitive``** (many ``PolylineGeometry`` instances) instead of one ``Entity`` per ray to reduce CPU/GPU overhead per epoch.
+Satellite rays use a **reused pool of polyline ``Entity`` objects**: each epoch only updates positions/materials instead of destroying and rebuilding geometry.
 """
 
 import argparse
@@ -597,9 +597,9 @@ if (ionToken) {{
 const datasets = {data_json};
 let currentDataset = 0;
 let displayedEpochIndex = 0;
-let rayEntities = [];
-let rayBatchPrimitive = null;
-let rayLabelCollection = null;
+let rxEntityRef = null;
+let pooledRayLines = [];
+let pooledRayLabels = [];
 let playing = true;
 let stepMs = 1500;
 const datasetGapMs = 2500;
@@ -638,9 +638,8 @@ function stepForwardCore() {{
   const n = ds.epochs.length;
 
   if (displayedEpochIndex >= n - 1 && datasets.length > 1) {{
-    clearRays();
     viewer.entities.removeAll();
-    rayEntities = [];
+    resetRayPools();
     currentDataset = (currentDataset + 1) % datasets.length;
     displayedEpochIndex = 0;
     drawTrajectory(datasets[currentDataset]);
@@ -668,9 +667,8 @@ function goPrevEpoch() {{
   const n = ds.epochs.length;
 
   if (displayedEpochIndex <= 0 && datasets.length > 1) {{
-    clearRays();
     viewer.entities.removeAll();
-    rayEntities = [];
+    resetRayPools();
     currentDataset = (currentDataset - 1 + datasets.length) % datasets.length;
     const prevDs = datasets[currentDataset];
     displayedEpochIndex = prevDs.epochs.length - 1;
@@ -698,21 +696,50 @@ function tickPlayback() {{
   }}
 }}
 
-function disposeRayPrimitives() {{
-  if (rayBatchPrimitive !== null) {{
-    viewer.scene.primitives.remove(rayBatchPrimitive);
-    rayBatchPrimitive = null;
-  }}
-  if (rayLabelCollection !== null) {{
-    viewer.scene.primitives.remove(rayLabelCollection);
-    rayLabelCollection = null;
-  }}
+function resetRayPools() {{
+  rxEntityRef = null;
+  pooledRayLines = [];
+  pooledRayLabels = [];
 }}
 
-function clearRays() {{
-  disposeRayPrimitives();
-  rayEntities.forEach(e => viewer.entities.remove(e));
-  rayEntities = [];
+function ensureRayLinePool(n) {{
+  viewer.entities.suspendEvents();
+  while (pooledRayLines.length < n) {{
+    pooledRayLines.push(viewer.entities.add({{
+      polyline: {{
+        positions: new Cesium.ConstantProperty([
+          new Cesium.Cartesian3(),
+          new Cesium.Cartesian3(),
+        ]),
+        width: new Cesium.ConstantProperty(4),
+        arcType: Cesium.ArcType.NONE,
+        clampToGround: false,
+        material: Cesium.Color.WHITE,
+      }},
+      show: false,
+    }}));
+  }}
+  viewer.entities.resumeEvents();
+}}
+
+function ensureRayLabelPool(n) {{
+  viewer.entities.suspendEvents();
+  while (pooledRayLabels.length < n) {{
+    pooledRayLabels.push(viewer.entities.add({{
+      position: Cesium.Cartesian3.ZERO,
+      label: {{
+        text: '.',
+        font: '11px monospace',
+        fillColor: Cesium.Color.WHITE,
+        outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 1,
+        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+        scale: 0.8,
+      }},
+      show: false,
+    }}));
+  }}
+  viewer.entities.resumeEvents();
 }}
 
 function updateEpochOverlay(ds, epoch, epochIdx) {{
@@ -728,7 +755,6 @@ function updateEpochOverlay(ds, epoch, epochIdx) {{
 function showEpoch(ds, epochIdx) {{
   terrainSnapGeneration += 1;
   const gen = terrainSnapGeneration;
-  clearRays();
   const epoch = ds.epochs[epochIdx];
   const rx = epoch.rx;
   const lon = rx[1];
@@ -743,63 +769,57 @@ function showEpoch(ds, epochIdx) {{
     if (gen !== terrainSnapGeneration) return;
 
     viewer.entities.suspendEvents();
-    rayEntities.push(viewer.entities.add({{
-      position: Cesium.Cartesian3.fromDegrees(lon, lat, rxH),
-      point: {{ pixelSize: 10, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 2 }},
-      label: {{ text: 'RX', font: '12px monospace', fillColor: Cesium.Color.WHITE,
-                style: Cesium.LabelStyle.FILL_AND_OUTLINE, outlineWidth: 2,
-                verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -12) }},
-    }}));
-    viewer.entities.resumeEvents();
+    try {{
+      const rxPos = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
+      if (!rxEntityRef) {{
+        rxEntityRef = viewer.entities.add({{
+          position: rxPos,
+          point: {{ pixelSize: 10, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 2 }},
+          label: {{ text: 'RX', font: '12px monospace', fillColor: Cesium.Color.WHITE,
+                    style: Cesium.LabelStyle.FILL_AND_OUTLINE, outlineWidth: 2,
+                    verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -12) }},
+        }});
+      }} else {{
+        rxEntityRef.position = rxPos;
+      }}
 
-    if (epoch.rays.length > 0) {{
-      const geomInst = [];
-      epoch.rays.forEach(ray => {{
+      const nr = epoch.rays.length;
+      ensureRayLinePool(nr);
+      ensureRayLabelPool(nr);
+
+      for (let i = 0; i < nr; i++) {{
+        const ray = epoch.rays[i];
         const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
                               : Cesium.Color.fromCssColorString('#ff6b6b');
         const widthPx = ray.los ? 4 : 5;
         const p0 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
         const p1 = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
-        geomInst.push(new Cesium.GeometryInstance({{
-          geometry: new Cesium.PolylineGeometry({{
-            positions: [p0, p1],
-            width: widthPx,
-            vertexFormat: Cesium.PolylineColorAppearance.VERTEX_FORMAT,
-            arcType: Cesium.ArcType.NONE,
-          }}),
-          attributes: {{
-            color: Cesium.ColorGeometryInstanceAttribute.fromColor(color),
-          }},
-        }}));
-      }});
+        const lineEnt = pooledRayLines[i];
+        lineEnt.show = true;
+        lineEnt.polyline.positions = new Cesium.ConstantProperty([p0, p1]);
+        lineEnt.polyline.material = new Cesium.ColorMaterialProperty(color);
+        lineEnt.polyline.width = new Cesium.ConstantProperty(widthPx);
+      }}
+      for (let i = nr; i < pooledRayLines.length; i++) {{
+        pooledRayLines[i].show = false;
+      }}
 
-      rayBatchPrimitive = new Cesium.Primitive({{
-        geometryInstances: geomInst,
-        appearance: new Cesium.PolylineColorAppearance({{
-          translucent: false,
-        }}),
-        asynchronous: false,
-      }});
-      viewer.scene.primitives.add(rayBatchPrimitive);
-    }}
-
-    if (showSatLabels && epoch.rays.length > 0) {{
-      rayLabelCollection = new Cesium.LabelCollection();
-      viewer.scene.primitives.add(rayLabelCollection);
-      epoch.rays.forEach(ray => {{
-        const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
-                              : Cesium.Color.fromCssColorString('#ff6b6b');
-        rayLabelCollection.add({{
-          position: Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]),
-          text: 'PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'),
-          font: '11px monospace',
-          fillColor: color,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 1,
-          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-          scale: 0.8,
-        }});
-      }});
+      for (let i = 0; i < pooledRayLabels.length; i++) {{
+        const le = pooledRayLabels[i];
+        if (showSatLabels && i < nr) {{
+          const ray = epoch.rays[i];
+          const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
+                                : Cesium.Color.fromCssColorString('#ff6b6b');
+          le.show = true;
+          le.position = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
+          le.label.text = new Cesium.ConstantProperty('PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'));
+          le.label.fillColor = new Cesium.ConstantProperty(color);
+        }} else {{
+          le.show = false;
+        }}
+      }}
+    }} finally {{
+      viewer.entities.resumeEvents();
     }}
 
     updateEpochOverlay(ds, epoch, epochIdx);
@@ -826,7 +846,6 @@ function showEpoch(ds, epochIdx) {{
   Cesium.sampleTerrainMostDetailed(tp, [Cesium.Cartographic.fromDegrees(lon, lat, 0)])
     .then(function (updated) {{
       if (gen !== terrainSnapGeneration) return;
-      clearRays();
       drawRxAndRays(updated[0].height + RX_ABOVE_GROUND_M);
     }})
     .catch(function () {{

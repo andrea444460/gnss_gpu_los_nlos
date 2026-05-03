@@ -39,6 +39,8 @@ Or pass ``--cesium-ion-token ...`` (injected into the HTML).
 Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
 
 During **Play**, Cesium skips per-epoch ``sampleTerrainMostDetailed`` (uses ``globe.getHeight`` only) and omits PRN endpoint labels so redraw stays light; **Pause** or the epoch slider refines terrain and restores labels.
+
+Satellite rays are drawn as **one batched ``Primitive``** (many ``PolylineGeometry`` instances) instead of one ``Entity`` per ray to reduce CPU/GPU overhead per epoch.
 """
 
 import argparse
@@ -90,6 +92,17 @@ def load_trajectory(csv_path, step=200):
         )
         times.append(float(r["GPS TOW (s)"]))
     return np.array(positions), np.array(times), int(n_csv)
+
+
+def trajectory_row_stride(step_arg: float) -> int:
+    """Convert ``--traj-step`` to an integer row stride (minimum every row).
+
+    Non-integers are rounded (e.g. ``0.5`` → stride ``1``). Values ≤ 0 are invalid.
+    """
+    x = float(step_arg)
+    if x <= 0:
+        raise ValueError("--traj-step must be positive")
+    return max(1, int(round(x)))
 
 
 def _resolve_nav_path(traj_csv: str, nav_path: Optional[str]) -> str:
@@ -585,6 +598,8 @@ const datasets = {data_json};
 let currentDataset = 0;
 let displayedEpochIndex = 0;
 let rayEntities = [];
+let rayBatchPrimitive = null;
+let rayLabelCollection = null;
 let playing = true;
 let stepMs = 1500;
 const datasetGapMs = 2500;
@@ -623,6 +638,7 @@ function stepForwardCore() {{
   const n = ds.epochs.length;
 
   if (displayedEpochIndex >= n - 1 && datasets.length > 1) {{
+    clearRays();
     viewer.entities.removeAll();
     rayEntities = [];
     currentDataset = (currentDataset + 1) % datasets.length;
@@ -652,6 +668,7 @@ function goPrevEpoch() {{
   const n = ds.epochs.length;
 
   if (displayedEpochIndex <= 0 && datasets.length > 1) {{
+    clearRays();
     viewer.entities.removeAll();
     rayEntities = [];
     currentDataset = (currentDataset - 1 + datasets.length) % datasets.length;
@@ -681,7 +698,19 @@ function tickPlayback() {{
   }}
 }}
 
+function disposeRayPrimitives() {{
+  if (rayBatchPrimitive !== null) {{
+    viewer.scene.primitives.remove(rayBatchPrimitive);
+    rayBatchPrimitive = null;
+  }}
+  if (rayLabelCollection !== null) {{
+    viewer.scene.primitives.remove(rayLabelCollection);
+    rayLabelCollection = null;
+  }}
+}}
+
 function clearRays() {{
+  disposeRayPrimitives();
   rayEntities.forEach(e => viewer.entities.remove(e));
   rayEntities = [];
 }}
@@ -712,6 +741,8 @@ function showEpoch(ds, epochIdx) {{
 
   function drawRxAndRays(rxH) {{
     if (gen !== terrainSnapGeneration) return;
+
+    viewer.entities.suspendEvents();
     rayEntities.push(viewer.entities.add({{
       position: Cesium.Cartesian3.fromDegrees(lon, lat, rxH),
       point: {{ pixelSize: 10, color: Cesium.Color.WHITE, outlineColor: Cesium.Color.BLACK, outlineWidth: 2 }},
@@ -719,42 +750,60 @@ function showEpoch(ds, epochIdx) {{
                 style: Cesium.LabelStyle.FILL_AND_OUTLINE, outlineWidth: 2,
                 verticalOrigin: Cesium.VerticalOrigin.BOTTOM, pixelOffset: new Cesium.Cartesian2(0, -12) }},
     }}));
+    viewer.entities.resumeEvents();
 
-    epoch.rays.forEach(ray => {{
-      const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa').withAlpha(1.0)
-                            : Cesium.Color.fromCssColorString('#ff6b6b').withAlpha(1.0);
-      const width = ray.los ? 2 : 3;
-
-      rayEntities.push(viewer.entities.add({{
-        polyline: {{
-          positions: Cesium.Cartesian3.fromDegreesArrayHeights([
-            lon, lat, rxH,
-            ray.end[1], ray.end[0], ray.end[2]
-          ]),
-          width: Math.max(6, width + 4),
-          material: color,
-          arcType: Cesium.ArcType.NONE,
-          perPositionHeight: true,
-          clampToGround: false,
-        }},
-      }}));
-
-      if (showSatLabels) {{
-        rayEntities.push(viewer.entities.add({{
-          position: Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]),
-          label: {{
-            text: 'PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'),
-            font: '11px monospace',
-            fillColor: color,
-            style: Cesium.LabelStyle.FILL_AND_OUTLINE,
-            outlineWidth: 1,
-            scale: 0.8,
+    if (epoch.rays.length > 0) {{
+      const geomInst = [];
+      epoch.rays.forEach(ray => {{
+        const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
+                              : Cesium.Color.fromCssColorString('#ff6b6b');
+        const widthPx = ray.los ? 4 : 5;
+        const p0 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
+        const p1 = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
+        geomInst.push(new Cesium.GeometryInstance({{
+          geometry: new Cesium.PolylineGeometry({{
+            positions: [p0, p1],
+            width: widthPx,
+            vertexFormat: Cesium.PolylineColorAppearance.VERTEX_FORMAT,
+            arcType: Cesium.ArcType.NONE,
+          }}),
+          attributes: {{
+            color: Cesium.ColorGeometryInstanceAttribute.fromColor(color),
           }},
         }}));
-      }}
-    }});
+      }});
+
+      rayBatchPrimitive = new Cesium.Primitive({{
+        geometryInstances: geomInst,
+        appearance: new Cesium.PolylineColorAppearance({{
+          translucent: false,
+        }}),
+        asynchronous: false,
+      }});
+      viewer.scene.primitives.add(rayBatchPrimitive);
+    }}
+
+    if (showSatLabels && epoch.rays.length > 0) {{
+      rayLabelCollection = new Cesium.LabelCollection();
+      viewer.scene.primitives.add(rayLabelCollection);
+      epoch.rays.forEach(ray => {{
+        const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
+                              : Cesium.Color.fromCssColorString('#ff6b6b');
+        rayLabelCollection.add({{
+          position: Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]),
+          text: 'PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'),
+          font: '11px monospace',
+          fillColor: color,
+          outlineColor: Cesium.Color.BLACK,
+          outlineWidth: 1,
+          style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+          scale: 0.8,
+        }});
+      }});
+    }}
 
     updateEpochOverlay(ds, epoch, epochIdx);
+    viewer.scene.requestRender();
   }}
 
   const tp = viewer.scene.globe.terrainProvider;
@@ -1014,6 +1063,11 @@ def main(argv=None):
     parser.add_argument("--record-video", action="store_true", help="Try Playwright screen recording (needs Node)")
     args = parser.parse_args(argv)
 
+    try:
+        traj_stride = trajectory_row_stride(float(args.traj_step))
+    except ValueError as e:
+        parser.error(str(e))
+
     tok = args.cesium_ion_token.strip() if args.cesium_ion_token else ""
     nav_opt = args.nav.strip() if getattr(args, "nav", "") else ""
     el_mask = float(getattr(args, "elevation_mask_deg", 10.0))
@@ -1028,7 +1082,7 @@ def main(argv=None):
             p["shinjuku_plateau"],
             p["shinjuku_ref"],
             n_epochs=max(1, args.n_epochs),
-            step=300,
+            step=traj_stride,
             plateau_zone=9,
             nav_path=nav_opt or None,
             elevation_mask_deg=el_mask,
@@ -1040,7 +1094,7 @@ def main(argv=None):
             p["odaiba_plateau"],
             p["odaiba_ref"],
             n_epochs=max(1, args.n_epochs),
-            step=300,
+            step=traj_stride,
             plateau_zone=9,
             nav_path=nav_opt or None,
             elevation_mask_deg=el_mask,
@@ -1068,7 +1122,7 @@ def main(argv=None):
         args.plateau_dir,
         args.reference_csv,
         n_epochs=max(1, args.n_epochs),
-        step=max(1, args.traj_step),
+        step=traj_stride,
         plateau_zone=args.plateau_zone,
         nav_path=nav_opt or None,
         elevation_mask_deg=el_mask,

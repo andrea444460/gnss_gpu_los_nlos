@@ -78,7 +78,12 @@ def _sat_elevation_azimuth(rx_ecef, sat_ecef):
 
 
 class UrbanSignalSimulator:
-    """Urban GNSS IQ signal simulator with a 3D scene model."""
+    """Urban GNSS IQ signal simulator with a 3D scene model.
+
+    Satellites below the elevation mask are excluded from LOS checks, multipath,
+    atmospheric handling, and synthesized IQ channels (same criterion as a typical
+    GNSS receiver ignoring signals near the horizon).
+    """
 
     def __init__(self, building_model=None, sampling_freq=2.6e6,
                  intermediate_freq=0.0, noise_floor_db=-20.0,
@@ -90,7 +95,8 @@ class UrbanSignalSimulator:
             sampling_freq: IQ sampling frequency [Hz].
             intermediate_freq: IF frequency [Hz].
             noise_floor_db: Noise floor [dB].
-            elevation_mask_deg: Minimum satellite elevation [deg].
+            elevation_mask_deg: Minimum satellite elevation [deg]. Default 10°;
+                use 0 for geometric horizon only, or a negative value to effectively disable.
             nlos_attenuation_db: Signal attenuation for NLOS satellites [dB].
             fresnel_coeff: Reflection coefficient for multipath [0-1].
         """

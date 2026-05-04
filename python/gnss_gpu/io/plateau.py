@@ -11,7 +11,7 @@ Mercator, EPSG:6669-6687).
 import glob as _glob
 import os
 from pathlib import Path
-from typing import Union
+from typing import Tuple, Union
 
 import numpy as np
 
@@ -29,6 +29,57 @@ _E2 = 2.0 * _F - _F * _F
 _A_GRS80 = 6378137.0
 _F_GRS80 = 1.0 / 298.257222101
 _E2_GRS80 = 2.0 * _F_GRS80 - _F_GRS80 * _F_GRS80
+_B_GRS80 = _A_GRS80 * (1.0 - _F_GRS80)
+
+
+def grs80_ecef_ellipsoid_outward_unit(xyz: np.ndarray) -> np.ndarray:
+    """Unit outward normal to the GRS80 ellipsoid at ECEF position ``xyz`` [m]."""
+    v = np.asarray(xyz, dtype=np.float64).reshape(3)
+    x, y, z = float(v[0]), float(v[1]), float(v[2])
+    g = np.array(
+        [x / (_A_GRS80 * _A_GRS80), y / (_A_GRS80 * _A_GRS80), z / (_B_GRS80 * _B_GRS80)],
+        dtype=np.float64,
+    )
+    ln = float(np.linalg.norm(g))
+    if ln <= 0.0:
+        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    return g / ln
+
+
+def plateau_mesh_total_ecef_shift_m(
+    pivot_ecef: np.ndarray,
+    vertical_shift_m: float = 0.0,
+    extra_ecef_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> np.ndarray:
+    """Rigid ECEF translation [m] for PLATEAU vertices relative to RX trajectory frame.
+
+    ``vertical_shift_m`` moves geometry along the GRS80 ellipsoid outward direction at
+    ``pivot_ecef`` (typically trajectory centroid). ``extra_ecef_m`` adds a uniform ECEF vector.
+    Apply with :func:`apply_plateau_mesh_ecef_shift` before building a BVH so LOS/multipath use
+    the shifted mesh.
+    """
+    delta = np.asarray(extra_ecef_m, dtype=np.float64).reshape(3).copy()
+    vs = float(vertical_shift_m)
+    if vs != 0.0:
+        delta += vs * grs80_ecef_ellipsoid_outward_unit(pivot_ecef)
+    return delta
+
+
+def apply_plateau_mesh_ecef_shift(building: BuildingModel, delta_ecef_m: np.ndarray) -> BuildingModel:
+    """Return a new building model with ``delta_ecef_m`` added to every triangle vertex."""
+    d = np.asarray(delta_ecef_m, dtype=np.float64).reshape(3)
+    return BuildingModel(building.triangles + d.reshape(1, 1, 3))
+
+
+def parse_optional_comma_xyz(s: str) -> Tuple[float, float, float]:
+    """Parse ``\"dx,dy,dz\"`` or empty string → three floats."""
+    t = (s or "").strip()
+    if not t:
+        return (0.0, 0.0, 0.0)
+    parts = [p.strip() for p in t.split(",")]
+    if len(parts) != 3:
+        raise ValueError("expected exactly three comma-separated floats")
+    return (float(parts[0]), float(parts[1]), float(parts[2]))
 
 
 class PlateauLoader:

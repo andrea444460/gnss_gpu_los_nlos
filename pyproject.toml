@@ -30,6 +30,7 @@ classifiers = [
 dependencies = [
     "gtsam>=4.3a0",
     "numpy>=1.21",
+    "pyproj>=3.6",
 ]
 
 [project.optional-dependencies]

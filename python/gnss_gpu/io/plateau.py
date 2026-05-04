@@ -14,15 +14,10 @@ from pathlib import Path
 from typing import Tuple, Union
 
 import numpy as np
+from pyproj import Transformer, network
 
 from gnss_gpu.io.citygml import parse_citygml
 from gnss_gpu.raytrace import BuildingModel
-
-# WGS-84 ellipsoid constants
-_A = 6378137.0
-_F = 1.0 / 298.257223563
-_B = _A * (1.0 - _F)
-_E2 = 2.0 * _F - _F * _F
 
 # GRS-80 ellipsoid constants (used by the Japanese geodetic system JGD2011,
 # virtually identical to WGS-84 for our purposes)
@@ -127,6 +122,16 @@ class PlateauLoader:
         self._lat0_deg, self._lon0_deg = self.ORIGINS[zone]
         self._lat0 = np.radians(self._lat0_deg)
         self._lon0 = np.radians(self._lon0_deg)
+        # Allow PROJ to fetch missing grid files (geoid/vertical ops) when available.
+        try:
+            network.set_network_enabled(True)
+        except Exception:
+            pass
+        # EPSG:6697 (JGD2011 geographic 3D) -> EPSG:4978 (ECEF).
+        # always_xy=False keeps (lat, lon, h) order for this codebase.
+        self._to_ecef_from_6697 = Transformer.from_crs(
+            "EPSG:6697", "EPSG:4978", always_xy=False
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -218,17 +223,16 @@ class PlateauLoader:
         Parameters
         ----------
         coords : ndarray, shape (N, 3)
-            Coordinates as stored in PLATEAU CityGML.  Most datasets use the
+            Coordinates as stored in PLATEAU CityGML. Most datasets use the
             Japanese plane rectangular system:
             - 1st value = Y (northing from origin latitude)
             - 2nd value = X (easting from origin longitude, with no false
               easting in PLATEAU data -- but some datasets add 500 km)
-            - 3rd value = Z (ellipsoidal height in metres)
+            - 3rd value = Z (height in metres; transformed via EPSG:6697 -> 4978)
 
             Some published files instead store geographic coordinates directly
-            as ``(lat_deg, lon_deg, h_m)``.  Those are detected heuristically
-            from the coordinate ranges and converted without the plane-rect
-            inverse projection.
+            as ``(lat_deg, lon_deg, h_m)``. Those are detected heuristically
+            from the coordinate ranges and transformed directly to ECEF.
 
         Returns
         -------
@@ -319,7 +323,7 @@ class PlateauLoader:
         lat, lon = self._gauss_kruger_inverse(
             y_north, x_east, self._lat0, self._lon0
         )
-        return self._lla_to_ecef(lat, lon, z_up)
+        return self._jgd2011_geodetic_to_ecef(np.degrees(lat), np.degrees(lon), z_up)
 
     # ------------------------------------------------------------------
     # Gauss-Kruger inverse projection
@@ -445,23 +449,16 @@ class PlateauLoader:
     # Coordinate helpers
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _lla_to_ecef(lat, lon, alt):
-        """Convert geodetic (lat, lon in radians, alt in metres) to ECEF."""
-        sin_lat = np.sin(lat)
-        cos_lat = np.cos(lat)
-        sin_lon = np.sin(lon)
-        cos_lon = np.cos(lon)
-        N = _A / np.sqrt(1.0 - _E2 * sin_lat * sin_lat)
-        x = (N + alt) * cos_lat * cos_lon
-        y = (N + alt) * cos_lat * sin_lon
-        z = (N * (1.0 - _E2) + alt) * sin_lat
+    def _jgd2011_geodetic_to_ecef(self, lat_deg, lon_deg, alt_m):
+        """Transform JGD2011 geographic 3D (EPSG:6697) to ECEF (EPSG:4978)."""
+        x, y, z = self._to_ecef_from_6697.transform(
+            float(lat_deg), float(lon_deg), float(alt_m)
+        )
         return np.array([x, y, z], dtype=np.float64)
 
-    @classmethod
-    def _geodetic_degrees_to_ecef(cls, lat_deg, lon_deg, alt):
-        """Convert geodetic degrees to ECEF."""
-        return cls._lla_to_ecef(np.radians(lat_deg), np.radians(lon_deg), alt)
+    def _geodetic_degrees_to_ecef(self, lat_deg, lon_deg, alt):
+        """Convert geodetic degrees (JGD2011 3D) to ECEF via pyproj."""
+        return self._jgd2011_geodetic_to_ecef(lat_deg, lon_deg, alt)
 
 
 def load_plateau(filepath_or_dir, zone=9):

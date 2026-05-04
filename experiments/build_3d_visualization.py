@@ -14,8 +14,10 @@ Optional ``--filter-by-obs`` keeps only satellites that have a non-zero **code p
 By default the generator also embeds **C/N₀** time series (``S*`` in the same ``.obs``) so clicking a ray
 in the HTML viewer opens a chart with an epoch cursor (disable with ``--no-cnr-embed``).
 
-Optional ``--viz-multipath`` adds **orange polylines** for first-order specular reflections
-(satellite→bounce→receiver). With ephemeris batching + BVH, multipath uses ``compute_multipath_batch``
+Optional ``--viz-multipath`` adds polylines for first-order specular reflections
+(satellite→bounce→receiver): **orange** when LOS also has a reflection sketch, **red** when the
+satellite is NLOS and the reflection replaces the hidden direct ray (direct through-building stub
+is omitted). With ephemeris batching + BVH, multipath uses ``compute_multipath_batch``
 (one launch per chunk); otherwise per-epoch ``compute_multipath`` / CPU mesh fallback.
 
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
@@ -794,9 +796,11 @@ def compute_all_epochs(
                                 "delay_m": dmp,
                                 "inc": [math.degrees(ila), math.degrees(ilo), ih],
                                 "bounce": [math.degrees(bla), math.degrees(blo), bh],
+                                "nlosMp": bool(not is_los[i]),
                             }
                         )
 
+            hide_direct_prns = {r["prn"] for r in reflections if r.get("nlosMp")}
             lat, lon, alt = ecef_to_lla(*rx)
             epoch = {
                 "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
@@ -810,12 +814,15 @@ def compute_all_epochs(
             for i in range(n_sat):
                 if not visible[i]:
                     continue
+                prn_str = _sat_display_id(used_prns_i[i])
+                if prn_str in hide_direct_prns:
+                    continue
                 direction = sat_ecef[i] - rx
                 dist = np.linalg.norm(direction)
                 ray_end = rx + direction / dist * 5000
                 re_lat, re_lon, re_alt = ecef_to_lla(*ray_end)
                 epoch["rays"].append({
-                    "prn": _sat_display_id(used_prns_i[i]),
+                    "prn": prn_str,
                     "los": bool(is_los[i]),
                     "el": float(np.degrees(el[i])),
                     "end": [math.degrees(re_lat), math.degrees(re_lon), re_alt],
@@ -1235,7 +1242,7 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
       <label title="Keep the camera framed on the receiver each epoch (preserves your zoom once enabled)">
         <input type="checkbox" id="chkFollowRx"/> Follow RX
       </label>
-      <label title="First-order specular path satellite→bounce→RX (needs --viz-multipath when generating HTML)">
+      <label title="First-order specular satellite→bounce→RX; NLOS+reflection hides direct stub and draws multipath in red (--viz-multipath when generating)">
         <input type="checkbox" id="chkShowMultipath" checked/> Multipath
       </label>
     </div>
@@ -1669,6 +1676,7 @@ function showEpoch(ds, epochIdx) {{
       const nm = showMpGeom ? reflList.length : 0;
       ensureMultipathLinePool(nm);
       const orange = Cesium.Color.fromCssColorString('#ff9f1c');
+      const mpNlosRed = Cesium.Color.fromCssColorString('#ff6b6b');
       for (let j = 0; j < nm; j++) {{
         const mp = reflList[j];
         const q0 = Cesium.Cartesian3.fromDegrees(mp.inc[1], mp.inc[0], mp.inc[2]);
@@ -1677,7 +1685,8 @@ function showEpoch(ds, epochIdx) {{
         const ent = pooledMultipathLines[j];
         ent.show = true;
         ent.polyline.positions = new Cesium.ConstantProperty([q0, q1, q2]);
-        ent.polyline.material = new Cesium.ColorMaterialProperty(orange);
+        const mpCol = mp.nlosMp ? mpNlosRed : orange;
+        ent.polyline.material = new Cesium.ColorMaterialProperty(mpCol);
       }}
       for (let j = nm; j < pooledMultipathLines.length; j++) {{
         pooledMultipathLines[j].show = false;

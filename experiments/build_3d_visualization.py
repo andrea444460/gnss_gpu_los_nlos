@@ -2184,11 +2184,11 @@ def main(argv=None):
     parser.add_argument(
         "--plateau-mesh-vertical-shift-m",
         type=float,
-        default=36.7,
+        default=0.0,
         help=(
             "Translate all PLATEAU triangles along the GRS80 ellipsoid outward direction at the "
             "trajectory centroid [m]. Use this when building roofs/floors are systematically offset "
-            "from RX ECEF (e.g. vertical datum vs ellipsoidal height). Default: +36.7 m (trial)."
+            "from RX ECEF (e.g. vertical datum vs ellipsoidal height)."
         ),
     )
     parser.add_argument(

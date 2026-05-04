@@ -19,10 +19,13 @@ Height datum (EPSG:6697):
 
     The ``geoid_correction`` kwarg on ``PlateauLoader`` / ``load_plateau``
     selects the model:
-        - ``"egm96"`` (**default**): pyproj-driven EGM96 lookup.  Raises
-          ``ImportError`` if pyproj is not installed -- this is
-          intentional ("fail loud") since the silent no-correction
-          path produced the original Phase 2 abort bug.
+        - ``"egm96"`` (**default**): pyproj + PROJ ``egm96_15.gtx`` vertical
+          grid.  Tries the local PROJ data directory first; if the grid is
+          missing (minimal wheels, Colab), temporarily enables **PROJ
+          network** so the same GTX can be fetched from ``cdn.proj.org``
+          (same mechanism as ``PROJ_NETWORK=ON``).  Raises ``ImportError``
+          if pyproj is not installed, or ``RuntimeError`` if both local
+          and network-backed setup fail.
         - ``<float>``: a constant N in metres (use 36.7 for Tokyo
           quick-and-dirty work).
         - callable ``N(lat_deg, lon_deg) -> float``: custom geoid model
@@ -55,46 +58,70 @@ GEOID_CORRECTION_DEFAULT: str = "egm96"
 
 
 def _make_egm96_lookup() -> Callable[[float, float], float]:
-    """Return a callable ``N(lat_deg, lon_deg) -> float`` backed by EGM96.
+    """Return ``N(lat_deg, lon_deg)`` from EGM96 via PROJ ``egm96_15.gtx``.
 
-    Requires ``pyproj`` and the bundled ``egm96_15.gtx`` grid (ships with
-    most pyproj installs).  Raises ``ImportError`` if pyproj is missing
-    or ``RuntimeError`` if the grid is not findable.
+    Tries a local grid first.  If that fails (missing file / bad pipeline),
+    enables PROJ **network** temporarily so PROJ can download the same
+    grid from ``cdn.proj.org``, then restores the previous network flag.
 
-    Note on accuracy in Japan: EGM96 differs from the official GSI
-    Geoid 2011 by up to ~1 m, which is well below the typical PLATEAU
-    LoD2 building height (5-30 m) and adequate for LoS ray tracing.
-    For sub-metre work, supply a callable that consults the GSI grid.
+    Raises ``ImportError`` if pyproj is not installed; ``RuntimeError`` if
+    both attempts fail.
     """
     try:
-        import pyproj  # noqa: F401
+        import pyproj
+        from pyproj.exceptions import ProjError
     except ImportError as exc:  # pragma: no cover -- exercised by skip
         raise ImportError(
             "geoid_correction='egm96' requires pyproj; install with "
             "`pip install pyproj`"
         ) from exc
 
-    src = pyproj.CRS.from_proj4(
-        "+proj=longlat +ellps=WGS84 +geoidgrids=egm96_15.gtx +vunits=m"
-    )
-    tgt = pyproj.CRS.from_epsg(4979)
-    transformer = pyproj.Transformer.from_crs(src, tgt, always_xy=True)
-
-    # Prime the transformer once so a missing grid surfaces here, not
-    # deep inside _lla_to_ecef.
-    _, _, probe_h = transformer.transform(139.78, 35.65, 0.0)
-    if not np.isfinite(probe_h):
-        raise RuntimeError(
-            "EGM96 lookup returned non-finite at (35.65 N, 139.78 E); "
-            "the egm96_15.gtx grid is probably missing from the pyproj "
-            "data directory"
+    def _from_grid() -> Callable[[float, float], float]:
+        src = pyproj.CRS.from_proj4(
+            "+proj=longlat +ellps=WGS84 +geoidgrids=egm96_15.gtx +vunits=m"
         )
+        tgt = pyproj.CRS.from_epsg(4979)
+        transformer = pyproj.Transformer.from_crs(src, tgt, always_xy=True)
+        _, _, probe_h = transformer.transform(139.78, 35.65, 0.0)
+        if not np.isfinite(probe_h):
+            raise RuntimeError(
+                "EGM96 probe returned non-finite at (35.65 N, 139.78 E)"
+            )
 
-    def _n(lat_deg: float, lon_deg: float) -> float:
-        _, _, h = transformer.transform(lon_deg, lat_deg, 0.0)
-        return float(h)
+        def _n(lat_deg: float, lon_deg: float) -> float:
+            _, _, h = transformer.transform(lon_deg, lat_deg, 0.0)
+            return float(h)
 
-    return _n
+        return _n
+
+    _exc_types = (ProjError, RuntimeError, OSError, ValueError)
+
+    try:
+        return _from_grid()
+    except _exc_types as err_local:
+        prev_net = pyproj.network.is_network_enabled()
+        try:
+            pyproj.network.set_network_enabled(True)
+            try:
+                fn = _from_grid()
+            except _exc_types as err_net:
+                raise RuntimeError(
+                    "EGM96 setup failed without local egm96_15.gtx; PROJ "
+                    "network retry also failed. local=%r; network=%r. "
+                    "Install OSGeo PROJ-data, set PROJ_DATA, or allow HTTPS "
+                    "to cdn.proj.org."
+                    % (err_local, err_net)
+                ) from err_net
+        finally:
+            pyproj.network.set_network_enabled(prev_net)
+        if not prev_net:
+            warnings.warn(
+                "PlateauLoader: local EGM96 grid missing; used PROJ network "
+                "to obtain egm96_15.gtx (same as PROJ_NETWORK=ON).",
+                UserWarning,
+                stacklevel=2,
+            )
+        return fn
 
 
 def _resolve_geoid_correction(spec: GeoidCorrection):

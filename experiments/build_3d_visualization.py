@@ -11,6 +11,8 @@ Then uses Playwright to record a video of the visualization.
 
 Optional ``--filter-by-obs`` keeps only satellites that have a non-zero **code pseudorange**
 (``C*``) in the rover **RINEX .obs** at the nearest epoch (GPS TOW match within ``--obs-match-tol-s``).
+By default the generator also embeds **C/N₀** time series (``S*`` in the same ``.obs``) so clicking a ray
+in the HTML viewer opens a chart with an epoch cursor (disable with ``--no-cnr-embed``).
 
 Optional ``--viz-multipath`` adds **orange polylines** for first-order specular reflections
 (satellite→bounce→receiver). With ephemeris batching + BVH, multipath uses ``compute_multipath_batch``
@@ -251,6 +253,73 @@ def _apply_obs_visibility_mask(
                 visible[i] = False
 
 
+def _preferred_cnr_dbhz(obs_dict: dict) -> Optional[float]:
+    """Pick one usable carrier strength observation (RINEX ``S*``, typically dB-Hz)."""
+    pref_order = (
+        "S1C",
+        "S1X",
+        "S1P",
+        "S1W",
+        "S2W",
+        "S2C",
+        "S2X",
+        "S5Q",
+        "S5X",
+        "S7Q",
+        "S7X",
+        "S8Q",
+        "S8X",
+    )
+    upper_keys = {str(k).upper(): k for k in obs_dict}
+    for code in pref_order:
+        k = upper_keys.get(code)
+        if k is None:
+            continue
+        try:
+            v = float(obs_dict[k])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(v) and v > 0.0:
+            return v
+    for uk, orig in sorted(upper_keys.items()):
+        if not uk.startswith("S"):
+            continue
+        try:
+            v = float(obs_dict[orig])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(v) and v > 0.0:
+            return v
+    return None
+
+
+def _extract_cnr_series_from_obs(
+    obs_path: str,
+    *,
+    max_points_per_prn: int = 2500,
+) -> dict[str, list[list[float]]]:
+    """Return mapping rinex_sat_id → ``[[gps_tow_s, cnr_dbhz], ...]``, downsampled for HTML embed."""
+    obs = read_rinex_obs(Path(obs_path))
+    raw: dict[str, list[tuple[float, float]]] = {}
+    for ep in obs.epochs:
+        tow = float(_gps_seconds_of_week(ep.time))
+        for sat_id, odict in ep.observations.items():
+            cnr = _preferred_cnr_dbhz(odict)
+            if cnr is None:
+                continue
+            sid = _normalize_rinex_sat_id(str(sat_id))
+            raw.setdefault(sid, []).append((tow, float(cnr)))
+    out: dict[str, list[list[float]]] = {}
+    cap = max(50, int(max_points_per_prn))
+    for sid, pairs in raw.items():
+        pairs.sort(key=lambda x: x[0])
+        if len(pairs) > cap:
+            idx = np.linspace(0, len(pairs) - 1, cap, dtype=np.int64)
+            pairs = [pairs[int(i)] for i in idx]
+        out[sid] = [[round(float(t), 4), round(float(v), 3)] for t, v in pairs]
+    return out
+
+
 def _resolve_obs_path(traj_csv: str, obs_opt: str) -> Optional[str]:
     """Return rover ``.obs`` path or ``None`` if ``obs_opt`` empty and no default file."""
     o = (obs_opt or "").strip()
@@ -265,6 +334,17 @@ def _resolve_obs_path(traj_csv: str, obs_opt: str) -> Optional[str]:
         if os.path.isfile(cand):
             return cand
     return None
+
+
+def _cnr_obs_path_for_embed(ref_csv: str, obs_cli: str, *, embed: bool) -> Optional[str]:
+    """Resolve rover OBS path for embedding C/N₀ series (optional ``--obs``, else default names)."""
+    if not embed:
+        return None
+    o = (obs_cli or "").strip()
+    if o:
+        p = os.path.abspath(o)
+        return p if os.path.isfile(p) else None
+    return _resolve_obs_path(ref_csv, "") or None
 
 
 def _resolve_nav_path(traj_csv: str, nav_path: Optional[str]) -> str:
@@ -409,6 +489,8 @@ def compute_all_epochs(
     obs_rover_path: Optional[str] = None,
     obs_match_tol_s: float = 1.0,
     obs_strict: bool = False,
+    cnr_obs_path: Optional[str] = None,
+    cnr_max_points_per_prn: int = 2500,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -432,6 +514,9 @@ def compute_all_epochs(
     Optional ``obs_rover_path`` filters satellites to those with code pseudorange in rover OBS.
     With BVH batching, OBS is applied to ``visible_batch`` before LOS/multipath so unused PRNs
     are not ray-traced.
+
+    Optional ``cnr_obs_path``: when set, embed C/N0 time series from that RINEX observation file
+    (``S*`` observations) under ``cnrByPrn`` for the HTML ray-click chart.
 
     ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
@@ -500,6 +585,22 @@ def compute_all_epochs(
             f"(match nearest OBS epoch if |ΔGPS TOW|≤{obs_match_tol_s:g}s; strict={obs_strict})"
         )
         print(f"  OBS epochs with code pseudorange: {obs_lookup.n_epochs}")
+
+    cnr_by_prn: dict[str, list] = {}
+    cnr_obs_source = ""
+    if cnr_obs_path:
+        try:
+            cnr_by_prn = _extract_cnr_series_from_obs(
+                cnr_obs_path,
+                max_points_per_prn=int(cnr_max_points_per_prn),
+            )
+            cnr_obs_source = os.path.basename(cnr_obs_path)
+            print(
+                f"[{area_name}] C/N0 embed: {cnr_obs_path} "
+                f"({len(cnr_by_prn)} PRNs, ≤{int(cnr_max_points_per_prn)} samples/PRN)"
+            )
+        except Exception as e:
+            print(f"  C/N0 embed skipped: {e}")
 
     idx_list = [int(i) for i in indices]
     if eph_batch_chunk <= 0:
@@ -605,6 +706,7 @@ def compute_all_epochs(
                     "n_los": 0,
                     "n_nlos": 0,
                     "t": t,
+                    "gpsTow": float(times[ei]),
                 })
                 if fi % log_every == 0 or fi == len(idx_list):
                     print(f"  [{fi}/{len(idx_list)}] t={t:.0f}s — no ephemeris at this TOW")
@@ -703,6 +805,7 @@ def compute_all_epochs(
                 "n_los": n_los_ep,
                 "n_nlos": n_nlos_ep,
                 "t": t,
+                "gpsTow": float(times[ei]),
             }
             for i in range(n_sat):
                 if not visible[i]:
@@ -739,6 +842,8 @@ def compute_all_epochs(
         "area": area_name,
         "pivot_ecef": pivot_ecef,
         "plateauModel": None,
+        "cnrByPrn": cnr_by_prn,
+        "cnrObsSource": cnr_obs_source or None,
     }
 
 
@@ -764,6 +869,207 @@ def warn_if_ion_token_not_yet_valid(tok: str) -> None:
             f"WARNING: Cesium Ion token has iat={when} (still in the future). "
             "Terrain/OSM may fail until then — mint a new token at https://ion.cesium.com/tokens"
         )
+
+
+_VIEWER_EXTENSIONS_JS = r"""
+function rinexSystemLetter(prnStr) {
+  const s = String(prnStr || '').trim().toUpperCase();
+  if (!s) return '';
+  const c = s.charAt(0);
+  if ('GREJCI'.indexOf(c) >= 0) return c;
+  return '';
+}
+function collectPrnsFromDataset(ds) {
+  const out = new Set();
+  if (!ds || !ds.epochs) return [];
+  ds.epochs.forEach(ep => {
+    (ep.rays || []).forEach(r => { if (r && r.prn) out.add(String(r.prn).trim()); });
+    const refl = ep.reflections;
+    if (refl) refl.forEach(r => { if (r && r.prn) out.add(String(r.prn).trim()); });
+  });
+  return Array.from(out).sort((a, b) =>
+    String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' }));
+}
+function prnPassesFilters(prnStr) {
+  const selC = document.getElementById('selConstellation');
+  const sys = rinexSystemLetter(prnStr);
+  const cval = selC && selC.value;
+  if (cval && sys !== cval) return false;
+  const sel = document.getElementById('selSatellite');
+  if (!sel || sel.selectedOptions.length === 0) return true;
+  const want = new Set(Array.from(sel.selectedOptions).map(o => String(o.value)));
+  return want.has(String(prnStr));
+}
+function rebuildSatelliteSelectorOptions() {
+  const selC = document.getElementById('selConstellation');
+  const selS = document.getElementById('selSatellite');
+  if (!selS || typeof datasets === 'undefined' || !datasets.length) return;
+  const ds = datasets[currentDataset] || datasets[0];
+  const all = collectPrnsFromDataset(ds);
+  const cval = selC ? selC.value : '';
+  const filtered = cval ? all.filter(p => rinexSystemLetter(p) === cval) : all;
+  const prev = new Set(Array.from(selS.selectedOptions).map(o => o.value));
+  selS.innerHTML = '';
+  filtered.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p;
+    if (prev.has(p)) opt.selected = true;
+    selS.appendChild(opt);
+  });
+}
+let cnrChartPrn = null;
+function normalizeCnrPrnKey(raw) {
+  return String(raw || '').trim().toUpperCase();
+}
+function lookupCnrSeries(ds, prnRaw) {
+  const map = (ds && ds.cnrByPrn) || {};
+  const k = normalizeCnrPrnKey(prnRaw);
+  if (map[k]) return map[k];
+  const keys = Object.keys(map);
+  for (let i = 0; i < keys.length; i++) {
+    if (normalizeCnrPrnKey(keys[i]) === k) return map[keys[i]];
+  }
+  return null;
+}
+function towDeltaSec(a, b) {
+  let d = Number(a) - Number(b);
+  if (d < -302400.0) d += 604800.0;
+  else if (d > 302400.0) d -= 604800.0;
+  return d;
+}
+function drawCnrChart(ds, prn, cursorTow) {
+  const canvas = document.getElementById('cnrCanvas');
+  const titleEl = document.getElementById('cnrTitle');
+  const hintEl = document.getElementById('cnrHint');
+  if (!canvas || !titleEl || !hintEl) return;
+  const series = lookupCnrSeries(ds, prn);
+  const src = (ds && ds.cnrObsSource) ? ds.cnrObsSource : '';
+  titleEl.textContent = 'C/N\u2080 — PRN ' + prn + (src ? ' — ' + src : '');
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const wCss = canvas.clientWidth || 680;
+  const hCss = canvas.clientHeight || 240;
+  canvas.width = Math.floor(wCss * dpr);
+  canvas.height = Math.floor(hCss * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = '#0a0e14';
+  ctx.fillRect(0, 0, wCss, hCss);
+  if (!series || series.length === 0) {
+    ctx.fillStyle = '#889';
+    ctx.font = '14px system-ui,sans-serif';
+    ctx.fillText('No C/N\u2080 (S*) observations for this PRN in embedded OBS.', 16, hCss / 2);
+    hintEl.textContent =
+      'Place rover .obs next to reference.csv, pass --obs, or enable CNR embed when generating HTML.';
+    return;
+  }
+  const xs = series.map(p => Number(p[0]));
+  const ys = series.map(p => Number(p[1]));
+  let minX = Math.min.apply(null, xs);
+  let maxX = Math.max.apply(null, xs);
+  let minY = Math.min.apply(null, ys);
+  let maxY = Math.max.apply(null, ys);
+  if (maxY <= minY) { maxY = minY + 1; }
+  const padL = 52;
+  const padR = 14;
+  const padT = 14;
+  const padB = 36;
+  const plotW = wCss - padL - padR;
+  const plotH = hCss - padT - padB;
+  function xScale(t) {
+    return padL + ((t - minX) / (maxX - minX + 1e-9)) * plotW;
+  }
+  function yScale(v) {
+    return padT + ((maxY - v) / (maxY - minY + 1e-9)) * plotH;
+  }
+  ctx.strokeStyle = '#334';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(padL, padT);
+  ctx.lineTo(padL, padT + plotH);
+  ctx.lineTo(padL + plotW, padT + plotH);
+  ctx.stroke();
+  ctx.strokeStyle = '#3b7ddd';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < series.length; i++) {
+    const px = xScale(xs[i]);
+    const py = yScale(ys[i]);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+  if (cursorTow != null && Number.isFinite(Number(cursorTow))) {
+    const ct = Number(cursorTow);
+    let cx = xScale(ct);
+    if (cx < padL || cx > padL + plotW) {
+      const wrapped = ct + ((towDeltaSec(minX, ct) < 0) ? 604800 : -604800);
+      cx = xScale(wrapped);
+    }
+    ctx.strokeStyle = '#ff9f1c';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, padT);
+    ctx.lineTo(cx, padT + plotH);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#aab';
+  ctx.font = '11px monospace';
+  ctx.fillText(minY.toFixed(0) + ' dB-Hz', 6, padT + plotH - 4);
+  ctx.fillText(maxY.toFixed(0), 6, padT + 10);
+  ctx.fillText('GPS TOW ' + minX.toFixed(0) + '\u2013' + maxX.toFixed(0) + ' s', padL, hCss - 10);
+  hintEl.textContent =
+    'Orange vertical line: current viz epoch (trajectory GPS TOW). Click ray again after scrubbing epochs.';
+}
+function openCnrPanel(prn) {
+  cnrChartPrn = normalizeCnrPrnKey(prn);
+  const bd = document.getElementById('cnrBackdrop');
+  if (bd) bd.classList.add('show');
+  refreshCnrChart();
+}
+function closeCnrPanel() {
+  const bd = document.getElementById('cnrBackdrop');
+  if (bd) bd.classList.remove('show');
+  cnrChartPrn = null;
+}
+function refreshCnrChart() {
+  if (!cnrChartPrn) return;
+  const ds = datasets[currentDataset];
+  const ep = ds.epochs[displayedEpochIndex];
+  const tow = (ep && ep.gpsTow != null) ? ep.gpsTow : null;
+  drawCnrChart(ds, cnrChartPrn, tow);
+}
+viewer.screenSpaceEventHandler.setInputAction(function (click) {
+  const picked = viewer.scene.pick(click.position);
+  if (!picked || !picked.id) return;
+  const ent = picked.id;
+  let prn = ent.vizPrn;
+  if (
+    !prn &&
+    typeof pooledRayLines !== 'undefined' &&
+    pooledRayLines.indexOf(ent) >= 0
+  ) {
+    const idx = pooledRayLines.indexOf(ent);
+    const ds = datasets[currentDataset];
+    const ep = ds.epochs[displayedEpochIndex];
+    if (ep && ep.rays && ep.rays[idx]) prn = ep.rays[idx].prn;
+  }
+  if (!prn) return;
+  openCnrPanel(prn);
+}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
+(function wireCnrUi() {
+  const btn = document.getElementById('btnCnrClose');
+  if (btn) btn.addEventListener('click', closeCnrPanel);
+  const bd = document.getElementById('cnrBackdrop');
+  if (bd)
+    bd.addEventListener('click', function (ev) {
+      if (ev.target === bd) closeCnrPanel();
+    });
+  window.addEventListener('resize', function () {
+    if (cnrChartPrn) refreshCnrChart();
+  });
+})();
+"""
 
 
 _ION_IAT_CHECK_JS = """<script>
@@ -855,6 +1161,43 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     box-shadow: 0 2px 8px rgba(0,0,0,0.35);
   }}
   #btnToggleOverlay:hover {{ background: rgba(42, 49, 66, 0.96); color: #fff; }}
+  #selSatellite {{
+    min-width: 8rem;
+    min-height: 5.5rem;
+    vertical-align: top;
+  }}
+  #cnrBackdrop {{
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.5);
+    align-items: center;
+    justify-content: center;
+  }}
+  #cnrBackdrop.show {{ display: flex; }}
+  #cnrPanel {{
+    background: #121722;
+    border: 1px solid #445;
+    border-radius: 10px;
+    padding: 14px 16px;
+    width: min(720px, 92vw);
+    max-height: 88vh;
+    overflow: auto;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.55);
+    color: #e0e0e0;
+    font-family: system-ui, Segoe UI, sans-serif;
+    font-size: 13px;
+  }}
+  #cnrPanel h4 {{ margin: 0 0 10px 0; color: #fff; font-size: 15px; }}
+  #cnrCanvas {{
+    width: 100%;
+    height: 240px;
+    display: block;
+    background: #0a0e14;
+    border-radius: 6px;
+  }}
+  #cnrHint {{ margin-top: 8px; font-size: 11px; color: #889; line-height: 1.45; }}
 </style>
 </head>
 <body>
@@ -905,9 +1248,38 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
       <label for="epochSlider">Epoch</label>
       <input type="range" id="epochSlider" min="0" max="0" value="0" />
     </div>
+    <div class="row" style="flex-wrap:wrap;align-items:flex-start;margin-top:8px;gap:12px;">
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#aab;">
+        <span>Constellation</span>
+        <select id="selConstellation" title="Limit viz to one GNSS system (RINEX letter)">
+          <option value="">All</option>
+          <option value="G">GPS (G)</option>
+          <option value="R">GLONASS (R)</option>
+          <option value="E">Galileo (E)</option>
+          <option value="C">BeiDou (C)</option>
+          <option value="J">QZSS (J)</option>
+          <option value="I">NavIC (I)</option>
+        </select>
+      </label>
+      <label style="display:flex;flex-direction:column;gap:4px;font-size:11px;color:#aab;">
+        <span>Satellites <span style="color:#667;font-weight:normal;">(empty = all)</span></span>
+        <select id="selSatellite" multiple size="5" title="Ctrl/Cmd multi-select; empty = every PRN in constellation scope"></select>
+      </label>
+    </div>
     <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
       While playing: approximate terrain and rays without PRN labels (smoother). When paused or dragging the slider: full detail.
+      Click a <strong>LOS/NLOS ray</strong> to open C/N₀ vs time from embedded OBS (when generated).
       <br/><strong>Camera:</strong> drag = orbit · <strong>Ctrl+drag</strong> = pan · wheel = zoom · right-drag = tilt.
+    </div>
+  </div>
+</div>
+<div id="cnrBackdrop" aria-hidden="true">
+  <div id="cnrPanel" role="dialog" aria-labelledby="cnrTitle">
+    <h4 id="cnrTitle">C/N₀</h4>
+    <canvas id="cnrCanvas" width="680" height="240"></canvas>
+    <div id="cnrHint"></div>
+    <div style="margin-top:12px;text-align:right;">
+      <button type="button" id="btnCnrClose" style="cursor:pointer;padding:6px 14px;border-radius:6px;border:1px solid #556;background:#252a38;color:#eee;font-family:monospace;font-size:12px;">Close</button>
     </div>
   </div>
 </div>
@@ -1018,6 +1390,17 @@ if (plateauSpec && plateauSpec.url) {{
   if (chkMp) {{
     chkMp.addEventListener('change', () => {{ paintFrame(); }});
   }}
+  const selConst = document.getElementById('selConstellation');
+  if (selConst) {{
+    selConst.addEventListener('change', () => {{
+      rebuildSatelliteSelectorOptions();
+      paintFrame();
+    }});
+  }}
+  const selSat = document.getElementById('selSatellite');
+  if (selSat) {{
+    selSat.addEventListener('change', () => {{ paintFrame(); }});
+  }}
 }})();
 let currentDataset = 0;
 let displayedEpochIndex = 0;
@@ -1071,6 +1454,7 @@ function stepForwardCore() {{
     currentDataset = (currentDataset + 1) % datasets.length;
     displayedEpochIndex = 0;
     drawTrajectory(datasets[currentDataset]);
+    rebuildSatelliteSelectorOptions();
     const ep = datasets[currentDataset].epochs[0];
     viewer.camera.flyTo({{
       destination: Cesium.Cartesian3.fromDegrees(ep.rx[1], ep.rx[0], ep.rx[2] + 450),
@@ -1096,6 +1480,7 @@ function stepBackwardCore() {{
     const prevDs = datasets[currentDataset];
     displayedEpochIndex = prevDs.epochs.length - 1;
     drawTrajectory(prevDs);
+    rebuildSatelliteSelectorOptions();
     const rx = prevDs.epochs[displayedEpochIndex].rx;
     viewer.camera.flyTo({{
       destination: Cesium.Cartesian3.fromDegrees(rx[1], rx[0], rx[2] + 450),
@@ -1200,17 +1585,22 @@ function ensureMultipathLinePool(n) {{
 
 function updateEpochOverlay(ds, epoch, epochIdx) {{
   document.getElementById('area').textContent = ds.area;
-  const losCount = epoch.rays.filter(r => r.los).length;
-  const nlosCount = epoch.rays.filter(r => !r.los).length;
-  const mpList = epoch.reflections || [];
+  const rays = epoch.rays || [];
+  const losCount = rays.filter(r => r.los && prnPassesFilters(r.prn)).length;
+  const nlosCount = rays.filter(r => !r.los && prnPassesFilters(r.prn)).length;
+  const mpList = (epoch.reflections || []).filter(mp => prnPassesFilters(mp.prn));
   let mpExtra = '';
   if (mpList.length > 0) {{
     mpExtra = ' | <span style="color:#ff9f1c">MP paths: ' + mpList.length + '</span>';
   }}
   document.getElementById('stats').innerHTML =
     '<span class="los">LOS: ' + losCount + '</span> | <span class="nlos">NLOS: ' + nlosCount + '</span>' + mpExtra;
+  let towHint = '';
+  if (epoch.gpsTow != null) {{
+    towHint = '  GPS TOW ' + Number(epoch.gpsTow).toFixed(1) + ' s';
+  }}
   document.getElementById('progress').textContent =
-    'Epoch ' + (epochIdx+1) + '/' + ds.epochs.length + '  t=' + epoch.t.toFixed(0) + 's';
+    'Epoch ' + (epochIdx+1) + '/' + ds.epochs.length + '  t=' + epoch.t.toFixed(0) + 's' + towHint;
 }}
 
 function showEpoch(ds, epochIdx) {{
@@ -1250,12 +1640,19 @@ function showEpoch(ds, epochIdx) {{
 
       for (let i = 0; i < nr; i++) {{
         const ray = epoch.rays[i];
+        const lineEnt = pooledRayLines[i];
+        const passes = prnPassesFilters(ray.prn);
+        lineEnt.vizPrn = ray.prn;
+        lineEnt.allowPicking = passes;
+        if (!passes) {{
+          lineEnt.show = false;
+          continue;
+        }}
         const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
                               : Cesium.Color.fromCssColorString('#ff6b6b');
         const widthPx = ray.los ? 4 : 5;
         const p0 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
         const p1 = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
-        const lineEnt = pooledRayLines[i];
         lineEnt.show = true;
         lineEnt.polyline.positions = new Cesium.ConstantProperty([p0, p1]);
         lineEnt.polyline.material = new Cesium.ColorMaterialProperty(color);
@@ -1265,9 +1662,10 @@ function showEpoch(ds, epochIdx) {{
         pooledRayLines[i].show = false;
       }}
 
-      const reflList = epoch.reflections || [];
+      const reflAll = epoch.reflections || [];
       const chkMp = document.getElementById('chkShowMultipath');
       const showMpGeom = chkMp ? chkMp.checked : true;
+      const reflList = reflAll.filter(mp => prnPassesFilters(mp.prn));
       const nm = showMpGeom ? reflList.length : 0;
       ensureMultipathLinePool(nm);
       const orange = Cesium.Color.fromCssColorString('#ff9f1c');
@@ -1304,6 +1702,9 @@ function showEpoch(ds, epochIdx) {{
     }}
 
     updateEpochOverlay(ds, epoch, epochIdx);
+    if (typeof refreshCnrChart === 'function') {{
+      try {{ refreshCnrChart(); }} catch (e) {{}}
+    }}
     applyFollowRxCameraIfEnabled(lon, lat, rxH);
     viewer.scene.requestRender();
   }}
@@ -1382,6 +1783,7 @@ function applyFollowRxCameraIfEnabled(lonDeg, latDeg, heightM) {{
 drawTrajectory(datasets[0]);
 frameCameraOnRx(datasets[0].epochs[0].rx);
 displayedEpochIndex = 0;
+rebuildSatelliteSelectorOptions();
 paintFrame();
 setPlayPauseUi();
 
@@ -1492,6 +1894,12 @@ if (playing) {{
 </script>
 </body>
 </html>"""
+    html = html.replace(
+        "const followRxDeltaScratch = new Cesium.Cartesian3();\n\nfunction clearPlaybackTimer",
+        "const followRxDeltaScratch = new Cesium.Cartesian3();\n\n"
+        + _VIEWER_EXTENSIONS_JS
+        + "\n\nfunction clearPlaybackTimer",
+    )
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         f.write(html)
@@ -1705,6 +2113,17 @@ def main(argv=None):
         action="store_true",
         help="If no OBS epoch within tolerance, hide all satellites (default: keep NAV-only visibility)",
     )
+    parser.add_argument(
+        "--no-cnr-embed",
+        action="store_true",
+        help="Do not embed C/N₀ (S*) time series from rover .obs for ray-click chart",
+    )
+    parser.add_argument(
+        "--cnr-max-points",
+        type=int,
+        default=2500,
+        help="Max OBS samples per satellite for embedded C/N₀ series (downsampled; default 2500)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1722,6 +2141,8 @@ def main(argv=None):
     obs_strict = bool(getattr(args, "obs_strict", False))
     obs_opt = (getattr(args, "obs", "") or "").strip()
     filter_obs = bool(getattr(args, "filter_by_obs", False))
+    embed_cnr = not bool(getattr(args, "no_cnr_embed", False))
+    cnr_max_pts = max(50, int(getattr(args, "cnr_max_points", 2500)))
 
     def _obs_path_for_ref(ref_csv: str) -> Optional[str]:
         if not filter_obs:
@@ -1751,6 +2172,8 @@ def main(argv=None):
             obs_rover_path=_obs_path_for_ref(p["shinjuku_ref"]),
             obs_match_tol_s=obs_tol,
             obs_strict=obs_strict,
+            cnr_obs_path=_cnr_obs_path_for_embed(p["shinjuku_ref"], obs_opt, embed=embed_cnr),
+            cnr_max_points_per_prn=cnr_max_pts,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
@@ -1766,6 +2189,8 @@ def main(argv=None):
             obs_rover_path=_obs_path_for_ref(p["odaiba_ref"]),
             obs_match_tol_s=obs_tol,
             obs_strict=obs_strict,
+            cnr_obs_path=_cnr_obs_path_for_embed(p["odaiba_ref"], obs_opt, embed=embed_cnr),
+            cnr_max_points_per_prn=cnr_max_pts,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
@@ -1801,6 +2226,8 @@ def main(argv=None):
         obs_rover_path=_obs_path_for_ref(args.reference_csv),
         obs_match_tol_s=obs_tol,
         obs_strict=obs_strict,
+        cnr_obs_path=_cnr_obs_path_for_embed(args.reference_csv, obs_opt, embed=embed_cnr),
+        cnr_max_points_per_prn=cnr_max_pts,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

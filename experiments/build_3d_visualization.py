@@ -1026,12 +1026,13 @@ function drawCnrChart(ds, prn, cursorTow) {
   ctx.fillText(maxY.toFixed(0), 6, padT + 10);
   ctx.fillText('GPS TOW ' + minX.toFixed(0) + '\u2013' + maxX.toFixed(0) + ' s', padL, hCss - 10);
   hintEl.textContent =
-    'Orange vertical line: current viz epoch (trajectory GPS TOW). Click ray again after scrubbing epochs.';
+    'Orange line: current epoch (GPS TOW). Scrub epoch here or on the main slider; click LOS/NLOS or multipath polyline for this PRN.';
 }
 function openCnrPanel(prn) {
   cnrChartPrn = normalizeCnrPrnKey(prn);
   const bd = document.getElementById('cnrBackdrop');
   if (bd) bd.classList.add('show');
+  if (typeof syncEpochSlider === 'function') syncEpochSlider();
   refreshCnrChart();
 }
 function closeCnrPanel() {
@@ -1060,6 +1061,23 @@ viewer.screenSpaceEventHandler.setInputAction(function (click) {
     const ds = datasets[currentDataset];
     const ep = ds.epochs[displayedEpochIndex];
     if (ep && ep.rays && ep.rays[idx]) prn = ep.rays[idx].prn;
+  }
+  if (
+    !prn &&
+    typeof pooledMultipathLines !== 'undefined' &&
+    pooledMultipathLines.indexOf(ent) >= 0
+  ) {
+    const idx = pooledMultipathLines.indexOf(ent);
+    const ds = datasets[currentDataset];
+    const ep = ds.epochs[displayedEpochIndex];
+    const reflAll = (ep && ep.reflections) || [];
+    const reflList = reflAll.filter(function (mp) {
+      return prnPassesFilters(mp.prn);
+    });
+    const chkMp = document.getElementById('chkShowMultipath');
+    const showMpGeom = chkMp ? chkMp.checked : true;
+    const nm = showMpGeom ? reflList.length : 0;
+    if (idx >= 0 && idx < nm && reflList[idx]) prn = reflList[idx].prn;
   }
   if (!prn) return;
   openCnrPanel(prn);
@@ -1205,6 +1223,24 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     border-radius: 6px;
   }}
   #cnrHint {{ margin-top: 8px; font-size: 11px; color: #889; line-height: 1.45; }}
+  #cnrEpochRow {{
+    margin-bottom: 10px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }}
+  #cnrEpochRow button {{
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: 1px solid #556;
+    background: #252a38;
+    color: #eee;
+    font-family: monospace;
+    font-size: 12px;
+  }}
+  #cnrEpochSlider {{ flex: 1; min-width: 160px; accent-color: #3b7ddd; }}
 </style>
 </head>
 <body>
@@ -1275,7 +1311,7 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     </div>
     <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
       While playing: approximate terrain and rays without PRN labels (smoother). When paused or dragging the slider: full detail.
-      Click a <strong>LOS/NLOS ray</strong> to open C/N₀ vs time from embedded OBS (when generated).
+      Click a <strong>LOS/NLOS ray</strong> or <strong>multipath polyline</strong> to open C/N₀ vs time from embedded OBS (when generated). With the C/N₀ panel open, use its epoch slider or ◀/▶ to move along the trajectory.
       <br/><strong>Camera:</strong> drag = orbit · <strong>Ctrl+drag</strong> = pan · wheel = zoom · right-drag = tilt.
     </div>
   </div>
@@ -1435,8 +1471,19 @@ function syncEpochSlider() {{
   const ds = datasets[currentDataset];
   const slider = document.getElementById('epochSlider');
   const n = ds.epochs.length;
-  slider.max = String(Math.max(0, n - 1));
-  slider.value = String(Math.min(displayedEpochIndex, n - 1));
+  const maxIdx = Math.max(0, n - 1);
+  const v = String(Math.min(displayedEpochIndex, maxIdx));
+  slider.max = String(maxIdx);
+  slider.value = v;
+  const cnrSl = document.getElementById('cnrEpochSlider');
+  if (cnrSl) {{
+    cnrSl.max = String(maxIdx);
+    cnrSl.value = v;
+  }}
+  const cnrLbl = document.getElementById('cnrEpochLabel');
+  if (cnrLbl) {{
+    cnrLbl.textContent = 'Epoch ' + (Math.min(displayedEpochIndex, maxIdx) + 1) + '/' + n;
+  }}
 }}
 
 function paintFrame() {{
@@ -1683,13 +1730,17 @@ function showEpoch(ds, epochIdx) {{
         const q1 = Cesium.Cartesian3.fromDegrees(mp.bounce[1], mp.bounce[0], mp.bounce[2]);
         const q2 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
         const ent = pooledMultipathLines[j];
+        ent.vizPrn = mp.prn;
+        ent.allowPicking = true;
         ent.show = true;
         ent.polyline.positions = new Cesium.ConstantProperty([q0, q1, q2]);
         const mpCol = mp.nlosMp ? mpNlosRed : orange;
         ent.polyline.material = new Cesium.ColorMaterialProperty(mpCol);
       }}
       for (let j = nm; j < pooledMultipathLines.length; j++) {{
-        pooledMultipathLines[j].show = false;
+        const hid = pooledMultipathLines[j];
+        hid.show = false;
+        hid.allowPicking = false;
       }}
 
       for (let i = 0; i < pooledRayLabels.length; i++) {{
@@ -1873,6 +1924,32 @@ document.getElementById('epochSlider').addEventListener('input', (e) => {{
   clearPlaybackTimer();
   displayedEpochIndex = parseInt(e.target.value, 10);
   paintFrame();
+  if (playing) {{
+    playbackTimer = setTimeout(tickPlayback, stepMs);
+  }}
+}});
+
+const cnrEpochSliderEl = document.getElementById('cnrEpochSlider');
+if (cnrEpochSliderEl) {{
+  cnrEpochSliderEl.addEventListener('input', (e) => {{
+    clearPlaybackTimer();
+    displayedEpochIndex = parseInt(e.target.value, 10);
+    paintFrame();
+    if (playing) {{
+      playbackTimer = setTimeout(tickPlayback, stepMs);
+    }}
+  }});
+}}
+document.getElementById('btnCnrPrev').addEventListener('click', () => {{
+  clearPlaybackTimer();
+  goPrevEpoch();
+  if (playing) {{
+    playbackTimer = setTimeout(tickPlayback, stepMs);
+  }}
+}});
+document.getElementById('btnCnrNext').addEventListener('click', () => {{
+  clearPlaybackTimer();
+  goNextEpoch();
   if (playing) {{
     playbackTimer = setTimeout(tickPlayback, stepMs);
   }}

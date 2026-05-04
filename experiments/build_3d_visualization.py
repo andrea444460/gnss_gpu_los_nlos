@@ -203,6 +203,32 @@ class _ObsTowPrnLookup:
         return best
 
 
+def _obs_keep_ids_for_tow(
+    tow_csv: float,
+    obs_lookup: _ObsTowPrnLookup,
+    strict: bool,
+    warn_state: dict,
+) -> Optional[frozenset[str]]:
+    """RINEX satellite ids with code observations at the nearest OBS epoch.
+
+    Returns:
+        ``None`` — no OBS epoch within tolerance and not ``strict``; caller skips OBS filtering.
+        ``frozenset`` — caller keeps only these ids (possibly empty, e.g. strict no-match).
+    """
+    allowed = obs_lookup.nearest_sat_ids(tow_csv)
+    if allowed is None:
+        if strict:
+            return frozenset()
+        if not warn_state.get("warned_nomatch"):
+            print(
+                "  OBS filter: some trajectory times have no OBS epoch within tolerance — "
+                "showing all NAV sats for those epochs (use --obs-strict to hide instead)."
+            )
+            warn_state["warned_nomatch"] = True
+        return None
+    return allowed
+
+
 def _apply_obs_visibility_mask(
     visible: np.ndarray,
     used_prns,
@@ -211,22 +237,17 @@ def _apply_obs_visibility_mask(
     strict: bool,
     warn_state: dict,
 ) -> None:
-    allowed = obs_lookup.nearest_sat_ids(tow_csv)
-    if allowed is None:
-        if strict:
-            visible[:] = False
-        elif not warn_state.get("warned_nomatch"):
-            print(
-                "  OBS filter: some trajectory times have no OBS epoch within tolerance — "
-                "showing all NAV sats for those epochs (use --obs-strict to hide instead)."
-            )
-            warn_state["warned_nomatch"] = True
+    keep = _obs_keep_ids_for_tow(tow_csv, obs_lookup, strict, warn_state)
+    if keep is None:
         return
     n_sat = int(visible.shape[0])
+    if len(keep) == 0:
+        visible[:] = False
+        return
     for i in range(n_sat):
         if visible[i]:
             sid = _rinex_sat_id_from_prn(used_prns[i])
-            if sid not in allowed:
+            if sid not in keep:
                 visible[i] = False
 
 
@@ -409,6 +430,8 @@ def compute_all_epochs(
     with CPU mesh fallback when BVH multipath is unavailable (needs compiled raytrace).
 
     Optional ``obs_rover_path`` filters satellites to those with code pseudorange in rover OBS.
+    With BVH batching, OBS is applied to ``visible_batch`` before LOS/multipath so unused PRNs
+    are not ray-traced.
 
     ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
@@ -523,6 +546,23 @@ def compute_all_epochs(
             for i in range(n_b):
                 el_batch[i], _ = _sat_elevation_azimuth(rx_blk[i], sat_blk[i])
             visible_batch = el_batch >= usim.elevation_mask_rad
+            if obs_lookup is not None:
+                for i in range(n_b):
+                    keep = _obs_keep_ids_for_tow(
+                        float(times[chunk_idx[i]]),
+                        obs_lookup,
+                        obs_strict,
+                        obs_warn_state,
+                    )
+                    if keep is None:
+                        continue
+                    row = visible_batch[i]
+                    if len(keep) == 0:
+                        row[:] = False
+                        continue
+                    for j in range(n_sat_blk):
+                        if row[j] and _rinex_sat_id_from_prn(used_prns[j]) not in keep:
+                            row[j] = False
             sat_work = sat_blk.copy()
             sat_work[~visible_batch] = np.nan
             los_batch = np.asarray(bvh.check_los_batch(rx_blk, sat_work), dtype=bool)

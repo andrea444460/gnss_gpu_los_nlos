@@ -1,8 +1,9 @@
 """Export PLATEAU building triangles to minimal binary GLB for CesiumJS.
 
 Vertices are **ECEF Cartesian offsets** from a pivot (metres), stored as glTF vec3.
-The viewer uses ``Matrix4.fromTranslation(pivotEcef)`` with identity rotation so
-``world = pivot + offset`` matches the source mesh exactly (no ENU / Y-up confusion).
+In CesiumJS load with ``modelMatrix = Matrix4.fromTranslation(pivotCart)`` and
+``upAxis: Axis.Z``, ``forwardAxis: Axis.X`` so the default glTF axis-correction
+does not rotate offsets; then ``world = pivot + offset`` matches the ray mesh.
 """
 
 from __future__ import annotations

@@ -614,12 +614,18 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
         <input type="checkbox" id="chkFollowRx"/> Follow RX
       </label>
     </div>
+    <div class="row" id="osmToggleRow" style="display:none;">
+      <label title="Hide Cesium Ion OSM 3D buildings (compare with PLATEAU GLB)">
+        <input type="checkbox" id="chkHideOsm"/> Hide Ion OSM buildings
+      </label>
+    </div>
     <div class="row">
       <label for="epochSlider">Epoch</label>
       <input type="range" id="epochSlider" min="0" max="0" value="0" />
     </div>
     <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
       While playing: approximate terrain and rays without PRN labels (smoother). When paused or dragging the slider: full detail.
+      <br/><strong>Camera:</strong> drag = orbit · <strong>Ctrl+drag</strong> = pan · wheel = zoom · right-drag = tilt.
     </div>
   </div>
 </div>
@@ -657,6 +663,17 @@ viewer.scene.globe.depthTestAgainstTerrain = true;
 viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a5270');
 viewer.scene.globe.showGroundAtmosphere = true;
 viewer.scene.globe.enableLighting = false;
+
+(function () {{
+  const sscc = viewer.scene.screenSpaceCameraController;
+  sscc.translateEventTypes = [
+    Cesium.CameraEventType.MIDDLE_DRAG,
+    {{
+      eventType: Cesium.CameraEventType.LEFT_DRAG,
+      modifier: Cesium.KeyboardEventModifier.CTRL,
+    }},
+  ];
+}})();
 
 let osmBuildingsTileset = null;
 if (ionToken) {{
@@ -698,6 +715,9 @@ if (plateauSpec && plateauSpec.url) {{
   Cesium.Model.fromGltfAsync({{
     url: glbUrl,
     modelMatrix,
+    // POSITION holds raw ECEF offsets (parallel to world axes); default glTF Y-up correction would rotate them.
+    upAxis: Cesium.Axis.Z,
+    forwardAxis: Cesium.Axis.X,
   }})
     .then(model => {{
       viewer.scene.primitives.add(model);

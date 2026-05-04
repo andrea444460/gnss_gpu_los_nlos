@@ -1313,6 +1313,8 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     <div id="playbackHint" style="font-size:10px;color:#7a8299;margin-top:6px;line-height:1.35;">
       While playing: approximate terrain and rays without PRN labels (smoother). When paused or dragging the slider: full detail.
       Click a <strong>LOS/NLOS ray</strong> or <strong>multipath polyline</strong> to open C/N₀ vs time from embedded OBS (when generated). With the C/N₀ panel open, use its epoch slider or ◀/▶ to move along the trajectory.
+      <br/><strong>Epoch:</strong> <strong>\u2190</strong> / <strong>\u2192</strong> step one epoch when focus is not in an input or the satellite list.
+      <strong>Tab</strong> toggles Play/Pause (same guard; <strong>Shift+Tab</strong> keeps normal focus move).
       <br/><strong>Camera:</strong> drag = orbit · <strong>Ctrl+drag</strong> = pan · wheel = zoom · right-drag = tilt.
     </div>
   </div>
@@ -1970,6 +1972,37 @@ if (btnCnrNextEl) {{
     }}
   }});
 }}
+
+window.addEventListener('keydown', (ev) => {{
+  const t = ev.target;
+  const tag = t && t.tagName;
+  const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+  if (ev.key === 'Tab') {{
+    if (inField || ev.shiftKey) return;
+    ev.preventDefault();
+    playing = !playing;
+    setPlayPauseUi();
+    clearPlaybackTimer();
+    if (!playing) {{
+      paintFrame();
+    }}
+    if (playing) {{
+      playbackTimer = setTimeout(tickPlayback, stepMs);
+    }}
+    return;
+  }}
+
+  if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+  if (inField) return;
+  ev.preventDefault();
+  clearPlaybackTimer();
+  if (ev.key === 'ArrowLeft') goPrevEpoch();
+  else goNextEpoch();
+  if (playing) {{
+    playbackTimer = setTimeout(tickPlayback, stepMs);
+  }}
+}}, {{ passive: false }});
 
 if (playing) {{
   playbackTimer = setTimeout(tickPlayback, stepMs);

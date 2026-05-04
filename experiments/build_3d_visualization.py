@@ -10,9 +10,10 @@ Creates a standalone HTML file using CesiumJS (free tier) that shows:
 Then uses Playwright to record a video of the visualization.
 
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
-(``*_plateau.glb``) and the viewer loads it with ``eastNorthUpToFixedFrame`` at the trajectory
-centroid so rays and buildings share the same geometry. Use ``--plateau-glb-radius-m`` /
-``--plateau-glb-max-tris`` to control size. Serve the folder over HTTP so both HTML and GLB load.
+(``*_plateau.glb``). Vertices are ECEF offsets from the trajectory centroid; Cesium uses
+``Matrix4.fromTranslation(pivotEcef)`` only (no ENU frame), matching the ray geometry.
+Use ``--plateau-glb-radius-m`` / ``--plateau-glb-max-tris`` to control size, or
+``--plateau-glb-full-mesh`` for all triangles (still capped by ``max-tris``). Serve over HTTP.
 
 The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 **broadcast RINEX navigation** file next to the trajectory (``base.nav``) or
@@ -49,6 +50,8 @@ Satellite rays use a **reused pool of polyline ``Entity`` objects**: each epoch 
 """
 
 import argparse
+import base64
+import binascii
 import csv
 import json
 import math
@@ -460,6 +463,50 @@ def compute_all_epochs(
     }
 
 
+def warn_if_ion_token_not_yet_valid(tok: str) -> None:
+    """Warn when a JWT-shaped Ion token has ``iat`` in the future (Ion often rejects)."""
+    t = (tok or "").strip()
+    parts = t.split(".")
+    if len(parts) != 3:
+        return
+    try:
+        pad = "=" * ((4 - len(parts[1]) % 4) % 4)
+        raw = base64.urlsafe_b64decode(parts[1] + pad)
+        payload = json.loads(raw.decode("ascii"))
+    except (ValueError, json.JSONDecodeError, binascii.Error, UnicodeDecodeError):
+        return
+    iat = payload.get("iat")
+    if iat is None:
+        return
+    skew_s = 120.0
+    if float(iat) > time.time() + skew_s:
+        when = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(float(iat)))
+        print(
+            f"WARNING: Cesium Ion token has iat={when} (still in the future). "
+            "Terrain/OSM may fail until then — mint a new token at https://ion.cesium.com/tokens"
+        )
+
+
+_ION_IAT_CHECK_JS = """<script>
+(function () {{
+  try {{
+    var t = String(window.CESIUM_ION_TOKEN || '').trim();
+    if (!t) return;
+    var parts = t.split('.');
+    if (parts.length !== 3) return;
+    var b = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b.length % 4) b += '=';
+    var j = JSON.parse(atob(b));
+    if (j.iat && j.iat * 1000 > Date.now() + 120000) {{
+      console.warn('[Cesium Ion] Token iat is in the future (' + new Date(j.iat * 1000).toISOString()
+        + '). Requests may fail until then. Create a new token at https://ion.cesium.com/tokens');
+    }}
+  }} catch (e) {{}}
+}})();
+</script>
+"""
+
+
 def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None):
     """Generate standalone HTML with CesiumJS visualization."""
     export_sets = []
@@ -467,9 +514,12 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
         export_sets.append({k: v for k, v in ds.items() if k != "pivot_ecef"})
     data_json = json.dumps(export_sets)
     tok = (cesium_ion_token or os.environ.get("CESIUM_ION_TOKEN", "") or "").strip()
+    warn_if_ion_token_not_yet_valid(tok)
     token_script = ""
     if tok:
-        token_script = f"<script>window.CESIUM_ION_TOKEN = {json.dumps(tok)};</script>\n"
+        token_script = (
+            f"<script>window.CESIUM_ION_TOKEN = {json.dumps(tok)};</script>\n{_ION_IAT_CHECK_JS}"
+        )
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -642,12 +692,12 @@ if (plateauSpec && plateauSpec.url) {{
   if (vs) {{
     vs.innerHTML += '<br/><strong>PLATEAU GLB:</strong> Same mesh family as LOS/NLOS — hide OSM buildings to compare.';
   }}
-  const origin = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
-  const fixMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(origin);
+  const pivotCart = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
+  const modelMatrix = Cesium.Matrix4.fromTranslation(pivotCart);
   const glbUrl = new URL(plateauSpec.url, window.location.href).href;
   Cesium.Model.fromGltfAsync({{
     url: glbUrl,
-    modelMatrix: fixMatrix,
+    modelMatrix,
   }})
     .then(model => {{
       viewer.scene.primitives.add(model);
@@ -655,9 +705,14 @@ if (plateauSpec && plateauSpec.url) {{
     .catch(e => console.warn('PLATEAU GLB load failed (use http://localhost; GLB next to HTML):', e));
 }}
 
-document.getElementById('chkHideOsm').addEventListener('change', (e) => {{
-  if (osmBuildingsTileset) osmBuildingsTileset.show = !e.target.checked;
-}});
+(function () {{
+  const chkHideOsm = document.getElementById('chkHideOsm');
+  if (chkHideOsm) {{
+    chkHideOsm.addEventListener('change', (e) => {{
+      if (osmBuildingsTileset) osmBuildingsTileset.show = !e.target.checked;
+    }});
+  }}
+}})();
 let currentDataset = 0;
 let displayedEpochIndex = 0;
 let rxEntityRef = null;
@@ -1146,6 +1201,7 @@ def _export_plateau_glb_sidecar(
     radius_m: float,
     max_triangles: int,
     glb_out_explicit: str,
+    full_mesh: bool,
 ) -> None:
     """Populate ``ds[\"plateauModel\"]`` and write ``*_plateau.glb`` next to HTML."""
     pivot = np.asarray(ds["pivot_ecef"], dtype=np.float64).reshape(3)
@@ -1235,14 +1291,19 @@ def main(argv=None):
     parser.add_argument(
         "--plateau-glb-radius-m",
         type=float,
-        default=650.0,
-        help="Include triangles whose centroid is within this distance [m] of trajectory centroid (default 650)",
+        default=1200.0,
+        help="Include triangles whose centroid is within this distance [m] of trajectory centroid (default 1200)",
     )
     parser.add_argument(
         "--plateau-glb-max-tris",
         type=int,
-        default=150_000,
-        help="Maximum triangles in GLB after ROI filter (default 150000)",
+        default=300_000,
+        help="Maximum triangles in GLB after ROI filter / subsample cap (default 300000)",
+    )
+    parser.add_argument(
+        "--plateau-glb-full-mesh",
+        action="store_true",
+        help="Export all PLATEAU triangles (ignore radius); still subsampled to --plateau-glb-max-tris",
     )
     parser.add_argument(
         "--plateau-glb-out",
@@ -1338,9 +1399,10 @@ def main(argv=None):
                 args.plateau_dir,
                 args.plateau_zone,
                 out_html,
-                radius_m=float(getattr(args, "plateau_glb_radius_m", 650.0)),
-                max_triangles=int(getattr(args, "plateau_glb_max_tris", 150_000)),
+                radius_m=float(getattr(args, "plateau_glb_radius_m", 1200.0)),
+                max_triangles=int(getattr(args, "plateau_glb_max_tris", 300_000)),
                 glb_out_explicit=str(getattr(args, "plateau_glb_out", "") or ""),
+                full_mesh=bool(getattr(args, "plateau_glb_full_mesh", False)),
             )
         except Exception as e:
             print(f"PLATEAU GLB export failed: {e}")

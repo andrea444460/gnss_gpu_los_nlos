@@ -1,11 +1,8 @@
 """Export PLATEAU building triangles to minimal binary GLB for CesiumJS.
 
-Vertices are placed in a glTF Y-up local frame matching Cesium's
-``eastNorthUpToFixedFrame`` convention at the trajectory centroid:
-
-  ``x = east [m]``, ``y = up [m]``, ``z = -north [m]``
-
-relative to the pivot WGS84 geodetic position.
+Vertices are **ECEF Cartesian offsets** from a pivot (metres), stored as glTF vec3.
+The viewer uses ``Matrix4.fromTranslation(pivotEcef)`` with identity rotation so
+``world = pivot + offset`` matches the source mesh exactly (no ENU / Y-up confusion).
 """
 
 from __future__ import annotations
@@ -17,23 +14,6 @@ from typing import Tuple
 
 import numpy as np
 
-from gnss_gpu.urban_signal_sim import ecef_to_lla
-
-
-def _ecef_delta_to_enu(
-    delta: np.ndarray,
-    lat_rad: float,
-    lon_rad: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Rotate ECEF deltas into East / North / Up at (lat, lon)."""
-    dx, dy, dz = delta[..., 0], delta[..., 1], delta[..., 2]
-    sl, cl = np.sin(lon_rad), np.cos(lon_rad)
-    sf, cf = np.sin(lat_rad), np.cos(lat_rad)
-    east = -sl * dx + cl * dy
-    north = -sf * cl * dx - sf * sl * dy + cf * dz
-    up = cf * cl * dx + cf * sl * dy + sf * dz
-    return east, north, up
-
 
 def export_plateau_roi_glb(
     triangles_ecef: np.ndarray,
@@ -42,6 +22,7 @@ def export_plateau_roi_glb(
     *,
     radius_m: float = 650.0,
     max_triangles: int = 150_000,
+    full_mesh: bool = False,
 ) -> Tuple[int, int]:
     """Write triangles within ``radius_m`` of ``pivot_ecef`` to GLB.
 
@@ -53,8 +34,12 @@ def export_plateau_roi_glb(
         Reference point (trajectory centroid) ECEF [m].
     radius_m
         Keep triangles whose centroid lies within this 3-D distance [m] of pivot.
+        Ignored when ``full_mesh`` is True.
     max_triangles
         If more triangles pass the ROI filter, evenly subsample to this cap.
+    full_mesh
+        If True, skip the distance filter and export all triangles (subject only to
+        ``max_triangles`` subsampling).
 
     Returns
     -------
@@ -68,16 +53,19 @@ def export_plateau_roi_glb(
     if n_tot == 0:
         raise ValueError("empty triangle mesh")
 
-    centers = tri.mean(axis=1)
-    diff = centers - pivot
-    dist = np.linalg.norm(diff, axis=1)
-    mask = dist <= float(radius_m)
-    sel = np.nonzero(mask)[0]
-    if sel.size == 0:
-        raise ValueError(
-            f"no triangles within radius_m={radius_m:g} m of pivot — "
-            "try a larger --plateau-glb-radius-m"
-        )
+    if full_mesh:
+        sel = np.arange(n_tot, dtype=np.int64)
+    else:
+        centers = tri.mean(axis=1)
+        diff = centers - pivot
+        dist = np.linalg.norm(diff, axis=1)
+        mask = dist <= float(radius_m)
+        sel = np.nonzero(mask)[0]
+        if sel.size == 0:
+            raise ValueError(
+                f"no triangles within radius_m={radius_m:g} m of pivot — "
+                "try a larger --plateau-glb-radius-m or --plateau-glb-full-mesh"
+            )
 
     if sel.size > int(max_triangles):
         idx = np.linspace(0, sel.size - 1, int(max_triangles))
@@ -87,12 +75,8 @@ def export_plateau_roi_glb(
     corners = tri[sel].reshape(-1, 3)
     n_corner = corners.shape[0]
 
-    lat, lon, h = ecef_to_lla(float(pivot[0]), float(pivot[1]), float(pivot[2]))
-    east, north, up = _ecef_delta_to_enu(corners - pivot, lat, lon)
-    x = east.astype(np.float32)
-    y = up.astype(np.float32)
-    z = (-north).astype(np.float32)
-    pos = np.stack([x, y, z], axis=-1).astype(np.float32).reshape(-1)
+    # ECEF offsets from pivot (parallel Cartesian axes); Cesium uses translation-only modelMatrix.
+    pos = (corners - pivot).astype(np.float32).reshape(-1)
 
     xyz_min = pos.reshape(-1, 3).min(axis=0).tolist()
     xyz_max = pos.reshape(-1, 3).max(axis=0).tolist()

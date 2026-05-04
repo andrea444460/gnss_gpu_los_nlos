@@ -9,8 +9,12 @@ Creates a standalone HTML file using CesiumJS (free tier) that shows:
 
 Then uses Playwright to record a video of the visualization.
 
+Optional ``--filter-by-obs`` keeps only satellites that have a non-zero **code pseudorange**
+(``C*``) in the rover **RINEX .obs** at the nearest epoch (GPS TOW match within ``--obs-match-tol-s``).
+
 Optional ``--viz-multipath`` adds **orange polylines** for first-order specular reflections
-(satellite→bounce→receiver) when BVH/CPU raytrace multipath is available.
+(satellite→bounce→receiver). With ephemeris batching + BVH, multipath uses ``compute_multipath_batch``
+(one launch per chunk); otherwise per-epoch ``compute_multipath`` / CPU mesh fallback.
 
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
 (``*_plateau.glb``). Vertices are ECEF offsets from the trajectory centroid; Cesium uses
@@ -61,12 +65,15 @@ import math
 import os
 import sys
 import time
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
+from gnss_gpu.io.rinex import read_rinex_obs
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb
 from gnss_gpu.bvh import BVHAccelerator
@@ -118,6 +125,125 @@ def trajectory_row_stride(step_arg: float) -> int:
     if x == 0:
         return 1
     return max(1, int(round(x)))
+
+
+def _gps_seconds_of_week(dt: datetime) -> float:
+    """GPS time-of-week [s] consistent with :mod:`gnss_gpu.io.nav_rinex` broadcast messages."""
+    gps_epoch = datetime(1980, 1, 6)
+    return (dt - gps_epoch).total_seconds() % 604800.0
+
+
+def _normalize_rinex_sat_id(raw: str) -> str:
+    s = str(raw).strip().upper().replace(" ", "")
+    if len(s) >= 2 and s[0] in "GREJCIS" and s[1:].isdigit():
+        return f"{s[0]}{int(s[1:]):02d}"
+    return s
+
+
+def _rinex_sat_id_from_prn(prn) -> str:
+    """Map ephemeris PRN entry to RINEX satellite id (e.g. ``G05``, ``E13``)."""
+    if isinstance(prn, str):
+        p = prn.strip().upper()
+        if len(p) >= 2 and p[0] in "GREJCIS":
+            rest = p[1:]
+            if rest.isdigit():
+                return f"{p[0]}{int(rest):02d}"
+            return p
+        if p.isdigit():
+            return f"G{int(p):02d}"
+        return _normalize_rinex_sat_id(p)
+    return f"G{int(prn):02d}"
+
+
+class _ObsTowPrnLookup:
+    """Nearest-neighbour OBS epochs by GPS TOW; satellite ids from code pseudoranges."""
+
+    def __init__(self, obs_path: str, match_tol_s: float):
+        obs = read_rinex_obs(Path(obs_path))
+        rows: list[tuple[float, frozenset[str]]] = []
+        for ep in obs.epochs:
+            sats: set[str] = set()
+            for sat_id, odict in ep.observations.items():
+                for k, v in odict.items():
+                    if not str(k).startswith("C"):
+                        continue
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if abs(fv) > 1e-6:
+                        sats.add(_normalize_rinex_sat_id(str(sat_id)))
+                        break
+            if sats:
+                rows.append((_gps_seconds_of_week(ep.time), frozenset(sats)))
+        rows.sort(key=lambda x: x[0])
+        self._tows = np.array([r[0] for r in rows], dtype=np.float64) if rows else np.zeros(0)
+        self._sets = [r[1] for r in rows]
+        self._tol = float(match_tol_s)
+
+    @property
+    def n_epochs(self) -> int:
+        return len(self._sets)
+
+    def nearest_sat_ids(self, tow_csv: float) -> Optional[frozenset[str]]:
+        """Satellite ids observed at nearest OBS epoch, or ``None`` if outside tolerance."""
+        if not self._sets:
+            return frozenset()
+        idx = int(np.searchsorted(self._tows, float(tow_csv)))
+        best_d = float("inf")
+        best: Optional[frozenset[str]] = None
+        for j in (idx - 1, idx):
+            if 0 <= j < len(self._sets):
+                d = abs(_tow_delta_sec(float(self._tows[j]), float(tow_csv)))
+                if d < best_d:
+                    best_d = d
+                    best = self._sets[j]
+        if best is None or best_d > self._tol:
+            return None
+        return best
+
+
+def _apply_obs_visibility_mask(
+    visible: np.ndarray,
+    used_prns,
+    tow_csv: float,
+    obs_lookup: _ObsTowPrnLookup,
+    strict: bool,
+    warn_state: dict,
+) -> None:
+    allowed = obs_lookup.nearest_sat_ids(tow_csv)
+    if allowed is None:
+        if strict:
+            visible[:] = False
+        elif not warn_state.get("warned_nomatch"):
+            print(
+                "  OBS filter: some trajectory times have no OBS epoch within tolerance — "
+                "showing all NAV sats for those epochs (use --obs-strict to hide instead)."
+            )
+            warn_state["warned_nomatch"] = True
+        return
+    n_sat = int(visible.shape[0])
+    for i in range(n_sat):
+        if visible[i]:
+            sid = _rinex_sat_id_from_prn(used_prns[i])
+            if sid not in allowed:
+                visible[i] = False
+
+
+def _resolve_obs_path(traj_csv: str, obs_opt: str) -> Optional[str]:
+    """Return rover ``.obs`` path or ``None`` if ``obs_opt`` empty and no default file."""
+    o = (obs_opt or "").strip()
+    if o:
+        p = os.path.abspath(o)
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"RINEX observation file not found: {p}")
+        return p
+    d = os.path.dirname(os.path.abspath(traj_csv))
+    for name in ("rover_ublox.obs", "rover_trimble.obs", "rover.obs"):
+        cand = os.path.join(d, name)
+        if os.path.isfile(cand):
+            return cand
+    return None
 
 
 def _resolve_nav_path(traj_csv: str, nav_path: Optional[str]) -> str:
@@ -259,6 +385,9 @@ def compute_all_epochs(
     epoch_min_interval_s: float = 0.0,
     viz_multipath: bool = False,
     multipath_min_delay_m: float = 0.5,
+    obs_rover_path: Optional[str] = None,
+    obs_match_tol_s: float = 1.0,
+    obs_strict: bool = False,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -279,6 +408,8 @@ def compute_all_epochs(
     (satellite → bounce → receiver) via :meth:`~gnss_gpu.bvh.BVHAccelerator.compute_multipath`
     with CPU mesh fallback when BVH multipath is unavailable (needs compiled raytrace).
 
+    Optional ``obs_rover_path`` filters satellites to those with code pseudorange in rover OBS.
+
     ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
     **row index** after ``step`` (same as legacy ``np.linspace``).
@@ -294,6 +425,7 @@ def compute_all_epochs(
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
     multipath_warned = False
+    multipath_batch_warned = False
 
     positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
     n_loaded = len(times)
@@ -327,7 +459,7 @@ def compute_all_epochs(
     if viz_multipath:
         print(
             f"  Multipath viz: enabled (delay ≥ {multipath_min_delay_m:g} m); "
-            "requires compiled raytrace/BVH multipath — falls back to CPU mesh scan if needed."
+            "uses BVH batched multipath when LOS batch path is active, else per-epoch GPU/CPU."
         )
 
     usim = UrbanSignalSimulator(
@@ -335,6 +467,16 @@ def compute_all_epochs(
         noise_floor_db=-35,
         elevation_mask_deg=elevation_mask_deg,
     )
+
+    obs_lookup: Optional[_ObsTowPrnLookup] = None
+    obs_warn_state: dict = {}
+    if obs_rover_path:
+        obs_lookup = _ObsTowPrnLookup(obs_rover_path, obs_match_tol_s)
+        print(
+            f"[{area_name}] OBS PRN filter: {obs_rover_path} "
+            f"(match nearest OBS epoch if |ΔGPS TOW|≤{obs_match_tol_s:g}s; strict={obs_strict})"
+        )
+        print(f"  OBS epochs with code pseudorange: {obs_lookup.n_epochs}")
 
     idx_list = [int(i) for i in indices]
     if eph_batch_chunk <= 0:
@@ -366,6 +508,8 @@ def compute_all_epochs(
         los_batch = None
         el_batch = None
         visible_batch = None
+        mp_delays_batch = None
+        mp_refl_batch = None
         if (
             sat_rows is not None
             and has_bvh_los_batch
@@ -382,6 +526,20 @@ def compute_all_epochs(
             sat_work = sat_blk.copy()
             sat_work[~visible_batch] = np.nan
             los_batch = np.asarray(bvh.check_los_batch(rx_blk, sat_work), dtype=bool)
+            if viz_multipath:
+                try:
+                    mp_delays_batch, mp_refl_batch = bvh.compute_multipath_batch(rx_blk, sat_work)
+                    mp_delays_batch = np.asarray(mp_delays_batch, dtype=np.float64)
+                    mp_refl_batch = np.asarray(mp_refl_batch, dtype=np.float64)
+                except Exception as _e:
+                    mp_delays_batch = None
+                    mp_refl_batch = None
+                    if not multipath_batch_warned:
+                        print(
+                            f"  BVH multipath batch unavailable ({_e}); "
+                            "falling back to per-epoch multipath for this run."
+                        )
+                        multipath_batch_warned = True
 
         for local_i, ei in enumerate(chunk_idx):
             fi += 1
@@ -413,14 +571,12 @@ def compute_all_epochs(
                 continue
 
             if los_batch is not None:
-                visible = visible_batch[local_i]
+                visible = np.asarray(visible_batch[local_i], dtype=bool).copy()
                 el = el_batch[local_i]
                 is_los = np.ones(n_sat, dtype=bool)
                 vis_idx = np.where(visible)[0]
                 if len(vis_idx) > 0:
                     is_los[vis_idx] = los_batch[local_i, vis_idx]
-                n_los_ep = int(np.sum(is_los & visible))
-                n_nlos_ep = int(np.sum(~is_los & visible))
             else:
                 result = usim.compute_epoch(
                     rx_ecef=rx,
@@ -428,29 +584,44 @@ def compute_all_epochs(
                     sat_clk=sat_clk,
                     prn_list=used_prns_i,
                 )
-                visible = result["visible"]
+                visible = np.asarray(result["visible"], dtype=bool).copy()
                 el = result["elevations"]
-                is_los = result["is_los"]
-                n_los_ep = int(result["n_los"])
-                n_nlos_ep = int(result["n_nlos"])
+                is_los = np.asarray(result["is_los"], dtype=bool)
+
+            if obs_lookup is not None:
+                _apply_obs_visibility_mask(
+                    visible,
+                    used_prns_i,
+                    float(times[ei]),
+                    obs_lookup,
+                    obs_strict,
+                    obs_warn_state,
+                )
+
+            n_los_ep = int(np.sum(is_los & visible))
+            n_nlos_ep = int(np.sum(~is_los & visible))
 
             reflections = []
             sat_mat = np.ascontiguousarray(np.asarray(sat_ecef), dtype=np.float64).reshape(n_sat, 3)
             if viz_multipath and n_sat > 0:
                 delays_mp = None
                 refl_pts_mp = None
-                try:
-                    delays_mp, refl_pts_mp = bvh.compute_multipath(rx, sat_mat)
-                except Exception:
+                if mp_delays_batch is not None and mp_refl_batch is not None:
+                    delays_mp = mp_delays_batch[local_i]
+                    refl_pts_mp = mp_refl_batch[local_i]
+                else:
                     try:
-                        delays_mp, refl_pts_mp = building.compute_multipath(rx, sat_mat)
-                    except Exception as _e:
-                        if not multipath_warned:
-                            print(
-                                "  Multipath viz skipped (compile/install raytrace or BVH with multipath): "
-                                f"{_e}"
-                            )
-                            multipath_warned = True
+                        delays_mp, refl_pts_mp = bvh.compute_multipath(rx, sat_mat)
+                    except Exception:
+                        try:
+                            delays_mp, refl_pts_mp = building.compute_multipath(rx, sat_mat)
+                        except Exception as _e:
+                            if not multipath_warned:
+                                print(
+                                    "  Multipath viz skipped (compile/install raytrace or BVH with multipath): "
+                                    f"{_e}"
+                                )
+                                multipath_warned = True
                 if delays_mp is not None and refl_pts_mp is not None:
                     delays_mp = np.asarray(delays_mp, dtype=np.float64).reshape(-1)
                     refl_pts_mp = np.asarray(refl_pts_mp, dtype=np.float64).reshape(-1, 3)
@@ -1472,6 +1643,28 @@ def main(argv=None):
         default=0.5,
         help="Only draw reflections with excess path delay ≥ this [m] (default 0.5)",
     )
+    parser.add_argument(
+        "--filter-by-obs",
+        action="store_true",
+        help="Hide rays for satellites without code pseudorange (C*) in rover RINEX .obs at nearest epoch",
+    )
+    parser.add_argument(
+        "--obs",
+        type=str,
+        default="",
+        help="Rover RINEX observation file (default: rover_ublox.obs / rover_trimble.obs / rover.obs next to reference CSV)",
+    )
+    parser.add_argument(
+        "--obs-match-tol-s",
+        type=float,
+        default=1.0,
+        help="Max |ΔGPS TOW| [s] between trajectory epoch and matched OBS epoch (default 1)",
+    )
+    parser.add_argument(
+        "--obs-strict",
+        action="store_true",
+        help="If no OBS epoch within tolerance, hide all satellites (default: keep NAV-only visibility)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1484,6 +1677,22 @@ def main(argv=None):
     el_mask = float(getattr(args, "elevation_mask_deg", 10.0))
     eph_chunk = int(getattr(args, "eph_batch_chunk", 64))
     epoch_gap_s = float(getattr(args, "epoch_min_interval_s", 0.0))
+
+    obs_tol = float(getattr(args, "obs_match_tol_s", 1.0))
+    obs_strict = bool(getattr(args, "obs_strict", False))
+    obs_opt = (getattr(args, "obs", "") or "").strip()
+    filter_obs = bool(getattr(args, "filter_by_obs", False))
+
+    def _obs_path_for_ref(ref_csv: str) -> Optional[str]:
+        if not filter_obs:
+            return None
+        pth = _resolve_obs_path(ref_csv, obs_opt)
+        if pth is None:
+            parser.error(
+                "--filter-by-obs needs a rover .obs next to the reference CSV "
+                "(try rover_ublox.obs, rover_trimble.obs, rover.obs) or pass --obs PATH"
+            )
+        return pth
 
     if args.legacy:
         p = _default_legacy_paths()
@@ -1499,6 +1708,9 @@ def main(argv=None):
             elevation_mask_deg=el_mask,
             eph_batch_chunk=eph_chunk,
             epoch_min_interval_s=epoch_gap_s,
+            obs_rover_path=_obs_path_for_ref(p["shinjuku_ref"]),
+            obs_match_tol_s=obs_tol,
+            obs_strict=obs_strict,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
@@ -1511,6 +1723,9 @@ def main(argv=None):
             elevation_mask_deg=el_mask,
             eph_batch_chunk=eph_chunk,
             epoch_min_interval_s=epoch_gap_s,
+            obs_rover_path=_obs_path_for_ref(p["odaiba_ref"]),
+            obs_match_tol_s=obs_tol,
+            obs_strict=obs_strict,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
@@ -1543,6 +1758,9 @@ def main(argv=None):
         epoch_min_interval_s=epoch_gap_s,
         viz_multipath=bool(getattr(args, "viz_multipath", False)),
         multipath_min_delay_m=float(getattr(args, "multipath_min_delay_m", 0.5)),
+        obs_rover_path=_obs_path_for_ref(args.reference_csv),
+        obs_match_tol_s=obs_tol,
+        obs_strict=obs_strict,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

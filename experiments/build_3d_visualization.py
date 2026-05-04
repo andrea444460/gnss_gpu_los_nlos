@@ -31,7 +31,7 @@ The receiver trajectory is sourced from UrbanNav. Satellite geometry uses the
 ``--nav``; constellation blocks **G/R/E/J/C/I** from that file are parsed (SBAS omitted).
 LOS/NLOS rays
 are computed in Python against the **local PLATEAU CityGML mesh** (--plateau-dir).
-Optional ``--plateau-mesh-vertical-shift-m`` / ``--plateau-mesh-ecef-shift-m`` apply a rigid ECEF translation to **all** PLATEAU vertices **before** the BVH is built, so **LOS/NLOS ray tracing and multipath** use the same geometry as the viewer; ``--export-plateau-glb`` applies the same shift from embedded ``plateauMeshEcefShiftM``.
+``PlateauLoader`` applies orthometric→ellipsoidal height correction by default (see ``gnss_gpu.io.plateau``), so mesh and RX ECEF agree without extra mesh shifts; ``--export-plateau-glb`` exports the same geometry used for ray tracing.
 By default satellites below **10° elevation** are excluded (``--elevation-mask-deg``); use ``0`` for horizon-only or ``-90`` to disable.
 Optional ``--epoch-min-interval-s`` > 0 enforces a minimum GPS-time gap between consecutive viz epochs; default is off (evenly spaced trajectory rows).
 Ephemeris positions are evaluated with ``Ephemeris.compute_batch`` in chunks (``--eph-batch-chunk``, default 64).
@@ -72,19 +72,14 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 
 from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.rinex import read_rinex_obs
-from gnss_gpu.io.plateau import (
-    PlateauLoader,
-    apply_plateau_mesh_ecef_shift,
-    parse_optional_comma_xyz,
-    plateau_mesh_total_ecef_shift_m,
-)
+from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import (
@@ -499,8 +494,6 @@ def compute_all_epochs(
     obs_strict: bool = False,
     cnr_obs_path: Optional[str] = None,
     cnr_max_points_per_prn: int = 2500,
-    plateau_mesh_vertical_shift_m: float = 0.0,
-    plateau_mesh_ecef_shift_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -531,12 +524,6 @@ def compute_all_epochs(
     ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
     **row index** after ``step`` (same as legacy ``np.linspace``).
-
-    ``plateau_mesh_vertical_shift_m`` adds a translation along the GRS80 ellipsoid outward normal
-    at the trajectory centroid; ``plateau_mesh_ecef_shift_m`` adds a further uniform ECEF translation.
-    Both are applied to PLATEAU vertices **before** the BVH is built so batched/per-epoch LOS and
-    multipath rays intersect the shifted mesh; ``plateauMeshEcefShiftM`` records the same vector for
-    optional GLB export.
     """
     print(f"[{area_name}] Loading PLATEAU...")
     loader = PlateauLoader(zone=int(plateau_zone))
@@ -567,19 +554,6 @@ def compute_all_epochs(
         )
     else:
         print(f"  Viz epochs: {len(indices)} (evenly spaced rows; no min Δt constraint)")
-
-    pivot_pre = np.mean(positions, axis=0)
-    mesh_shift_m = plateau_mesh_total_ecef_shift_m(
-        pivot_pre,
-        float(plateau_mesh_vertical_shift_m),
-        plateau_mesh_ecef_shift_m,
-    )
-    if np.any(mesh_shift_m != 0.0):
-        building = apply_plateau_mesh_ecef_shift(building, mesh_shift_m)
-        print(
-            "  PLATEAU mesh ECEF shift [m] (applied before BVH / ray tracing): "
-            f"{float(mesh_shift_m[0]):.4f}, {float(mesh_shift_m[1]):.4f}, {float(mesh_shift_m[2]):.4f}"
-        )
 
     print(f"[{area_name}] Building BVH...")
     bvh = BVHAccelerator.from_building_model(building)
@@ -869,14 +843,12 @@ def compute_all_epochs(
         traj.append([math.degrees(lat), math.degrees(lon), alt])
 
     pivot_ecef = np.mean(positions, axis=0).tolist()
-    mesh_shift_list = [float(mesh_shift_m[0]), float(mesh_shift_m[1]), float(mesh_shift_m[2])]
 
     return {
         "epochs": epochs_data,
         "trajectory": traj,
         "area": area_name,
         "pivot_ecef": pivot_ecef,
-        "plateauMeshEcefShiftM": mesh_shift_list,
         "plateauModel": None,
         "cnrByPrn": cnr_by_prn,
         "cnrObsSource": cnr_obs_source or None,
@@ -2101,10 +2073,7 @@ def _export_plateau_glb_sidecar(
     pivot = np.asarray(ds["pivot_ecef"], dtype=np.float64).reshape(3)
     loader = PlateauLoader(zone=int(plateau_zone))
     building = loader.load_directory(plateau_dir)
-    mesh_shift = np.asarray(ds.get("plateauMeshEcefShiftM", [0.0, 0.0, 0.0]), dtype=np.float64).reshape(3)
     tri_ecef = building.triangles
-    if np.any(mesh_shift != 0.0):
-        tri_ecef = tri_ecef + mesh_shift.reshape(1, 1, 3)
     base = os.path.splitext(os.path.abspath(out_html))[0]
     glb_path = glb_out_explicit.strip() or (base + "_plateau.glb")
     n_kept, n_tot = export_plateau_roi_glb(
@@ -2147,25 +2116,6 @@ def main(argv=None):
     parser.add_argument("--plateau-dir", type=str, default="", help="Directory with PLATEAU CityGML tiles")
     parser.add_argument("--reference-csv", type=str, default="", help="UrbanNav reference.csv (ECEF trajectory)")
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane zone (Tokyo area = 9)")
-    parser.add_argument(
-        "--plateau-mesh-vertical-shift-m",
-        type=float,
-        default=0.0,
-        help=(
-            "Translate all PLATEAU triangles along the GRS80 ellipsoid outward direction at the "
-            "trajectory centroid [m]. Use this when building roofs/floors are systematically offset "
-            "from RX ECEF (e.g. vertical datum vs ellipsoidal height)."
-        ),
-    )
-    parser.add_argument(
-        "--plateau-mesh-ecef-shift-m",
-        type=str,
-        default="",
-        help=(
-            'Extra uniform translation of PLATEAU triangles in ECEF metres after the vertical shift, '
-            'as three comma-separated values: "dx,dy,dz"'
-        ),
-    )
     parser.add_argument("--n-epochs", type=int, default=12, help="Number of epochs along trajectory")
     parser.add_argument(
         "--epoch-min-interval-s",
@@ -2282,12 +2232,6 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     try:
-        plateau_mesh_extra_xyz = parse_optional_comma_xyz(str(getattr(args, "plateau_mesh_ecef_shift_m", "")))
-    except ValueError as e:
-        parser.error(f"--plateau-mesh-ecef-shift-m: {e}")
-    plateau_mesh_v_shift_m = float(getattr(args, "plateau_mesh_vertical_shift_m", 0.0))
-
-    try:
         traj_stride = trajectory_row_stride(float(args.traj_step))
     except ValueError as e:
         parser.error(str(e))
@@ -2335,8 +2279,6 @@ def main(argv=None):
             obs_strict=obs_strict,
             cnr_obs_path=_cnr_obs_path_for_embed(p["shinjuku_ref"], obs_opt, embed=embed_cnr),
             cnr_max_points_per_prn=cnr_max_pts,
-            plateau_mesh_vertical_shift_m=plateau_mesh_v_shift_m,
-            plateau_mesh_ecef_shift_m=plateau_mesh_extra_xyz,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
@@ -2354,8 +2296,6 @@ def main(argv=None):
             obs_strict=obs_strict,
             cnr_obs_path=_cnr_obs_path_for_embed(p["odaiba_ref"], obs_opt, embed=embed_cnr),
             cnr_max_points_per_prn=cnr_max_pts,
-            plateau_mesh_vertical_shift_m=plateau_mesh_v_shift_m,
-            plateau_mesh_ecef_shift_m=plateau_mesh_extra_xyz,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
@@ -2393,8 +2333,6 @@ def main(argv=None):
         obs_strict=obs_strict,
         cnr_obs_path=_cnr_obs_path_for_embed(args.reference_csv, obs_opt, embed=embed_cnr),
         cnr_max_points_per_prn=cnr_max_pts,
-        plateau_mesh_vertical_shift_m=plateau_mesh_v_shift_m,
-        plateau_mesh_ecef_shift_m=plateau_mesh_extra_xyz,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

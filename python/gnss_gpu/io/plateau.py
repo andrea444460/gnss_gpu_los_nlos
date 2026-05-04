@@ -36,7 +36,7 @@ import glob as _glob
 import os
 import warnings
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Tuple, Union
+from typing import Callable, Iterable, Optional, Union
 
 import numpy as np
 
@@ -197,7 +197,6 @@ _E2 = 2.0 * _F - _F * _F
 _A_GRS80 = 6378137.0
 _F_GRS80 = 1.0 / 298.257222101
 _E2_GRS80 = 2.0 * _F_GRS80 - _F_GRS80 * _F_GRS80
-_B_GRS80 = _A_GRS80 * (1.0 - _F_GRS80)
 
 
 class PlateauLoader:

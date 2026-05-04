@@ -9,6 +9,9 @@ Creates a standalone HTML file using CesiumJS (free tier) that shows:
 
 Then uses Playwright to record a video of the visualization.
 
+Optional ``--viz-multipath`` adds **orange polylines** for first-order specular reflections
+(satellite→bounce→receiver) when BVH/CPU raytrace multipath is available.
+
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
 (``*_plateau.glb``). Vertices are ECEF offsets from the trajectory centroid; Cesium uses
 ``Matrix4.fromTranslation(pivotEcef)`` only (no ENU frame), matching the ray geometry.
@@ -254,6 +257,8 @@ def compute_all_epochs(
     elevation_mask_deg: float = 10.0,
     eph_batch_chunk: int = 64,
     epoch_min_interval_s: float = 0.0,
+    viz_multipath: bool = False,
+    multipath_min_delay_m: float = 0.5,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -270,6 +275,10 @@ def compute_all_epochs(
     when available (same CUDA extension as single-ray LOS); otherwise
     :class:`~gnss_gpu.urban_signal_sim.UrbanSignalSimulator` per epoch.
 
+    Optional ``viz_multipath`` adds first-order specular reflection segments
+    (satellite → bounce → receiver) via :meth:`~gnss_gpu.bvh.BVHAccelerator.compute_multipath`
+    with CPU mesh fallback when BVH multipath is unavailable (needs compiled raytrace).
+
     ``epoch_min_interval_s``: if > 0, minimum GPS-time spacing between consecutive viz epochs
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
     **row index** after ``step`` (same as legacy ``np.linspace``).
@@ -283,6 +292,8 @@ def compute_all_epochs(
     bvh = BVHAccelerator.from_building_model(building)
     has_bvh_los_batch = hasattr(bvh, "check_los_batch")
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
+
+    multipath_warned = False
 
     positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
     n_loaded = len(times)
@@ -313,6 +324,11 @@ def compute_all_epochs(
     prn_catalog = eph.available_prns
     print(f"  Satellites in NAV: {len(prn_catalog)}")
     print(f"  Elevation mask: {elevation_mask_deg:g}° above horizon")
+    if viz_multipath:
+        print(
+            f"  Multipath viz: enabled (delay ≥ {multipath_min_delay_m:g} m); "
+            "requires compiled raytrace/BVH multipath — falls back to CPU mesh scan if needed."
+        )
 
     usim = UrbanSignalSimulator(
         building_model=bvh,
@@ -387,6 +403,7 @@ def compute_all_epochs(
                 epochs_data.append({
                     "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
                     "rays": [],
+                    "reflections": [],
                     "n_los": 0,
                     "n_nlos": 0,
                     "t": t,
@@ -417,10 +434,61 @@ def compute_all_epochs(
                 n_los_ep = int(result["n_los"])
                 n_nlos_ep = int(result["n_nlos"])
 
+            reflections = []
+            sat_mat = np.ascontiguousarray(np.asarray(sat_ecef), dtype=np.float64).reshape(n_sat, 3)
+            if viz_multipath and n_sat > 0:
+                delays_mp = None
+                refl_pts_mp = None
+                try:
+                    delays_mp, refl_pts_mp = bvh.compute_multipath(rx, sat_mat)
+                except Exception:
+                    try:
+                        delays_mp, refl_pts_mp = building.compute_multipath(rx, sat_mat)
+                    except Exception as _e:
+                        if not multipath_warned:
+                            print(
+                                "  Multipath viz skipped (compile/install raytrace or BVH with multipath): "
+                                f"{_e}"
+                            )
+                            multipath_warned = True
+                if delays_mp is not None and refl_pts_mp is not None:
+                    delays_mp = np.asarray(delays_mp, dtype=np.float64).reshape(-1)
+                    refl_pts_mp = np.asarray(refl_pts_mp, dtype=np.float64).reshape(-1, 3)
+                    thr = float(multipath_min_delay_m)
+                    for i in range(n_sat):
+                        if not visible[i]:
+                            continue
+                        dmp = float(delays_mp[i])
+                        if dmp < thr:
+                            continue
+                        R = refl_pts_mp[i]
+                        if not np.all(np.isfinite(R)):
+                            continue
+                        sat_i = sat_mat[i]
+                        v = sat_i - R
+                        nv = float(np.linalg.norm(v))
+                        if nv < 1.0:
+                            continue
+                        v = v / nv
+                        inc_end = R + v * min(5000.0, nv * 0.999)
+                        ila, ilo, ih = ecef_to_lla(
+                            float(inc_end[0]), float(inc_end[1]), float(inc_end[2])
+                        )
+                        bla, blo, bh = ecef_to_lla(float(R[0]), float(R[1]), float(R[2]))
+                        reflections.append(
+                            {
+                                "prn": _sat_display_id(used_prns_i[i]),
+                                "delay_m": dmp,
+                                "inc": [math.degrees(ila), math.degrees(ilo), ih],
+                                "bounce": [math.degrees(bla), math.degrees(blo), bh],
+                            }
+                        )
+
             lat, lon, alt = ecef_to_lla(*rx)
             epoch = {
                 "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
                 "rays": [],
+                "reflections": reflections,
                 "n_los": n_los_ep,
                 "n_nlos": n_nlos_ep,
                 "t": t,
@@ -613,6 +681,9 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
       <label title="Keep the camera framed on the receiver each epoch (preserves your zoom once enabled)">
         <input type="checkbox" id="chkFollowRx"/> Follow RX
       </label>
+      <label title="First-order specular path satellite→bounce→RX (needs --viz-multipath when generating HTML)">
+        <input type="checkbox" id="chkShowMultipath" checked/> Multipath
+      </label>
     </div>
     <div class="row" id="osmToggleRow" style="display:none;">
       <label title="Hide Cesium Ion OSM 3D buildings (compare with PLATEAU GLB)">
@@ -732,12 +803,17 @@ if (plateauSpec && plateauSpec.url) {{
       if (osmBuildingsTileset) osmBuildingsTileset.show = !e.target.checked;
     }});
   }}
+  const chkMp = document.getElementById('chkShowMultipath');
+  if (chkMp) {{
+    chkMp.addEventListener('change', () => {{ paintFrame(); }});
+  }}
 }})();
 let currentDataset = 0;
 let displayedEpochIndex = 0;
 let rxEntityRef = null;
 let pooledRayLines = [];
 let pooledRayLabels = [];
+let pooledMultipathLines = [];
 let playing = true;
 let stepMs = 1500;
 const datasetGapMs = 2500;
@@ -847,6 +923,7 @@ function resetRayPools() {{
   rxEntityRef = null;
   pooledRayLines = [];
   pooledRayLabels = [];
+  pooledMultipathLines = [];
 }}
 
 function ensureRayLinePool(n) {{
@@ -889,12 +966,38 @@ function ensureRayLabelPool(n) {{
   viewer.entities.resumeEvents();
 }}
 
+function ensureMultipathLinePool(n) {{
+  viewer.entities.suspendEvents();
+  while (pooledMultipathLines.length < n) {{
+    pooledMultipathLines.push(viewer.entities.add({{
+      polyline: {{
+        positions: new Cesium.ConstantProperty([
+          new Cesium.Cartesian3(),
+          new Cesium.Cartesian3(),
+          new Cesium.Cartesian3(),
+        ]),
+        width: new Cesium.ConstantProperty(3),
+        arcType: Cesium.ArcType.NONE,
+        clampToGround: false,
+        material: Cesium.Color.fromCssColorString('#ff9f1c'),
+      }},
+      show: false,
+    }}));
+  }}
+  viewer.entities.resumeEvents();
+}}
+
 function updateEpochOverlay(ds, epoch, epochIdx) {{
   document.getElementById('area').textContent = ds.area;
   const losCount = epoch.rays.filter(r => r.los).length;
   const nlosCount = epoch.rays.filter(r => !r.los).length;
+  const mpList = epoch.reflections || [];
+  let mpExtra = '';
+  if (mpList.length > 0) {{
+    mpExtra = ' | <span style="color:#ff9f1c">MP paths: ' + mpList.length + '</span>';
+  }}
   document.getElementById('stats').innerHTML =
-    '<span class="los">LOS: ' + losCount + '</span> | <span class="nlos">NLOS: ' + nlosCount + '</span>';
+    '<span class="los">LOS: ' + losCount + '</span> | <span class="nlos">NLOS: ' + nlosCount + '</span>' + mpExtra;
   document.getElementById('progress').textContent =
     'Epoch ' + (epochIdx+1) + '/' + ds.epochs.length + '  t=' + epoch.t.toFixed(0) + 's';
 }}
@@ -949,6 +1052,26 @@ function showEpoch(ds, epochIdx) {{
       }}
       for (let i = nr; i < pooledRayLines.length; i++) {{
         pooledRayLines[i].show = false;
+      }}
+
+      const reflList = epoch.reflections || [];
+      const chkMp = document.getElementById('chkShowMultipath');
+      const showMpGeom = chkMp ? chkMp.checked : true;
+      const nm = showMpGeom ? reflList.length : 0;
+      ensureMultipathLinePool(nm);
+      const orange = Cesium.Color.fromCssColorString('#ff9f1c');
+      for (let j = 0; j < nm; j++) {{
+        const mp = reflList[j];
+        const q0 = Cesium.Cartesian3.fromDegrees(mp.inc[1], mp.inc[0], mp.inc[2]);
+        const q1 = Cesium.Cartesian3.fromDegrees(mp.bounce[1], mp.bounce[0], mp.bounce[2]);
+        const q2 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
+        const ent = pooledMultipathLines[j];
+        ent.show = true;
+        ent.polyline.positions = new Cesium.ConstantProperty([q0, q1, q2]);
+        ent.polyline.material = new Cesium.ColorMaterialProperty(orange);
+      }}
+      for (let j = nm; j < pooledMultipathLines.length; j++) {{
+        pooledMultipathLines[j].show = false;
       }}
 
       for (let i = 0; i < pooledRayLabels.length; i++) {{
@@ -1338,6 +1461,17 @@ def main(argv=None):
         help="Cesium ion token for terrain + OSM buildings (or set CESIUM_ION_TOKEN)",
     )
     parser.add_argument("--record-video", action="store_true", help="Try Playwright screen recording (needs Node)")
+    parser.add_argument(
+        "--viz-multipath",
+        action="store_true",
+        help="Include first-order specular reflection paths (sat→wall→RX) in HTML; needs BVH/raytrace multipath",
+    )
+    parser.add_argument(
+        "--multipath-min-delay-m",
+        type=float,
+        default=0.5,
+        help="Only draw reflections with excess path delay ≥ this [m] (default 0.5)",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -1407,6 +1541,8 @@ def main(argv=None):
         elevation_mask_deg=el_mask,
         eph_batch_chunk=eph_chunk,
         epoch_min_interval_s=epoch_gap_s,
+        viz_multipath=bool(getattr(args, "viz_multipath", False)),
+        multipath_min_delay_m=float(getattr(args, "multipath_min_delay_m", 0.5)),
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

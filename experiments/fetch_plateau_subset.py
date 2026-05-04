@@ -12,11 +12,22 @@ import argparse
 import csv
 import io
 import json
+import math
 import sys
 import zipfile
 from pathlib import Path
 
+import numpy as np
 import requests
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_REPO_ROOT = _SCRIPT_DIR.parent
+_PYTHON_PKG = _REPO_ROOT / "python"
+if _PYTHON_PKG.is_dir() and str(_PYTHON_PKG) not in sys.path:
+    sys.path.insert(0, str(_PYTHON_PKG))
+
+from gnss_gpu.io.urbannav import UrbanNavLoader  # noqa: E402
+from gnss_gpu.urban_signal_sim import ecef_to_lla  # noqa: E402
 
 
 TOKYO23_CITYGML_URL = (
@@ -162,25 +173,85 @@ def expand_meshes(meshes: list[str], radius: int) -> list[str]:
     return sorted(expanded)
 
 
+def _legacy_ll_rows_lat_lon(reference_csv: Path) -> list[tuple[float, float]] | None:
+    """Fallback: stripped CSV headers and common UrbanNav / PPC lat-lon column names."""
+    lat_candidates = (
+        "Latitude (deg)",
+        "Latitude",
+        "latitude",
+        "lat",
+        "Lat",
+    )
+    lon_candidates = (
+        "Longitude (deg)",
+        "Longitude",
+        "longitude",
+        "lon",
+        "Lon",
+    )
+    with open(reference_csv, newline="", encoding="utf-8") as fh:
+        r = csv.DictReader(fh, skipinitialspace=True)
+        rows = [{(k or "").strip(): v for k, v in row.items()} for row in r]
+    if not rows:
+        return None
+    keys = set(rows[0].keys())
+    lat_col = next((c for c in lat_candidates if c in keys), None)
+    lon_col = next((c for c in lon_candidates if c in keys), None)
+    if lat_col is None or lon_col is None:
+        return None
+    out: list[tuple[float, float]] = []
+    for row in rows:
+        try:
+            out.append((float(row[lat_col]), float(row[lon_col])))
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out or None
+
+
 def load_reference_meshes(
     reference_csv: Path,
     max_rows: int | None = None,
     start_row: int = 0,
     mesh_radius: int = 0,
 ) -> list[str]:
-    with open(reference_csv, newline="") as fh:
-        rows = list(csv.DictReader(fh))
-    if start_row:
-        rows = rows[start_row:]
-    if max_rows is not None:
-        rows = rows[:max_rows]
-    base_meshes = sorted(
-        {
-            mesh3_code(float(row["Latitude (deg)"]), float(row["Longitude (deg)"]))
-            for row in rows
-        }
-    )
-    return expand_meshes(base_meshes, mesh_radius)
+    """Third-level mesh codes along the trajectory.
+
+    Supports UrbanNav-style ``reference.csv`` with **ECEF-only** columns (no lat/lon),
+    geodetic columns, or legacy ``Latitude (deg)`` / ``Longitude (deg)``.
+    """
+    reference_csv = Path(reference_csv)
+    loader = UrbanNavLoader(reference_csv.parent)
+    try:
+        _times, ecef = loader.load_ground_truth(filepath=reference_csv)
+    except (FileNotFoundError, ValueError, OSError):
+        ecef = np.empty((0, 3))
+
+    base_meshes: set[str]
+    if ecef.shape[0] > 0:
+        if start_row:
+            ecef = ecef[start_row:]
+        if max_rows is not None:
+            ecef = ecef[:max_rows]
+        base_meshes = set()
+        for i in range(ecef.shape[0]):
+            lat_rad, lon_rad, _h = ecef_to_lla(
+                float(ecef[i, 0]), float(ecef[i, 1]), float(ecef[i, 2])
+            )
+            base_meshes.add(mesh3_code(math.degrees(lat_rad), math.degrees(lon_rad)))
+    else:
+        ll = _legacy_ll_rows_lat_lon(reference_csv)
+        if not ll:
+            raise ValueError(
+                f"could not read trajectory from {reference_csv}: "
+                "need ECEF X/Y/Z (UrbanNav) or latitude/longitude columns"
+            )
+        if start_row:
+            ll = ll[start_row:]
+        if max_rows is not None:
+            ll = ll[:max_rows]
+        base_meshes = {mesh3_code(lat, lon) for lat, lon in ll}
+
+    return expand_meshes(sorted(base_meshes), mesh_radius)
 
 
 def select_bldg_entries(zf: zipfile.ZipFile, meshes: list[str]) -> list[str]:

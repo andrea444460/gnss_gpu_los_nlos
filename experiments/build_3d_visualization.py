@@ -1232,13 +1232,14 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
   }}
   #cnrEpochRow button {{
     cursor: pointer;
-    padding: 4px 10px;
+    padding: 6px 12px;
     border-radius: 6px;
     border: 1px solid #556;
     background: #252a38;
     color: #eee;
     font-family: monospace;
     font-size: 12px;
+    min-width: 4.5rem;
   }}
   #cnrEpochSlider {{ flex: 1; min-width: 160px; accent-color: #3b7ddd; }}
 </style>
@@ -1319,6 +1320,15 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
 <div id="cnrBackdrop" aria-hidden="true">
   <div id="cnrPanel" role="dialog" aria-labelledby="cnrTitle">
     <h4 id="cnrTitle">C/N₀</h4>
+    <div id="cnrEpochRow">
+      <span id="cnrEpochLabel" style="font-size:12px;color:#aab;min-width:5.5rem;"></span>
+      <button type="button" id="btnCnrPrev" title="Previous epoch">◀ Prev</button>
+      <button type="button" id="btnCnrNext" title="Next epoch">Next ▶</button>
+      <label style="flex:1;min-width:160px;display:flex;align-items:center;gap:8px;font-size:11px;color:#aab;">
+        <span style="white-space:nowrap;">Epoch</span>
+        <input type="range" id="cnrEpochSlider" min="0" max="0" value="0" />
+      </label>
+    </div>
     <canvas id="cnrCanvas" width="680" height="240"></canvas>
     <div id="cnrHint"></div>
     <div style="margin-top:12px;text-align:right;">
@@ -1940,20 +1950,26 @@ if (cnrEpochSliderEl) {{
     }}
   }});
 }}
-document.getElementById('btnCnrPrev').addEventListener('click', () => {{
-  clearPlaybackTimer();
-  goPrevEpoch();
-  if (playing) {{
-    playbackTimer = setTimeout(tickPlayback, stepMs);
-  }}
-}});
-document.getElementById('btnCnrNext').addEventListener('click', () => {{
-  clearPlaybackTimer();
-  goNextEpoch();
-  if (playing) {{
-    playbackTimer = setTimeout(tickPlayback, stepMs);
-  }}
-}});
+const btnCnrPrevEl = document.getElementById('btnCnrPrev');
+if (btnCnrPrevEl) {{
+  btnCnrPrevEl.addEventListener('click', () => {{
+    clearPlaybackTimer();
+    goPrevEpoch();
+    if (playing) {{
+      playbackTimer = setTimeout(tickPlayback, stepMs);
+    }}
+  }});
+}}
+const btnCnrNextEl = document.getElementById('btnCnrNext');
+if (btnCnrNextEl) {{
+  btnCnrNextEl.addEventListener('click', () => {{
+    clearPlaybackTimer();
+    goNextEpoch();
+    if (playing) {{
+      playbackTimer = setTimeout(tickPlayback, stepMs);
+    }}
+  }});
+}}
 
 if (playing) {{
   playbackTimer = setTimeout(tickPlayback, stepMs);
@@ -1986,8 +2002,10 @@ if (playing) {{
         + _VIEWER_EXTENSIONS_JS
         + "\n\nfunction clearPlaybackTimer",
     )
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    with open(output_path, "w") as f:
+    _out_dir = os.path.dirname(os.path.abspath(output_path))
+    if _out_dir:
+        os.makedirs(_out_dir, exist_ok=True)
+    with open(output_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(html)
     print(f"HTML: {output_path}")
 

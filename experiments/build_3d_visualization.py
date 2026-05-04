@@ -56,7 +56,7 @@ Or pass ``--cesium-ion-token ...`` (injected into the HTML).
 
 Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
 
-During **Play**, Cesium skips per-epoch ``sampleTerrainMostDetailed`` (uses ``globe.getHeight`` only) and omits PRN endpoint labels so redraw stays light; **Pause** or the epoch slider refines terrain and restores labels.
+Receiver markers and LOS/NLOS rays use **trajectory ellipsoid heights** embedded in the JSON so polylines match Python ray geometry relative to the PLATEAU GLB; they are **not** snapped to Ion terrain (terrain vs survey heights would skew intersections visually).
 
 Satellite rays use a **reused pool of polyline ``Entity`` objects**: each epoch only updates positions/materials instead of destroying and rebuilding geometry.
 """
@@ -729,7 +729,7 @@ def compute_all_epochs(
             if n_sat == 0:
                 lat, lon, alt = ecef_to_lla(*rx)
                 epochs_data.append({
-                    "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
+                    "rx": [math.degrees(lat), math.degrees(lon), alt],
                     "rays": [],
                     "reflections": [],
                     "n_los": 0,
@@ -830,7 +830,7 @@ def compute_all_epochs(
             hide_direct_prns = {r["prn"] for r in reflections if r.get("nlosMp")}
             lat, lon, alt = ecef_to_lla(*rx)
             epoch = {
-                "rx": [math.degrees(lat), math.degrees(lon), alt + 2],
+                "rx": [math.degrees(lat), math.degrees(lon), alt],
                 "rays": [],
                 "reflections": reflections,
                 "n_los": n_los_ep,
@@ -866,7 +866,7 @@ def compute_all_epochs(
     traj = []
     for p in positions:
         lat, lon, alt = ecef_to_lla(*p)
-        traj.append([math.degrees(lat), math.degrees(lon), alt + 1])
+        traj.append([math.degrees(lat), math.degrees(lon), alt])
 
     pivot_ecef = np.mean(positions, axis=0).tolist()
     mesh_shift_list = [float(mesh_shift_m[0]), float(mesh_shift_m[1]), float(mesh_shift_m[2])]
@@ -1496,7 +1496,6 @@ let playing = true;
 let stepMs = 1500;
 const datasetGapMs = 2500;
 let playbackTimer = null;
-let terrainSnapGeneration = 0;
 let followRxCam = false;
 let lastFollowRxCartesian = null;
 const followRxDeltaScratch = new Cesium.Cartesian3();
@@ -1699,21 +1698,14 @@ function updateEpochOverlay(ds, epoch, epochIdx) {{
 }}
 
 function showEpoch(ds, epochIdx) {{
-  terrainSnapGeneration += 1;
-  const gen = terrainSnapGeneration;
   const epoch = ds.epochs[epochIdx];
   const rx = epoch.rx;
   const lon = rx[1];
   const lat = rx[0];
   const ellipsoidH = rx[2];
-  const RX_ABOVE_GROUND_M = 2.0;
-  // Avoid sampleTerrainMostDetailed during auto-play (network + double redraw); pause/scrub uses HQ path.
-  const fastPlayback = playing;
   const showSatLabels = !playing;
 
   function drawRxAndRays(rxH) {{
-    if (gen !== terrainSnapGeneration) return;
-
     viewer.entities.suspendEvents();
     try {{
       const rxPos = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
@@ -1810,35 +1802,9 @@ function showEpoch(ds, epochIdx) {{
     viewer.scene.requestRender();
   }}
 
-  const tp = viewer.scene.globe.terrainProvider;
-  if (!tp || tp instanceof Cesium.EllipsoidTerrainProvider) {{
-    drawRxAndRays(ellipsoidH);
-    return;
-  }}
-
-  if (fastPlayback) {{
-    const qh = viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat));
-    drawRxAndRays(Cesium.defined(qh) ? qh + RX_ABOVE_GROUND_M : ellipsoidH);
-    return;
-  }}
-
-  const quickH = viewer.scene.globe.getHeight(Cesium.Cartographic.fromDegrees(lon, lat));
-  if (Cesium.defined(quickH)) {{
-    drawRxAndRays(quickH + RX_ABOVE_GROUND_M);
-  }}
-
-  Cesium.sampleTerrainMostDetailed(tp, [Cesium.Cartographic.fromDegrees(lon, lat, 0)])
-    .then(function (updated) {{
-      if (gen !== terrainSnapGeneration) return;
-      drawRxAndRays(updated[0].height + RX_ABOVE_GROUND_M);
-    }})
-    .catch(function () {{
-      if (gen !== terrainSnapGeneration) return;
-      if (!Cesium.defined(quickH)) {{
-        drawRxAndRays(ellipsoidH);
-        updateEpochOverlay(ds, epoch, epochIdx);
-      }}
-    }});
+  // RX + rays use trajectory ellipsoid height so polylines match Python LOS geometry.
+  // Terrain-snapped heights disagree with PLATEAU GLB (also ellipsoid / survey heights).
+  drawRxAndRays(ellipsoidH);
 }}
 
 function drawTrajectory(ds) {{

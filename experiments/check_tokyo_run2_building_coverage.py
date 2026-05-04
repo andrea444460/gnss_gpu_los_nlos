@@ -106,7 +106,7 @@ def _failure_window_epochs(pos: pd.DataFrame, w_indices: list[int], window_durat
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pos", type=Path, default=Path("/media/sasaki/aiueo/ai_coding_ws/gnss_cuda_sim_ws/gnss_gpu/experiments/results/demo5_pos/tokyo_run2/rtklib.pos"))
+    parser.add_argument("--pos", type=Path, default=Path("<repo_root>/experiments/results/demo5_pos/tokyo_run2/rtklib.pos"))
     parser.add_argument("--cache-root", type=Path, default=CACHE_ROOT)
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parent.parent / "internal_docs" / "product_deliverable" / "plots" / "tokyo_run2_building_coverage.png")
     parser.add_argument("--gml-prefix", default="53393")

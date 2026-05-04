@@ -6,18 +6,191 @@ building geometry into triangle meshes suitable for GNSS ray tracing.
 PLATEAU distributes LOD1/LOD2 building data in CityGML format using the
 Japanese plane rectangular coordinate system (Gauss-Kruger transverse
 Mercator, EPSG:6669-6687).
+
+Height datum (EPSG:6697):
+    PLATEAU CityGML EPSG:6697 carries **orthometric heights above Tokyo
+    Bay mean sea level (TP)**, NOT ellipsoidal heights.  Without
+    correction, the loaded mesh sits ~36-37 m below the WGS-84
+    ellipsoidal ground in Tokyo, which silently invalidates any LoS
+    check against a rover position read from a RTKLIB / Septentrio
+    reference.csv (which IS ellipsoidal).  See
+    `internal_docs/product_deliverable/PLATEAU_BRIDGE_INTEGRATION.md`
+    for the incident that revealed this.
+
+    The ``geoid_correction`` kwarg on ``PlateauLoader`` / ``load_plateau``
+    selects the model:
+        - ``"egm96"`` (**default**): pyproj-driven EGM96 lookup.  Raises
+          ``ImportError`` if pyproj is not installed -- this is
+          intentional ("fail loud") since the silent no-correction
+          path produced the original Phase 2 abort bug.
+        - ``<float>``: a constant N in metres (use 36.7 for Tokyo
+          quick-and-dirty work).
+        - callable ``N(lat_deg, lon_deg) -> float``: custom geoid model
+          (e.g. a GSI Geoid 2011 grid lookup if the user has the file).
+        - ``None``: explicit opt-out, no correction.  Emits a one-time
+          UserWarning so the silent mismatch is at least audible if a
+          caller really needs the legacy behaviour.
 """
 
 import glob as _glob
 import os
+import warnings
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import numpy as np
-from pyproj import Transformer, network
 
-from gnss_gpu.io.citygml import parse_citygml
+from gnss_gpu.io.citygml import SUPPORTED_KINDS, parse_citygml
 from gnss_gpu.raytrace import BuildingModel
+
+# Type alias for any caller-supplied geoid model.
+# Accepts ``"egm96"`` (uses pyproj if available), a constant float (m),
+# a callable ``N(lat_deg, lon_deg) -> float``, or ``None`` (no correction).
+GeoidCorrection = Union[None, str, float, Callable[[float, float], float]]
+
+# Default for new callers.  See module docstring for the rationale --
+# silent no-correction (``None``) caused the original Phase 2 abort bug
+# (Codex review round 2, P1 #1).
+GEOID_CORRECTION_DEFAULT: str = "egm96"
+
+
+def _make_egm96_lookup() -> Callable[[float, float], float]:
+    """Return a callable ``N(lat_deg, lon_deg) -> float`` backed by EGM96.
+
+    Requires ``pyproj`` and the bundled ``egm96_15.gtx`` grid (ships with
+    most pyproj installs).  Raises ``ImportError`` if pyproj is missing
+    or ``RuntimeError`` if the grid is not findable.
+
+    Note on accuracy in Japan: EGM96 differs from the official GSI
+    Geoid 2011 by up to ~1 m, which is well below the typical PLATEAU
+    LoD2 building height (5-30 m) and adequate for LoS ray tracing.
+    For sub-metre work, supply a callable that consults the GSI grid.
+    """
+    try:
+        import pyproj  # noqa: F401
+    except ImportError as exc:  # pragma: no cover -- exercised by skip
+        raise ImportError(
+            "geoid_correction='egm96' requires pyproj; install with "
+            "`pip install pyproj`"
+        ) from exc
+
+    src = pyproj.CRS.from_proj4(
+        "+proj=longlat +ellps=WGS84 +geoidgrids=egm96_15.gtx +vunits=m"
+    )
+    tgt = pyproj.CRS.from_epsg(4979)
+    transformer = pyproj.Transformer.from_crs(src, tgt, always_xy=True)
+
+    # Prime the transformer once so a missing grid surfaces here, not
+    # deep inside _lla_to_ecef.
+    _, _, probe_h = transformer.transform(139.78, 35.65, 0.0)
+    if not np.isfinite(probe_h):
+        raise RuntimeError(
+            "EGM96 lookup returned non-finite at (35.65 N, 139.78 E); "
+            "the egm96_15.gtx grid is probably missing from the pyproj "
+            "data directory"
+        )
+
+    def _n(lat_deg: float, lon_deg: float) -> float:
+        _, _, h = transformer.transform(lon_deg, lat_deg, 0.0)
+        return float(h)
+
+    return _n
+
+
+def _resolve_geoid_correction(spec: GeoidCorrection):
+    """Turn a user-facing spec into an internal callable or None.
+
+    Returns ``(callable or None, label)`` where ``label`` is a short
+    human-readable description used in warnings and logs.
+    """
+    if spec is None:
+        return None, "none"
+    if callable(spec):
+        return spec, "callable"
+    if isinstance(spec, (int, float)):
+        n = float(spec)
+        return (lambda _lat, _lon, _n=n: _n), f"constant {n:+.2f}m"
+    if isinstance(spec, str):
+        if spec.lower() == "egm96":
+            return _make_egm96_lookup(), "egm96"
+        raise ValueError(
+            f"unknown geoid_correction string {spec!r}; "
+            "supported: 'egm96', a float (constant N), or a callable"
+        )
+    raise TypeError(
+        f"geoid_correction must be None, str, float, or callable; "
+        f"got {type(spec).__name__}"
+    )
+
+
+_DATUM_WARN_EMITTED = False
+
+
+def _warn_no_geoid_correction_once() -> None:
+    """Emit a one-time UserWarning when no geoid correction is supplied."""
+    global _DATUM_WARN_EMITTED
+    if _DATUM_WARN_EMITTED:
+        return
+    _DATUM_WARN_EMITTED = True
+    warnings.warn(
+        "PlateauLoader: no geoid_correction supplied. PLATEAU CityGML "
+        "EPSG:6697 carries orthometric heights (above Tokyo Bay MSL); "
+        "without correction the mesh sits ~37 m below the WGS-84 "
+        "ellipsoidal ground in Tokyo and any LoS check against an "
+        "ellipsoidal rover position will be wrong. Pass "
+        'geoid_correction="egm96" or a constant float to fix.',
+        UserWarning,
+        stacklevel=4,
+    )
+
+# PLATEAU CityGML filenames embed the feature kind as ``_<kind>_`` between
+# the mesh code and the CRS code (e.g. ``53393683_brid_6697_op.gml``).
+_KIND_FILENAME_INFIX = {kind: f"_{kind}_" for kind in SUPPORTED_KINDS}
+
+
+def _infer_kind_from_filename(name: str) -> Optional[str]:
+    """Return the CityGML kind embedded in a PLATEAU filename, or None."""
+    for kind, infix in _KIND_FILENAME_INFIX.items():
+        if infix in name:
+            return kind
+    return None
+
+
+def _normalise_kinds(
+    kinds: Iterable[str], *, include_bridges: Optional[bool] = None
+) -> tuple[str, ...]:
+    """Resolve ``kinds`` (and the deprecated ``include_bridges`` shim) to a tuple.
+
+    The deprecated ``include_bridges`` flag is **strictly additive**:
+    ``True`` adds ``"brid"`` to ``kinds``; ``False`` is a no-op (it does
+    not subtract).  Passing ``include_bridges=False`` together with
+    ``kinds`` containing ``"brid"`` therefore does nothing useful, and a
+    ``UserWarning`` is emitted to help callers catch the misunderstanding.
+    """
+    normalised = set(kinds)
+    if include_bridges is True:
+        normalised.add("brid")
+    elif include_bridges is False and "brid" in normalised:
+        warnings.warn(
+            "include_bridges=False does not remove 'brid' from kinds; "
+            "the deprecated alias is additive-only. Drop 'brid' from "
+            "kinds explicitly to disable bridge loading.",
+            UserWarning,
+            stacklevel=3,
+        )
+    unsupported = normalised - SUPPORTED_KINDS
+    if unsupported:
+        raise ValueError(
+            f"unsupported CityGML kinds: {sorted(unsupported)}; "
+            f"supported: {sorted(SUPPORTED_KINDS)}"
+        )
+    return tuple(sorted(normalised))
+
+# WGS-84 ellipsoid constants
+_A = 6378137.0
+_F = 1.0 / 298.257223563
+_B = _A * (1.0 - _F)
+_E2 = 2.0 * _F - _F * _F
 
 # GRS-80 ellipsoid constants (used by the Japanese geodetic system JGD2011,
 # virtually identical to WGS-84 for our purposes)
@@ -25,56 +198,6 @@ _A_GRS80 = 6378137.0
 _F_GRS80 = 1.0 / 298.257222101
 _E2_GRS80 = 2.0 * _F_GRS80 - _F_GRS80 * _F_GRS80
 _B_GRS80 = _A_GRS80 * (1.0 - _F_GRS80)
-
-
-def grs80_ecef_ellipsoid_outward_unit(xyz: np.ndarray) -> np.ndarray:
-    """Unit outward normal to the GRS80 ellipsoid at ECEF position ``xyz`` [m]."""
-    v = np.asarray(xyz, dtype=np.float64).reshape(3)
-    x, y, z = float(v[0]), float(v[1]), float(v[2])
-    g = np.array(
-        [x / (_A_GRS80 * _A_GRS80), y / (_A_GRS80 * _A_GRS80), z / (_B_GRS80 * _B_GRS80)],
-        dtype=np.float64,
-    )
-    ln = float(np.linalg.norm(g))
-    if ln <= 0.0:
-        return np.array([0.0, 0.0, 1.0], dtype=np.float64)
-    return g / ln
-
-
-def plateau_mesh_total_ecef_shift_m(
-    pivot_ecef: np.ndarray,
-    vertical_shift_m: float = 0.0,
-    extra_ecef_m: Tuple[float, float, float] = (0.0, 0.0, 0.0),
-) -> np.ndarray:
-    """Rigid ECEF translation [m] for PLATEAU vertices relative to RX trajectory frame.
-
-    ``vertical_shift_m`` moves geometry along the GRS80 ellipsoid outward direction at
-    ``pivot_ecef`` (typically trajectory centroid). ``extra_ecef_m`` adds a uniform ECEF vector.
-    Apply with :func:`apply_plateau_mesh_ecef_shift` before building a BVH so LOS/multipath use
-    the shifted mesh.
-    """
-    delta = np.asarray(extra_ecef_m, dtype=np.float64).reshape(3).copy()
-    vs = float(vertical_shift_m)
-    if vs != 0.0:
-        delta += vs * grs80_ecef_ellipsoid_outward_unit(pivot_ecef)
-    return delta
-
-
-def apply_plateau_mesh_ecef_shift(building: BuildingModel, delta_ecef_m: np.ndarray) -> BuildingModel:
-    """Return a new building model with ``delta_ecef_m`` added to every triangle vertex."""
-    d = np.asarray(delta_ecef_m, dtype=np.float64).reshape(3)
-    return BuildingModel(building.triangles + d.reshape(1, 1, 3))
-
-
-def parse_optional_comma_xyz(s: str) -> Tuple[float, float, float]:
-    """Parse ``\"dx,dy,dz\"`` or empty string → three floats."""
-    t = (s or "").strip()
-    if not t:
-        return (0.0, 0.0, 0.0)
-    parts = [p.strip() for p in t.split(",")]
-    if len(parts) != 3:
-        raise ValueError("expected exactly three comma-separated floats")
-    return (float(parts[0]), float(parts[1]), float(parts[2]))
 
 
 class PlateauLoader:
@@ -113,7 +236,12 @@ class PlateauLoader:
 
     _FALSE_EASTING = 0.0  # PLATEAU data is already in metres from origin
 
-    def __init__(self, zone: int = 9):
+    def __init__(
+        self,
+        zone: int = 9,
+        *,
+        geoid_correction: GeoidCorrection = GEOID_CORRECTION_DEFAULT,
+    ):
         if zone not in self.ORIGINS:
             raise ValueError(
                 f"zone must be 1-19, got {zone}"
@@ -122,53 +250,68 @@ class PlateauLoader:
         self._lat0_deg, self._lon0_deg = self.ORIGINS[zone]
         self._lat0 = np.radians(self._lat0_deg)
         self._lon0 = np.radians(self._lon0_deg)
-        # Allow PROJ to fetch missing grid files (geoid/vertical ops) when available.
-        try:
-            network.set_network_enabled(True)
-        except Exception:
-            pass
-        # EPSG:6697 (JGD2011 geographic 3D) -> EPSG:4978 (ECEF).
-        # always_xy=False keeps (lat, lon, h) order for this codebase.
-        self._to_ecef_from_6697 = Transformer.from_crs(
-            "EPSG:6697", "EPSG:4978", always_xy=False
+
+        self._geoid_fn, self._geoid_label = _resolve_geoid_correction(
+            geoid_correction
         )
+        if self._geoid_fn is None:
+            _warn_no_geoid_correction_once()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def load_citygml(self, filepath: Union[str, Path]) -> BuildingModel:
-        """Load buildings from a single CityGML file.
+    def load_citygml(
+        self, filepath: Union[str, Path], kind: str = "bldg"
+    ) -> BuildingModel:
+        """Load CityGML features from a single file.
 
         Parameters
         ----------
         filepath : str or Path
             Path to a ``.gml`` file.
+        kind : str
+            CityGML feature kind: ``"bldg"`` (default) or ``"brid"``.
 
         Returns
         -------
         BuildingModel
         """
-        buildings = parse_citygml(filepath)
-        triangles = self._buildings_to_triangles(buildings)
+        features = parse_citygml(filepath, kind=kind)
+        triangles = self._buildings_to_triangles(features)
         return BuildingModel(triangles)
 
     def load_directory(
-        self, dirpath: Union[str, Path], pattern: str = "*.gml"
+        self,
+        dirpath: Union[str, Path],
+        pattern: str = "*.gml",
+        *,
+        kinds: Iterable[str] = ("bldg",),
+        include_bridges: Optional[bool] = None,
     ) -> BuildingModel:
-        """Load all CityGML files from a directory tree.
+        """Load CityGML features from a directory tree.
 
         Parameters
         ----------
         dirpath : str or Path
             Root directory to search.
         pattern : str
-            Glob pattern for CityGML files.
+            Glob pattern for CityGML files.  PLATEAU naming convention puts
+            ``_<kind>_`` in filenames (e.g. ``_bldg_``, ``_brid_``); the
+            kind is inferred from that.
+        kinds : iterable of str
+            CityGML kinds to load.  Defaults to ``("bldg",)`` for back-compat.
+            Pass e.g. ``("bldg", "brid")`` to also load PLATEAU bridges.
+        include_bridges : bool, optional
+            Deprecated.  ``True`` is equivalent to adding ``"brid"`` to
+            ``kinds``; preserved for the v1 API of this loader.
 
         Returns
         -------
         BuildingModel
         """
+        active_kinds = set(_normalise_kinds(kinds, include_bridges=include_bridges))
+
         dirpath = Path(dirpath)
         files = sorted(dirpath.rglob(pattern))
         if not files:
@@ -178,8 +321,13 @@ class PlateauLoader:
 
         all_triangles = []
         for f in files:
-            buildings = parse_citygml(f)
-            tri = self._buildings_to_triangles(buildings)
+            # Files without a ``_<kind>_`` infix (e.g. legacy single-feature
+            # exports) are treated as buildings to preserve historical behaviour.
+            kind = _infer_kind_from_filename(f.name) or "bldg"
+            if kind not in active_kinds:
+                continue
+            features = parse_citygml(f, kind=kind)
+            tri = self._buildings_to_triangles(features)
             if tri.size > 0:
                 all_triangles.append(tri)
 
@@ -223,16 +371,17 @@ class PlateauLoader:
         Parameters
         ----------
         coords : ndarray, shape (N, 3)
-            Coordinates as stored in PLATEAU CityGML. Most datasets use the
+            Coordinates as stored in PLATEAU CityGML.  Most datasets use the
             Japanese plane rectangular system:
             - 1st value = Y (northing from origin latitude)
             - 2nd value = X (easting from origin longitude, with no false
               easting in PLATEAU data -- but some datasets add 500 km)
-            - 3rd value = Z (height in metres; transformed via EPSG:6697 -> 4978)
+            - 3rd value = Z (ellipsoidal height in metres)
 
             Some published files instead store geographic coordinates directly
-            as ``(lat_deg, lon_deg, h_m)``. Those are detected heuristically
-            from the coordinate ranges and transformed directly to ECEF.
+            as ``(lat_deg, lon_deg, h_m)``.  Those are detected heuristically
+            from the coordinate ranges and converted without the plane-rect
+            inverse projection.
 
         Returns
         -------
@@ -323,7 +472,7 @@ class PlateauLoader:
         lat, lon = self._gauss_kruger_inverse(
             y_north, x_east, self._lat0, self._lon0
         )
-        return self._jgd2011_geodetic_to_ecef(np.degrees(lat), np.degrees(lon), z_up)
+        return self._lla_to_ecef(lat, lon, z_up)
 
     # ------------------------------------------------------------------
     # Gauss-Kruger inverse projection
@@ -449,19 +598,42 @@ class PlateauLoader:
     # Coordinate helpers
     # ------------------------------------------------------------------
 
-    def _jgd2011_geodetic_to_ecef(self, lat_deg, lon_deg, alt_m):
-        """Transform JGD2011 geographic 3D (EPSG:6697) to ECEF (EPSG:4978)."""
-        x, y, z = self._to_ecef_from_6697.transform(
-            float(lat_deg), float(lon_deg), float(alt_m)
-        )
+    def _lla_to_ecef(self, lat, lon, alt):
+        """Convert geodetic (lat, lon in radians, alt in metres) to ECEF.
+
+        If a ``geoid_correction`` was supplied at construction time,
+        ``alt`` is interpreted as orthometric height and shifted by
+        ``+N(lat, lon)`` (where N is geoid undulation in metres) before
+        the ellipsoidal-to-ECEF conversion.  Without correction the
+        value is treated as ellipsoidal -- which is what PLATEAU
+        callers historically did, but is wrong for EPSG:6697 data.
+        """
+        if self._geoid_fn is not None:
+            n = self._geoid_fn(np.degrees(lat), np.degrees(lon))
+            alt = alt + n
+        sin_lat = np.sin(lat)
+        cos_lat = np.cos(lat)
+        sin_lon = np.sin(lon)
+        cos_lon = np.cos(lon)
+        N = _A / np.sqrt(1.0 - _E2 * sin_lat * sin_lat)
+        x = (N + alt) * cos_lat * cos_lon
+        y = (N + alt) * cos_lat * sin_lon
+        z = (N * (1.0 - _E2) + alt) * sin_lat
         return np.array([x, y, z], dtype=np.float64)
 
     def _geodetic_degrees_to_ecef(self, lat_deg, lon_deg, alt):
-        """Convert geodetic degrees (JGD2011 3D) to ECEF via pyproj."""
-        return self._jgd2011_geodetic_to_ecef(lat_deg, lon_deg, alt)
+        """Convert geodetic degrees to ECEF."""
+        return self._lla_to_ecef(np.radians(lat_deg), np.radians(lon_deg), alt)
 
 
-def load_plateau(filepath_or_dir, zone=9):
+def load_plateau(
+    filepath_or_dir,
+    zone: int = 9,
+    *,
+    kinds: Iterable[str] = ("bldg",),
+    include_bridges: Optional[bool] = None,
+    geoid_correction: GeoidCorrection = GEOID_CORRECTION_DEFAULT,
+):
     """Convenience function to load PLATEAU CityGML data.
 
     Parameters
@@ -472,14 +644,27 @@ def load_plateau(filepath_or_dir, zone=9):
     zone : int
         Japanese plane rectangular coordinate system zone (1--19).
         Default is 9 (Tokyo / Kanagawa).
+    kinds : iterable of str
+        Directory mode only: CityGML kinds to load.  Defaults to
+        ``("bldg",)``; pass ``("bldg", "brid")`` to also load bridges.
+    include_bridges : bool, optional
+        Deprecated.  ``True`` is equivalent to adding ``"brid"`` to ``kinds``.
+    geoid_correction : None | str | float | callable, optional
+        How to convert PLATEAU orthometric heights (TP) into ellipsoidal
+        heights before ECEF conversion.  See module docstring for the
+        supported values.  Default matches :data:`GEOID_CORRECTION_DEFAULT`
+        (``\"egm96\"``).
 
     Returns
     -------
     BuildingModel
     """
     p = Path(filepath_or_dir)
-    loader = PlateauLoader(zone=zone)
+    loader = PlateauLoader(zone=zone, geoid_correction=geoid_correction)
     if p.is_dir():
-        return loader.load_directory(p)
-    else:
-        return loader.load_citygml(p)
+        return loader.load_directory(
+            p, kinds=kinds, include_bridges=include_bridges
+        )
+    # Single-file mode infers kind from filename prefix.
+    inferred = _infer_kind_from_filename(p.name) or "bldg"
+    return loader.load_citygml(p, kind=inferred)

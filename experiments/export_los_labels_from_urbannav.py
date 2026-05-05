@@ -62,6 +62,34 @@ class EpochJob:
     pseudoranges: list[float]
 
 
+def _lla_deg_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> np.ndarray:
+    """Convert geodetic degrees to ECEF meters (WGS-84)."""
+    a = 6378137.0
+    f = 1.0 / 298.257223563
+    e2 = 2.0 * f - f * f
+    lat = math.radians(float(lat_deg))
+    lon = math.radians(float(lon_deg))
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
+    n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    x = (n + float(alt_m)) * cos_lat * cos_lon
+    y = (n + float(alt_m)) * cos_lat * sin_lon
+    z = (n * (1.0 - e2) + float(alt_m)) * sin_lat
+    return np.array([x, y, z], dtype=np.float64)
+
+
+def _unix_to_gps_week_tow(unix_s: float) -> tuple[int, float]:
+    """Convert Unix seconds to GPS week/TOW using fixed leap-second offset."""
+    gps_unix_offset = 315964800.0  # 1980-01-06 - 1970-01-01
+    leap_seconds = 18.0  # valid for modern datasets (incl. 2023)
+    gps_seconds = float(unix_s) - gps_unix_offset + leap_seconds
+    week = int(gps_seconds // GPS_WEEK_SECONDS)
+    tow = float(gps_seconds - week * GPS_WEEK_SECONDS)
+    return week, tow
+
+
 def _validate_time_alignment(obs, track: ReferenceTrack, eph: Ephemeris) -> None:
     """Fail early when OBS/reference/NAV time windows do not overlap sensibly."""
     if not obs.epochs:
@@ -126,21 +154,42 @@ def _load_reference_track(reference_csv: Path) -> ReferenceTrack:
     weeks: list[int] = []
     tows: list[float] = []
     rx: list[list[float]] = []
+
+    # Try UrbanNav headered format first.
     with open(reference_csv, newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
-        for row in reader:
-            r = _normalize_row_keys(row)
+        rows = [_normalize_row_keys(r) for r in reader]
+    if rows and {"GPS Week", "GPS TOW (s)", "ECEF X (m)", "ECEF Y (m)", "ECEF Z (m)"} <= set(rows[0].keys()):
+        for r in rows:
             weeks.append(int(float(r["GPS Week"])))
             tows.append(float(r["GPS TOW (s)"]))
-            rx.append(
-                [
-                    float(r["ECEF X (m)"]),
-                    float(r["ECEF Y (m)"]),
-                    float(r["ECEF Z (m)"]),
-                ]
-            )
+            rx.append([float(r["ECEF X (m)"]), float(r["ECEF Y (m)"]), float(r["ECEF Z (m)"])])
+        if not tows:
+            raise ValueError(f"reference track is empty: {reference_csv}")
+        return ReferenceTrack(
+            weeks=np.asarray(weeks, dtype=np.int32),
+            tows=np.asarray(tows, dtype=np.float64),
+            rx_ecef=np.asarray(rx, dtype=np.float64),
+        )
+
+    # Fallback: KLT gt.csv style [timestamp,lat,lon,alt] without header.
+    with open(reference_csv, newline="", encoding="utf-8") as fh:
+        reader2 = csv.reader(fh)
+        for r in reader2:
+            if not r or len(r) < 4:
+                continue
+            ts_unix = float(r[0])
+            lat = float(r[1])
+            lon = float(r[2])
+            alt = float(r[3])
+            w, tow = _unix_to_gps_week_tow(ts_unix)
+            ecef = _lla_deg_to_ecef(lat, lon, alt)
+            weeks.append(w)
+            tows.append(tow)
+            rx.append([float(ecef[0]), float(ecef[1]), float(ecef[2])])
     if not tows:
-        raise ValueError(f"reference track is empty: {reference_csv}")
+        raise ValueError(f"reference track is empty or unsupported format: {reference_csv}")
+    print("  Reference parser: detected gt.csv-style [timestamp,lat,lon,alt], converted to GPS week/TOW + ECEF.")
     return ReferenceTrack(
         weeks=np.asarray(weeks, dtype=np.int32),
         tows=np.asarray(tows, dtype=np.float64),

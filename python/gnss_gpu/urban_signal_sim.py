@@ -66,6 +66,46 @@ def _sat_elevation_azimuth(rx_ecef, sat_ecef):
     return el, az
 
 
+def virtual_satellite_ecef_lite(rx_ecef, sat_ecef, pressure_hpa=1010.0, temp_c=10.0):
+    """Build a virtual satellite point preserving range and azimuth.
+
+    Uses the lite refraction model to raise/lower elevation, then reconstructs
+    an ECEF target with the same RX-SAT range and azimuth. This keeps a
+    straight-ray tracer while approximating refracted ingress angle.
+    """
+    rx = np.asarray(rx_ecef, dtype=np.float64).ravel()
+    sats = np.asarray(sat_ecef, dtype=np.float64).reshape(-1, 3)
+    if sats.shape[0] == 0:
+        return sats.copy()
+
+    el, az = _sat_elevation_azimuth(rx, sats)
+    el_app = apply_atmo_bending_lite(el, pressure_hpa=pressure_hpa, temp_c=temp_c)
+    ranges = np.linalg.norm(sats - rx, axis=1)
+
+    lat, lon, _ = ecef_to_lla(rx[0], rx[1], rx[2])
+    sin_lat, cos_lat = math.sin(lat), math.cos(lat)
+    sin_lon, cos_lon = math.sin(lon), math.cos(lon)
+    # ENU rotation matrix, same convention as _sat_elevation_azimuth.
+    R = np.array([
+        [-sin_lon, cos_lon, 0],
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+        [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+    ])
+
+    cos_el = np.cos(el_app)
+    enu_dir = np.column_stack((
+        cos_el * np.sin(az),
+        cos_el * np.cos(az),
+        np.sin(el_app),
+    ))
+    ecef_dir = (R.T @ enu_dir.T).T
+    virtual = rx + ecef_dir * ranges[:, None]
+    bad = ~np.isfinite(virtual).all(axis=1)
+    if np.any(bad):
+        virtual[bad] = sats[bad]
+    return virtual
+
+
 def apply_atmo_bending_lite(el_rad, pressure_hpa=1010.0, temp_c=10.0):
     """Apply Bennett/Saemundsson-like apparent elevation correction.
 
@@ -103,7 +143,7 @@ class UrbanSignalSimulator:
             elevation_mask_deg: Minimum satellite elevation [deg].
             nlos_attenuation_db: Signal attenuation for NLOS satellites [dB].
             fresnel_coeff: Reflection coefficient for multipath [0-1].
-            atmo_bending_lite: If True, use apparent elevation for visibility mask.
+            atmo_bending_lite: If True, use apparent elevation and virtual sat direction for LOS.
             atmo_pressure_hpa: Pressure for lite bending model [hPa].
             atmo_temp_c: Temperature for lite bending model [deg C].
         """
@@ -162,10 +202,17 @@ class UrbanSignalSimulator:
 
         # --- Elevation / azimuth ---
         el, az = _sat_elevation_azimuth(rx, sats)
+        sats_raytrace = sats
         el_for_visibility = el
         if self.atmo_bending_lite:
             el_for_visibility = apply_atmo_bending_lite(
                 el,
+                pressure_hpa=self.atmo_pressure_hpa,
+                temp_c=self.atmo_temp_c,
+            )
+            sats_raytrace = virtual_satellite_ecef_lite(
+                rx,
+                sats,
                 pressure_hpa=self.atmo_pressure_hpa,
                 temp_c=self.atmo_temp_c,
             )
@@ -180,13 +227,13 @@ class UrbanSignalSimulator:
         if self.building_model is not None:
             vis_idx = np.where(visible)[0]
             if len(vis_idx) > 0:
-                los_result = self.building_model.check_los(rx, sats[vis_idx])
+                los_result = self.building_model.check_los(rx, sats_raytrace[vis_idx])
                 is_los_vis = np.asarray(los_result, dtype=bool)
                 is_los[vis_idx] = is_los_vis
 
                 # Multipath excess delay (if supported by the model)
                 if hasattr(self.building_model, 'compute_multipath'):
-                    delays, _ = self.building_model.compute_multipath(rx, sats[vis_idx])
+                    delays, _ = self.building_model.compute_multipath(rx, sats_raytrace[vis_idx])
                     excess_delays[vis_idx] = np.asarray(delays, dtype=np.float64)
 
         # --- Geometric range + atmospheric delays ---

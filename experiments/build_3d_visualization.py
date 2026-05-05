@@ -86,6 +86,7 @@ from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
     _sat_elevation_azimuth,
     apply_atmo_bending_lite,
+    virtual_satellite_ecef_lite,
     ecef_to_lla,
 )
 
@@ -668,6 +669,7 @@ def compute_all_epochs(
         ):
             rx_blk = np.ascontiguousarray(positions[chunk_idx], dtype=np.float64)
             sat_blk = np.ascontiguousarray(sat_rows, dtype=np.float64)
+            sat_ray_blk = sat_blk.copy()
             n_b = sat_blk.shape[0]
             n_sat_blk = sat_blk.shape[1]
             el_batch = np.zeros((n_b, n_sat_blk), dtype=np.float64)
@@ -679,6 +681,13 @@ def compute_all_epochs(
                     pressure_hpa=usim.atmo_pressure_hpa,
                     temp_c=usim.atmo_temp_c,
                 )
+                for i in range(n_b):
+                    sat_ray_blk[i] = virtual_satellite_ecef_lite(
+                        rx_blk[i],
+                        sat_blk[i],
+                        pressure_hpa=usim.atmo_pressure_hpa,
+                        temp_c=usim.atmo_temp_c,
+                    )
             visible_batch = el_batch >= usim.elevation_mask_rad
             if obs_lookup is not None:
                 for i in range(n_b):
@@ -697,7 +706,7 @@ def compute_all_epochs(
                     for j in range(n_sat_blk):
                         if row[j] and _rinex_sat_id_from_prn(used_prns[j]) not in keep:
                             row[j] = False
-            sat_work = sat_blk.copy()
+            sat_work = sat_ray_blk.copy()
             sat_work[~visible_batch] = np.nan
             los_batch = np.asarray(bvh.check_los_batch(rx_blk, sat_work), dtype=bool)
             if viz_multipath:
@@ -728,6 +737,7 @@ def compute_all_epochs(
                 sat_ecef = sat_rows[local_i]
                 sat_clk = clk_rows[local_i]
                 used_prns_i = used_prns
+            sat_ecef_ray = sat_ecef
 
             n_sat = int(np.asarray(sat_ecef).reshape(-1, 3).shape[0])
             if n_sat == 0:
@@ -752,6 +762,13 @@ def compute_all_epochs(
                 vis_idx = np.where(visible)[0]
                 if len(vis_idx) > 0:
                     is_los[vis_idx] = los_batch[local_i, vis_idx]
+                if usim.atmo_bending_lite:
+                    sat_ecef_ray = virtual_satellite_ecef_lite(
+                        rx,
+                        sat_ecef,
+                        pressure_hpa=usim.atmo_pressure_hpa,
+                        temp_c=usim.atmo_temp_c,
+                    )
             else:
                 result = usim.compute_epoch(
                     rx_ecef=rx,
@@ -762,6 +779,13 @@ def compute_all_epochs(
                 visible = np.asarray(result["visible"], dtype=bool).copy()
                 el = result["elevations"]
                 is_los = np.asarray(result["is_los"], dtype=bool)
+                if usim.atmo_bending_lite:
+                    sat_ecef_ray = virtual_satellite_ecef_lite(
+                        rx,
+                        sat_ecef,
+                        pressure_hpa=usim.atmo_pressure_hpa,
+                        temp_c=usim.atmo_temp_c,
+                    )
 
             if obs_lookup is not None:
                 _apply_obs_visibility_mask(
@@ -777,7 +801,7 @@ def compute_all_epochs(
             n_nlos_ep = int(np.sum(~is_los & visible))
 
             reflections = []
-            sat_mat = np.ascontiguousarray(np.asarray(sat_ecef), dtype=np.float64).reshape(n_sat, 3)
+            sat_mat = np.ascontiguousarray(np.asarray(sat_ecef_ray), dtype=np.float64).reshape(n_sat, 3)
             if viz_multipath and n_sat > 0:
                 delays_mp = None
                 refl_pts_mp = None
@@ -848,7 +872,7 @@ def compute_all_epochs(
                 prn_str = _sat_display_id(used_prns_i[i])
                 if prn_str in hide_direct_prns:
                     continue
-                direction = sat_ecef[i] - rx
+                direction = sat_ecef_ray[i] - rx
                 dist = np.linalg.norm(direction)
                 ray_end = rx + direction / dist * 5000
                 re_lat, re_lon, re_alt = ecef_to_lla(*ray_end)

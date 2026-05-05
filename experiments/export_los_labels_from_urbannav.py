@@ -38,6 +38,7 @@ from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
     _sat_elevation_azimuth,
     apply_atmo_bending_lite,
+    virtual_satellite_ecef_lite,
 )
 
 GPS_EPOCH = datetime(1980, 1, 6)
@@ -291,14 +292,29 @@ def main() -> None:
 
             selected_ids_per_epoch: list[list[str]] = []
             sat_sel_per_epoch: list[np.ndarray] = []
+            sat_ray_per_epoch: list[np.ndarray] = []
             for bi, job in enumerate(batch):
                 selected_ids = [sid for sid in job.sat_ids if sid in prn_pool_set and sid in idx_by_sat]
                 selected_ids_per_epoch.append(selected_ids)
                 if not selected_ids:
-                    sat_sel_per_epoch.append(np.empty((0, 3), dtype=np.float64))
+                    empty = np.empty((0, 3), dtype=np.float64)
+                    sat_sel_per_epoch.append(empty)
+                    sat_ray_per_epoch.append(empty)
                     continue
                 indices = [idx_by_sat[sid] for sid in selected_ids]
-                sat_sel_per_epoch.append(np.asarray(sat_ecef_batch[bi][indices], dtype=np.float64))
+                sat_sel = np.asarray(sat_ecef_batch[bi][indices], dtype=np.float64)
+                sat_sel_per_epoch.append(sat_sel)
+                if usim.atmo_bending_lite:
+                    sat_ray_per_epoch.append(
+                        virtual_satellite_ecef_lite(
+                            job.rx_xyz,
+                            sat_sel,
+                            pressure_hpa=usim.atmo_pressure_hpa,
+                            temp_c=usim.atmo_temp_c,
+                        )
+                    )
+                else:
+                    sat_ray_per_epoch.append(sat_sel)
 
             if has_bvh_batch:
                 max_sat = max((len(x) for x in selected_ids_per_epoch), default=0)
@@ -307,7 +323,7 @@ def main() -> None:
                         np.stack([np.asarray(j.rx_xyz, dtype=np.float64) for j in batch], axis=0)
                     )
                     sat_pad = np.full((len(batch), max_sat, 3), np.nan, dtype=np.float64)
-                    for bi, sat_sel in enumerate(sat_sel_per_epoch):
+                    for bi, sat_sel in enumerate(sat_ray_per_epoch):
                         if sat_sel.shape[0] > 0:
                             sat_pad[bi, : sat_sel.shape[0], :] = sat_sel
                     los_pad = np.asarray(bvh.check_los_batch(rx_batch, sat_pad), dtype=bool)

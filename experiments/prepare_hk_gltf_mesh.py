@@ -40,6 +40,11 @@ def _parse_args() -> argparse.Namespace:
         help="Input CRS of glTF vertex coordinates. Examples: epsg:4978, epsg:2326, epsg:4979",
     )
     p.add_argument(
+        "--hk-local-axis",
+        action="store_true",
+        help="HK non-textured glTF axis fix: interpret transformed vertices as E=X, N=-Z, H=Y before CRS conversion",
+    )
+    p.add_argument(
         "--latlon-order",
         action="store_true",
         help="For geographic CRS inputs (e.g. epsg:4979), treat x=lat and y=lon instead of x=lon,y=lat.",
@@ -82,8 +87,13 @@ def _load_one_mesh(mesh_path: Path):
     return tri
 
 
-def _to_ecef(tri: np.ndarray, input_crs: str, latlon_order: bool) -> np.ndarray:
+def _to_ecef(tri: np.ndarray, input_crs: str, latlon_order: bool, hk_local_axis: bool = False) -> np.ndarray:
     crs = input_crs.strip().lower()
+    if hk_local_axis:
+        # HK non-textured glTFs often encode transformed vertices where:
+        #   X -> Easting, Y -> Height, Z -> -Northing
+        # Convert to (E, N, H) before any CRS transform.
+        tri = np.stack([tri[..., 0], -tri[..., 2], tri[..., 1]], axis=-1)
     if crs in ("ecef", "epsg:4978", "4978"):
         return tri
     try:
@@ -152,7 +162,7 @@ def main() -> None:
         raise RuntimeError("No usable triangles loaded from glTF/GLB files")
 
     tri = np.concatenate(all_tri, axis=0).astype(np.float64, copy=False)
-    tri = _to_ecef(tri, args.input_crs, bool(args.latlon_order))
+    tri = _to_ecef(tri, args.input_crs, bool(args.latlon_order), hk_local_axis=bool(args.hk_local_axis))
 
     finite_mask = np.isfinite(tri).all(axis=(1, 2))
     tri = tri[finite_mask]
@@ -173,6 +183,7 @@ def main() -> None:
         "gltf_files_loaded": loaded,
         "gltf_files_skipped": skipped,
         "input_crs": args.input_crs,
+        "hk_local_axis": bool(args.hk_local_axis),
         "triangle_count": int(tri.shape[0]),
         "bbox_ecef_min_m": mins,
         "bbox_ecef_max_m": maxs,

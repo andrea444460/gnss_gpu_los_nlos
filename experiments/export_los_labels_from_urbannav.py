@@ -16,10 +16,11 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import re
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +89,58 @@ def _unix_to_gps_week_tow(unix_s: float) -> tuple[int, float]:
     week = int(gps_seconds // GPS_WEEK_SECONDS)
     tow = float(gps_seconds - week * GPS_WEEK_SECONDS)
     return week, tow
+
+
+def _infer_nav_date_from_filename(nav_path: Path) -> datetime | None:
+    name = nav_path.name
+    m = re.search(r"_(\d{4})(\d{3})", name)
+    if not m:
+        return None
+    year = int(m.group(1))
+    doy = int(m.group(2))
+    try:
+        return datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=doy - 1)
+    except ValueError:
+        return None
+
+
+def _validate_nav_date_sanity(nav_path: Path, reference_csv: Path, obs) -> None:
+    nav_dt = _infer_nav_date_from_filename(nav_path)
+    if nav_dt is None:
+        return
+    obs_dt = None
+    if obs.epochs:
+        obs_dt = obs.epochs[0].time.replace(tzinfo=timezone.utc)
+    ref_dt = None
+    with open(reference_csv, newline="", encoding="utf-8") as fh:
+        rd = csv.DictReader(fh)
+        rows = [_normalize_row_keys(r) for r in rd]
+    if rows and "GPS Week" in rows[0] and "GPS TOW (s)" in rows[0]:
+        try:
+            w = int(float(rows[0]["GPS Week"]))
+            tow = float(rows[0]["GPS TOW (s)"])
+            ref_dt = datetime(1980, 1, 6, tzinfo=timezone.utc) + timedelta(seconds=w * 604800.0 + tow)
+        except Exception:
+            ref_dt = None
+    else:
+        with open(reference_csv, newline="", encoding="utf-8") as fh:
+            r2 = csv.reader(fh)
+            for row in r2:
+                if row and len(row) >= 1:
+                    try:
+                        ref_dt = datetime.fromtimestamp(float(row[0]), tz=timezone.utc)
+                        break
+                    except Exception:
+                        continue
+    for label, d in (("obs", obs_dt), ("reference", ref_dt)):
+        if d is None:
+            continue
+        dd = abs((d - nav_dt).total_seconds()) / 86400.0
+        if dd > 14.0:
+            raise RuntimeError(
+                f"NAV date sanity check failed: nav filename date {nav_dt.date()} is far from "
+                f"{label} date {d.date()} (|Δ|={dd:.1f} days). Use a matching NAV/BRDC file."
+            )
 
 
 def _validate_time_alignment(obs, track: ReferenceTrack, eph: Ephemeris) -> None:
@@ -269,6 +322,7 @@ def main() -> None:
     obs = read_rinex_obs(args.obs_path)
     nav_messages = read_nav_rinex_multi(args.nav_path, systems=systems)
     eph = Ephemeris(nav_messages)
+    _validate_nav_date_sanity(args.nav_path, args.reference_csv, obs)
     track = _load_reference_track(args.reference_csv)
     _validate_time_alignment(obs, track, eph)
     print(f"  epochs in OBS: {len(obs.epochs)}")

@@ -68,9 +68,10 @@ import csv
 import json
 import math
 import os
+import re
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -195,6 +196,80 @@ def _gps_seconds_of_week(dt: datetime) -> float:
     """GPS time-of-week [s] consistent with :mod:`gnss_gpu.io.nav_rinex` broadcast messages."""
     gps_epoch = datetime(1980, 1, 6)
     return (dt - gps_epoch).total_seconds() % 604800.0
+
+
+def _infer_nav_date_from_filename(nav_path: str) -> Optional[datetime]:
+    """Infer NAV date from common BRDC filename token _YYYYDDD."""
+    name = os.path.basename(nav_path)
+    m = re.search(r"_(\d{4})(\d{3})", name)
+    if not m:
+        return None
+    year = int(m.group(1))
+    doy = int(m.group(2))
+    try:
+        return datetime(year, 1, 1, tzinfo=timezone.utc) + timedelta(days=doy - 1)
+    except ValueError:
+        return None
+
+
+def _infer_ref_start_datetime_utc(ref_csv: str) -> Optional[datetime]:
+    """Infer trajectory absolute date from UrbanNav reference.csv or gt.csv."""
+    p = Path(ref_csv)
+    if not p.exists():
+        return None
+    with open(p, newline="", encoding="utf-8") as fh:
+        rd = csv.DictReader(fh)
+        rows = [_normalize_csv_row(r) for r in rd]
+    if rows and "GPS Week" in rows[0] and "GPS TOW (s)" in rows[0]:
+        try:
+            w = int(float(rows[0]["GPS Week"]))
+            tow = float(rows[0]["GPS TOW (s)"])
+            gps_epoch = datetime(1980, 1, 6, tzinfo=timezone.utc)
+            return gps_epoch + timedelta(seconds=w * 604800.0 + tow)
+        except Exception:
+            return None
+    # gt.csv style [unix_s, lat, lon, alt]
+    with open(p, newline="", encoding="utf-8") as fh:
+        r2 = csv.reader(fh)
+        for row in r2:
+            if row and len(row) >= 1:
+                try:
+                    return datetime.fromtimestamp(float(row[0]), tz=timezone.utc)
+                except Exception:
+                    continue
+    return None
+
+
+def _infer_obs_start_datetime_utc(obs_path: Optional[str]) -> Optional[datetime]:
+    if not obs_path:
+        return None
+    try:
+        obs = read_rinex_obs(Path(obs_path))
+        if not obs.epochs:
+            return None
+        return obs.epochs[0].time.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _validate_nav_date_sanity(nav_file: str, ref_csv: str, obs_rover_path: Optional[str]) -> None:
+    nav_dt = _infer_nav_date_from_filename(nav_file)
+    ref_dt = _infer_ref_start_datetime_utc(ref_csv)
+    obs_dt = _infer_obs_start_datetime_utc(obs_rover_path)
+    if nav_dt is None:
+        return
+    checks = []
+    if ref_dt is not None:
+        checks.append(("reference", ref_dt))
+    if obs_dt is not None:
+        checks.append(("obs", obs_dt))
+    for label, d in checks:
+        dd = abs((d - nav_dt).total_seconds()) / 86400.0
+        if dd > 14.0:
+            raise RuntimeError(
+                f"NAV date sanity check failed: nav filename date {nav_dt.date()} is far from "
+                f"{label} date {d.date()} (|Δ|={dd:.1f} days). Use a matching NAV/BRDC file."
+            )
 
 
 def _normalize_rinex_sat_id(raw: str) -> str:
@@ -679,6 +754,7 @@ def compute_all_epochs(
     print(f"  BVH LOS batch path: {'enabled' if has_bvh_los_batch else 'disabled (fallback per-epoch)'}")
 
     nav_file = _resolve_nav_path(traj_csv, nav_path)
+    _validate_nav_date_sanity(nav_file, traj_csv, obs_rover_path)
     print(f"[{area_name}] Loading broadcast ephemeris: {nav_file}")
     nav_messages = read_nav_rinex_multi(nav_file, systems=RINEX_NAV_SYSTEMS_VIZ)
     eph = Ephemeris(nav_messages)

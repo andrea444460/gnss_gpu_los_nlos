@@ -61,6 +61,16 @@ def _parse_args() -> argparse.Namespace:
         default=Path("experiments/results/hk_mesh_summary.json"),
         help="Write a summary JSON report",
     )
+    p.add_argument(
+        "--include-categories",
+        type=str,
+        default="",
+        help=(
+            "Comma-separated top-level folder filters under extracted dir, "
+            "e.g. BUILDING or BUILDING,INFRASTRUCTURE. "
+            "Empty means include all."
+        ),
+    )
     p.add_argument("--reference-csv", type=Path, default=Path(""), help="Optional reference.csv for printed commands")
     p.add_argument("--obs-path", type=Path, default=Path(""), help="Optional rover obs path for printed commands")
     p.add_argument("--nav-path", type=Path, default=Path(""), help="Optional nav path for printed commands")
@@ -135,6 +145,16 @@ def main() -> None:
     if not root.exists():
         raise FileNotFoundError(f"Extracted dir not found: {root}")
     gltfs = sorted(list(root.rglob("*.gltf")) + list(root.rglob("*.glb")))
+    include_categories: set[str] = set()
+    if args.include_categories.strip():
+        include_categories = {
+            x.strip().upper() for x in args.include_categories.split(",") if x.strip()
+        }
+        gltfs = [
+            p
+            for p in gltfs
+            if any(part.upper() in include_categories for part in p.parts)
+        ]
     if not gltfs:
         raise RuntimeError(f"No .gltf/.glb files found under {root}")
 
@@ -179,6 +199,7 @@ def main() -> None:
     maxs = tri.reshape(-1, 3).max(axis=0).tolist()
     summary = {
         "extracted_dir": str(root),
+        "include_categories": sorted(include_categories) if include_categories else "ALL",
         "gltf_files_found": len(gltfs),
         "gltf_files_loaded": loaded,
         "gltf_files_skipped": skipped,

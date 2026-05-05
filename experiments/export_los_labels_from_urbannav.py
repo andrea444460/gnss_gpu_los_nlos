@@ -62,6 +62,55 @@ class EpochJob:
     pseudoranges: list[float]
 
 
+def _validate_time_alignment(obs, track: ReferenceTrack, eph: Ephemeris) -> None:
+    """Fail early when OBS/reference/NAV time windows do not overlap sensibly."""
+    if not obs.epochs:
+        raise RuntimeError("OBS has no epochs.")
+
+    obs_weeks: list[int] = []
+    obs_tows: list[float] = []
+    for ep in obs.epochs:
+        w, t = _datetime_to_gps_week_tow(ep.time)
+        obs_weeks.append(w)
+        obs_tows.append(t)
+    obs_weeks_arr = np.asarray(obs_weeks, dtype=np.int32)
+    obs_tows_arr = np.asarray(obs_tows, dtype=np.float64)
+    track_weeks = np.asarray(track.weeks, dtype=np.int32)
+    track_tows = np.asarray(track.tows, dtype=np.float64)
+
+    common_weeks = sorted(set(obs_weeks_arr.tolist()) & set(track_weeks.tolist()))
+    if not common_weeks:
+        raise RuntimeError(
+            "No common GPS week between OBS and reference track. "
+            f"OBS weeks={sorted(set(obs_weeks_arr.tolist()))[:5]} "
+            f"track weeks={sorted(set(track_weeks.tolist()))[:5]}"
+        )
+
+    w0 = common_weeks[0]
+    obs_w = obs_tows_arr[obs_weeks_arr == w0]
+    trk_w = track_tows[track_weeks == w0]
+    if obs_w.size == 0 or trk_w.size == 0:
+        raise RuntimeError("Unexpected empty time arrays after week intersection.")
+    obs_min, obs_max = float(np.min(obs_w)), float(np.max(obs_w))
+    trk_min, trk_max = float(np.min(trk_w)), float(np.max(trk_w))
+    overlap = max(0.0, min(obs_max, trk_max) - max(obs_min, trk_min))
+    if overlap < 1.0:
+        raise RuntimeError(
+            "OBS and reference track have almost no TOW overlap "
+            f"in GPS week {w0}: obs=[{obs_min:.1f},{obs_max:.1f}] "
+            f"track=[{trk_min:.1f},{trk_max:.1f}]"
+        )
+
+    # Quick NAV sanity: verify at least one epoch can produce satellite positions.
+    probe_tows = np.linspace(obs_min, obs_max, num=min(5, max(2, len(obs.epochs))), dtype=np.float64)
+    sat_probe, _, _ = eph.compute_batch(probe_tows, prn_list=[str(p) for p in eph.available_prns])
+    if sat_probe.size == 0 or sat_probe.shape[1] == 0:
+        raise RuntimeError(
+            "NAV ephemeris does not provide any satellite positions in OBS time range. "
+            "Check NAV file date / constellation compatibility."
+        )
+
+
 def _datetime_to_gps_week_tow(dt: datetime) -> tuple[int, float]:
     delta_s = (dt - GPS_EPOCH).total_seconds()
     week = int(delta_s // GPS_WEEK_SECONDS)
@@ -172,6 +221,7 @@ def main() -> None:
     nav_messages = read_nav_rinex_multi(args.nav_path, systems=systems)
     eph = Ephemeris(nav_messages)
     track = _load_reference_track(args.reference_csv)
+    _validate_time_alignment(obs, track, eph)
     print(f"  epochs in OBS: {len(obs.epochs)}")
     print(f"  ephemeris satellites: {len(eph.available_prns)}")
     print(f"  reference samples: {len(track.tows)}")

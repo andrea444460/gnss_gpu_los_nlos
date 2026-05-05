@@ -175,6 +175,7 @@ def _resolve_gt_csv(
     gt_csv: Path | None,
     gt_dropbox_url: str,
     work_dir: Path,
+    force_downloads: bool,
 ) -> Path:
     """Resolve gt.csv from local path or Dropbox URL.
 
@@ -191,11 +192,19 @@ def _resolve_gt_csv(
         raise ValueError("Provide either --gt-csv or --gt-dropbox-url")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    cached_gt_csv = work_dir / "gt.csv"
+    if cached_gt_csv.exists() and cached_gt_csv.stat().st_size > 0 and not force_downloads:
+        print(f"Reusing cached GT CSV: {cached_gt_csv} ({cached_gt_csv.stat().st_size} bytes)")
+        return cached_gt_csv
+
     direct_url = _to_dropbox_direct_download(gt_dropbox_url.strip())
     dl_path = work_dir / "gt_download.bin"
-    print(f"Downloading GT from Dropbox: {direct_url}")
-    _download_with_progress(direct_url, dl_path, label="[GT]")
-    print(f"GT raw download saved: {dl_path} ({dl_path.stat().st_size} bytes)")
+    if dl_path.exists() and dl_path.stat().st_size > 0 and not force_downloads:
+        print(f"Reusing cached GT archive/blob: {dl_path} ({dl_path.stat().st_size} bytes)")
+    else:
+        print(f"Downloading GT from Dropbox: {direct_url}")
+        _download_with_progress(direct_url, dl_path, label="[GT]")
+        print(f"GT raw download saved: {dl_path} ({dl_path.stat().st_size} bytes)")
 
     # Direct CSV response.
     if dl_path.suffix.lower() == ".csv":
@@ -211,7 +220,7 @@ def _resolve_gt_csv(
                 raise RuntimeError("Dropbox archive downloaded, but no gt.csv found inside")
             names.sort()
             pick = names[0]
-            out_csv = work_dir / Path(pick).name
+            out_csv = work_dir / "gt.csv"
             with zf.open(pick) as src, out_csv.open("wb") as dst:
                 dst.write(src.read())
             print(f"Resolved gt.csv from archive member: {pick}")
@@ -227,7 +236,12 @@ def _resolve_gt_csv(
     raise RuntimeError("Could not resolve gt.csv from provided Dropbox URL")
 
 
-def _resolve_catalog_gml(catalog_gml: Path | None, catalog_gml_url: str, work_dir: Path) -> Path:
+def _resolve_catalog_gml(
+    catalog_gml: Path | None,
+    catalog_gml_url: str,
+    work_dir: Path,
+    force_downloads: bool,
+) -> Path:
     """Resolve catalog GML from local path or URL."""
     if catalog_gml is not None:
         p = catalog_gml.resolve()
@@ -250,6 +264,9 @@ def _resolve_catalog_gml(catalog_gml: Path | None, catalog_gml_url: str, work_di
     if not name.lower().endswith(".gml"):
         name = "catalog.gml"
     out = work_dir / name
+    if out.exists() and out.stat().st_size > 0 and not force_downloads:
+        print(f"Reusing cached catalog GML: {out} ({out.stat().st_size} bytes)")
+        return out
     print(f"Downloading catalog GML: {catalog_gml_url.strip()}")
     _download_with_progress(catalog_gml_url.strip(), out, label="[CATALOG]")
     print(f"Catalog GML saved: {out} ({out.stat().st_size} bytes)")
@@ -279,6 +296,11 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("experiments/data/_hk3d_tmp"),
         help="Working directory for temporary downloads (including gt.csv from Dropbox)",
+    )
+    p.add_argument(
+        "--force-downloads",
+        action="store_true",
+        help="Force re-download of GT/Catalog even if cached files exist",
     )
     p.add_argument("--lat-col", type=int, default=1, help="0-based latitude column index in gt.csv (default 1)")
     p.add_argument("--lon-col", type=int, default=2, help="0-based longitude column index in gt.csv (default 2)")
@@ -312,8 +334,8 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     work_dir = args.work_dir.resolve()
-    gt_csv = _resolve_gt_csv(args.gt_csv, args.gt_dropbox_url, work_dir)
-    catalog_gml = _resolve_catalog_gml(args.catalog_gml, args.catalog_gml_url, work_dir)
+    gt_csv = _resolve_gt_csv(args.gt_csv, args.gt_dropbox_url, work_dir, bool(args.force_downloads))
+    catalog_gml = _resolve_catalog_gml(args.catalog_gml, args.catalog_gml_url, work_dir, bool(args.force_downloads))
 
     query_bbox = _trajectory_bbox_from_gt(
         gt_csv=gt_csv,

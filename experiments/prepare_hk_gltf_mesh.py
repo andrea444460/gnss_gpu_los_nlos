@@ -186,12 +186,15 @@ def main() -> None:
 
     tri_arg = str(out_npy)
     if str(args.obs_path):
+        nav_arg = f'--nav-path "{args.nav_path}" ' if str(args.nav_path) else ""
+        ref_arg = f'--reference-csv "{args.reference_csv}" ' if str(args.reference_csv) else ""
+        obs_filter_arg = f'--obs "{args.obs_path}" --filter-by-obs ' if str(args.obs_path) else ""
         print("\nSuggested LOS-label command:")
         print(
             "PYTHONPATH=python python experiments/export_los_labels_from_urbannav.py "
             f"--obs-path \"{args.obs_path}\" "
-            f"{('--nav-path \"' + str(args.nav_path) + '\" ') if str(args.nav_path) else ''}"
-            f"{('--reference-csv \"' + str(args.reference_csv) + '\" ') if str(args.reference_csv) else ''}"
+            f"{nav_arg}"
+            f"{ref_arg}"
             f"--triangles-npy \"{tri_arg}\" "
             "--output-csv \"experiments/results/hk_los_labels.csv\" --systems G,R,E,C,J,I,S --batch-size 512"
         )
@@ -199,9 +202,9 @@ def main() -> None:
         print(
             "PYTHONPATH=python python experiments/build_3d_visualization.py "
             "--area-name HK_KLT "
-            f"{('--reference-csv \"' + str(args.reference_csv) + '\" ') if str(args.reference_csv) else ''}"
+            f"{ref_arg}"
             f"--triangles-npy \"{tri_arg}\" "
-            f"{('--obs \"' + str(args.obs_path) + '\" --filter-by-obs ') if str(args.obs_path) else ''}"
+            f"{obs_filter_arg}"
             "--n-epochs 500 --epoch-min-interval-s 1 --out-html \"experiments/results/hk_klt_viz.html\""
         )
 

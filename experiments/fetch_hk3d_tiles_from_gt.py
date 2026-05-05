@@ -185,6 +185,33 @@ def _download_tiles(rows: list[dict[str, str]], out_dir: Path, max_tiles: int) -
     return n
 
 
+def _extract_tiles(zip_dir: Path, extract_dir: Path, force_extract: bool = False) -> tuple[int, int]:
+    """Extract downloaded tile ZIPs into per-tile subfolders.
+
+    Returns:
+        (n_processed, n_extracted_now)
+    """
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    zips = sorted(zip_dir.glob("*.zip"))
+    n_processed = 0
+    n_extracted_now = 0
+    for i, z in enumerate(zips, start=1):
+        out_subdir = extract_dir / z.stem
+        marker = out_subdir / ".extract_ok"
+        if marker.exists() and not force_extract:
+            print(f"[extract {i}/{len(zips)}] skip {z.name} (already extracted)")
+            n_processed += 1
+            continue
+        out_subdir.mkdir(parents=True, exist_ok=True)
+        print(f"[extract {i}/{len(zips)}] {z.name} -> {out_subdir}")
+        with zipfile.ZipFile(z) as zf:
+            zf.extractall(out_subdir)
+        marker.write_text("ok\n", encoding="utf-8")
+        n_processed += 1
+        n_extracted_now += 1
+    return n_processed, n_extracted_now
+
+
 def _to_dropbox_direct_download(url: str) -> str:
     """Normalize a Dropbox share URL to a direct-download form (dl=1)."""
     parts = urlsplit(url)
@@ -340,6 +367,22 @@ def _parse_args() -> argparse.Namespace:
         help="URL to HK 3D catalog GML (downloaded when --catalog-gml is not provided)",
     )
     p.add_argument("--output-dir", type=Path, required=True, help="Destination directory for downloaded ZIPs")
+    p.add_argument(
+        "--extract-dir",
+        type=Path,
+        default=Path(""),
+        help="If set, extract downloaded ZIPs into this directory (per-tile subfolders)",
+    )
+    p.add_argument(
+        "--extract",
+        action="store_true",
+        help="Enable ZIP extraction step after download",
+    )
+    p.add_argument(
+        "--force-extract",
+        action="store_true",
+        help="Re-extract even if extraction marker exists",
+    )
     p.add_argument("--out-manifest-csv", type=Path, default=Path("experiments/results/hk_tiles_manifest.csv"))
     p.add_argument(
         "--work-dir",
@@ -429,6 +472,19 @@ def main() -> None:
     n_downloaded = _download_tiles(rows, args.output_dir.resolve(), max_tiles=int(args.max_tiles))
     print(f"Downloaded/skipped tiles: {n_downloaded}")
     print(f"Output dir: {args.output_dir.resolve()}")
+
+    if bool(args.extract) or bool(args.extract_dir):
+        if str(args.extract_dir):
+            extract_dir = args.extract_dir.resolve()
+        else:
+            extract_dir = args.output_dir.resolve().parent / f"{args.output_dir.resolve().name}_extracted"
+        n_proc, n_now = _extract_tiles(
+            zip_dir=args.output_dir.resolve(),
+            extract_dir=extract_dir,
+            force_extract=bool(args.force_extract),
+        )
+        print(f"Extracted ZIPs: processed={n_proc}, newly_extracted={n_now}")
+        print(f"Extract dir: {extract_dir}")
 
 
 if __name__ == "__main__":

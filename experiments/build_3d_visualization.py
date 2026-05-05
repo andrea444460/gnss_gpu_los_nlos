@@ -85,6 +85,7 @@ from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
     _sat_elevation_azimuth,
+    apply_atmo_bending_lite,
     ecef_to_lla,
 )
 
@@ -494,6 +495,9 @@ def compute_all_epochs(
     obs_strict: bool = False,
     cnr_obs_path: Optional[str] = None,
     cnr_max_points_per_prn: int = 2500,
+    atmo_bending_lite: bool = False,
+    atmo_pressure_hpa: float = 1010.0,
+    atmo_temp_c: float = 10.0,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -582,11 +586,21 @@ def compute_all_epochs(
             f"  Multipath viz: enabled (delay ≥ {multipath_min_delay_m:g} m); "
             "uses BVH batched multipath when LOS batch path is active, else per-epoch GPU/CPU."
         )
+    if atmo_bending_lite:
+        print(
+            "  Atmo bending lite: enabled "
+            f"(P={float(atmo_pressure_hpa):.1f} hPa, T={float(atmo_temp_c):.1f} C)"
+        )
+    else:
+        print("  Atmo bending lite: disabled")
 
     usim = UrbanSignalSimulator(
         building_model=bvh,
         noise_floor_db=-35,
         elevation_mask_deg=effective_elevation_mask_deg,
+        atmo_bending_lite=bool(atmo_bending_lite),
+        atmo_pressure_hpa=float(atmo_pressure_hpa),
+        atmo_temp_c=float(atmo_temp_c),
     )
 
     obs_lookup: Optional[_ObsTowPrnLookup] = None
@@ -659,6 +673,12 @@ def compute_all_epochs(
             el_batch = np.zeros((n_b, n_sat_blk), dtype=np.float64)
             for i in range(n_b):
                 el_batch[i], _ = _sat_elevation_azimuth(rx_blk[i], sat_blk[i])
+            if usim.atmo_bending_lite:
+                el_batch = apply_atmo_bending_lite(
+                    el_batch,
+                    pressure_hpa=usim.atmo_pressure_hpa,
+                    temp_c=usim.atmo_temp_c,
+                )
             visible_batch = el_batch >= usim.elevation_mask_rad
             if obs_lookup is not None:
                 for i in range(n_b):
@@ -2277,6 +2297,23 @@ def main(argv=None):
         help="Do not embed C/N₀ (S*) time series from rover .obs for ray-click chart",
     )
     parser.add_argument(
+        "--atmo-bending-lite",
+        action="store_true",
+        help="Apply lightweight apparent-elevation correction for LOS visibility masking.",
+    )
+    parser.add_argument(
+        "--atmo-pressure-hpa",
+        type=float,
+        default=1010.0,
+        help="Pressure [hPa] for the lite atmospheric-bending model.",
+    )
+    parser.add_argument(
+        "--atmo-temp-c",
+        type=float,
+        default=10.0,
+        help="Temperature [deg C] for the lite atmospheric-bending model.",
+    )
+    parser.add_argument(
         "--cnr-max-points",
         type=int,
         default=2500,
@@ -2301,6 +2338,9 @@ def main(argv=None):
     filter_obs = bool(getattr(args, "filter_by_obs", False))
     embed_cnr = not bool(getattr(args, "no_cnr_embed", False))
     cnr_max_pts = max(50, int(getattr(args, "cnr_max_points", 2500)))
+    atmo_bending_lite = bool(getattr(args, "atmo_bending_lite", False))
+    atmo_pressure_hpa = float(getattr(args, "atmo_pressure_hpa", 1010.0))
+    atmo_temp_c = float(getattr(args, "atmo_temp_c", 10.0))
 
     def _obs_path_for_ref(ref_csv: str) -> Optional[str]:
         if not filter_obs:
@@ -2332,6 +2372,9 @@ def main(argv=None):
             obs_strict=obs_strict,
             cnr_obs_path=_cnr_obs_path_for_embed(p["shinjuku_ref"], obs_opt, embed=embed_cnr),
             cnr_max_points_per_prn=cnr_max_pts,
+            atmo_bending_lite=atmo_bending_lite,
+            atmo_pressure_hpa=atmo_pressure_hpa,
+            atmo_temp_c=atmo_temp_c,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
@@ -2349,6 +2392,9 @@ def main(argv=None):
             obs_strict=obs_strict,
             cnr_obs_path=_cnr_obs_path_for_embed(p["odaiba_ref"], obs_opt, embed=embed_cnr),
             cnr_max_points_per_prn=cnr_max_pts,
+            atmo_bending_lite=atmo_bending_lite,
+            atmo_pressure_hpa=atmo_pressure_hpa,
+            atmo_temp_c=atmo_temp_c,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
@@ -2386,6 +2432,9 @@ def main(argv=None):
         obs_strict=obs_strict,
         cnr_obs_path=_cnr_obs_path_for_embed(args.reference_csv, obs_opt, embed=embed_cnr),
         cnr_max_points_per_prn=cnr_max_pts,
+        atmo_bending_lite=atmo_bending_lite,
+        atmo_pressure_hpa=atmo_pressure_hpa,
+        atmo_temp_c=atmo_temp_c,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

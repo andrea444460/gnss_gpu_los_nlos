@@ -34,7 +34,11 @@ from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.io.rinex import read_rinex_obs
-from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, _sat_elevation_azimuth
+from gnss_gpu.urban_signal_sim import (
+    UrbanSignalSimulator,
+    _sat_elevation_azimuth,
+    apply_atmo_bending_lite,
+)
 
 GPS_EPOCH = datetime(1980, 1, 6)
 GPS_WEEK_SECONDS = 604800.0
@@ -132,6 +136,23 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--epoch-step", type=int, default=1, help="Use every Nth epoch from OBS")
     parser.add_argument("--max-epochs", type=int, default=0, help="0 means all, otherwise cap processed epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Epoch batch size for ephemeris.compute_batch")
+    parser.add_argument(
+        "--atmo-bending-lite",
+        action="store_true",
+        help="Use lightweight apparent-elevation correction for LOS visibility mask.",
+    )
+    parser.add_argument(
+        "--atmo-pressure-hpa",
+        type=float,
+        default=1010.0,
+        help="Pressure [hPa] for the lite atmospheric-bending model.",
+    )
+    parser.add_argument(
+        "--atmo-temp-c",
+        type=float,
+        default=10.0,
+        help="Temperature [deg C] for the lite atmospheric-bending model.",
+    )
     return parser.parse_args()
 
 
@@ -152,9 +173,22 @@ def main() -> None:
     loader = PlateauLoader(zone=args.plateau_zone)
     building = loader.load_directory(str(args.plateau_dir))
     bvh = BVHAccelerator.from_building_model(building)
-    usim = UrbanSignalSimulator(building_model=bvh, noise_floor_db=-35.0)
+    usim = UrbanSignalSimulator(
+        building_model=bvh,
+        noise_floor_db=-35.0,
+        atmo_bending_lite=args.atmo_bending_lite,
+        atmo_pressure_hpa=args.atmo_pressure_hpa,
+        atmo_temp_c=args.atmo_temp_c,
+    )
     print(f"  triangles: {len(building.triangles)}")
     print(f"  bvh nodes: {bvh.n_nodes}")
+    if args.atmo_bending_lite:
+        print(
+            "  atmo bending lite: enabled"
+            f" (P={args.atmo_pressure_hpa:.1f} hPa, T={args.atmo_temp_c:.1f} C)"
+        )
+    else:
+        print("  atmo bending lite: disabled")
     has_bvh_batch = hasattr(bvh, "check_los_batch") and hasattr(bvh, "compute_multipath_batch")
     print(f"  BVH batch path: {'enabled' if has_bvh_batch else 'disabled (fallback per-epoch)'}")
 
@@ -295,7 +329,14 @@ def main() -> None:
                 pr_by_sat = {sid: pr for sid, pr in zip(job.sat_ids, job.pseudoranges)}
                 if has_bvh_batch and los_pad is not None and delay_pad is not None:
                     el, az = _sat_elevation_azimuth(job.rx_xyz, sat_ecef)
-                    visible = el >= usim.elevation_mask_rad
+                    el_vis = el
+                    if usim.atmo_bending_lite:
+                        el_vis = apply_atmo_bending_lite(
+                            el,
+                            pressure_hpa=usim.atmo_pressure_hpa,
+                            temp_c=usim.atmo_temp_c,
+                        )
+                    visible = el_vis >= usim.elevation_mask_rad
                     is_los = np.ones(len(selected_ids), dtype=bool)
                     is_los[visible] = los_pad[bi, : len(selected_ids)][visible]
                     excess_delays = np.zeros(len(selected_ids), dtype=np.float64)

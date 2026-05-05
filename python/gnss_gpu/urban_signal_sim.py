@@ -66,13 +66,34 @@ def _sat_elevation_azimuth(rx_ecef, sat_ecef):
     return el, az
 
 
+def apply_atmo_bending_lite(el_rad, pressure_hpa=1010.0, temp_c=10.0):
+    """Apply Bennett/Saemundsson-like apparent elevation correction.
+
+    This is a lightweight atmospheric refraction approximation that shifts
+    geometric elevation to apparent elevation, mainly affecting low-elevation
+    satellites. Input and output are in radians.
+    """
+    el = np.asarray(el_rad, dtype=np.float64)
+    el_deg = np.degrees(el)
+    # Clamp to avoid singular behavior at very low/negative elevations.
+    el_deg_safe = np.clip(el_deg, -1.0, 89.9)
+    denom = np.tan(np.radians(el_deg_safe + 10.3 / (el_deg_safe + 5.11)))
+    denom = np.where(np.abs(denom) < 1e-8, 1e-8, denom)
+    delta_arcmin = 1.02 / denom
+    meteo_scale = (float(pressure_hpa) / 1010.0) * (283.0 / (273.0 + float(temp_c)))
+    delta_deg = (delta_arcmin / 60.0) * meteo_scale
+    return np.radians(el_deg + delta_deg)
+
+
 class UrbanSignalSimulator:
     """Urban GNSS IQ signal simulator with a 3D scene model."""
 
     def __init__(self, building_model=None, sampling_freq=2.6e6,
                  intermediate_freq=0.0, noise_floor_db=-20.0,
                  elevation_mask_deg=10.0,
-                 nlos_attenuation_db=6.0, fresnel_coeff=0.5):
+                 nlos_attenuation_db=6.0, fresnel_coeff=0.5,
+                 atmo_bending_lite=False, atmo_pressure_hpa=1010.0,
+                 atmo_temp_c=10.0):
         """
         Args:
             building_model: BuildingModel or BVHAccelerator instance.
@@ -82,12 +103,18 @@ class UrbanSignalSimulator:
             elevation_mask_deg: Minimum satellite elevation [deg].
             nlos_attenuation_db: Signal attenuation for NLOS satellites [dB].
             fresnel_coeff: Reflection coefficient for multipath [0-1].
+            atmo_bending_lite: If True, use apparent elevation for visibility mask.
+            atmo_pressure_hpa: Pressure for lite bending model [hPa].
+            atmo_temp_c: Temperature for lite bending model [deg C].
         """
         self.building_model = building_model
         self.sim = SignalSimulator(sampling_freq, intermediate_freq, noise_floor_db)
         self.elevation_mask_rad = math.radians(elevation_mask_deg)
         self.nlos_attenuation_db = nlos_attenuation_db
         self.fresnel_coeff = fresnel_coeff
+        self.atmo_bending_lite = bool(atmo_bending_lite)
+        self.atmo_pressure_hpa = float(atmo_pressure_hpa)
+        self.atmo_temp_c = float(atmo_temp_c)
 
     def compute_epoch(self, rx_ecef, sat_ecef, sat_clk=None, sat_vel=None,
                       rx_vel=None, rx_clock_bias=0.0,
@@ -135,9 +162,16 @@ class UrbanSignalSimulator:
 
         # --- Elevation / azimuth ---
         el, az = _sat_elevation_azimuth(rx, sats)
+        el_for_visibility = el
+        if self.atmo_bending_lite:
+            el_for_visibility = apply_atmo_bending_lite(
+                el,
+                pressure_hpa=self.atmo_pressure_hpa,
+                temp_c=self.atmo_temp_c,
+            )
 
         # --- Elevation mask ---
-        visible = el >= self.elevation_mask_rad
+        visible = el_for_visibility >= self.elevation_mask_rad
 
         # --- LOS / NLOS classification ---
         is_los = np.ones(n_sat, dtype=bool)
@@ -245,6 +279,7 @@ class UrbanSignalSimulator:
             "is_los": is_los,
             "excess_delays": excess_delays,
             "elevations": el,
+            "elevations_apparent": el_for_visibility,
             "azimuths": az,
             "visible": visible,
             "n_los": int(np.sum(is_los & visible)),

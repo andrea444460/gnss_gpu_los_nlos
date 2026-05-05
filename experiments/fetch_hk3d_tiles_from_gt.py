@@ -266,10 +266,38 @@ def _resolve_catalog_gml(
     out = work_dir / name
     if out.exists() and out.stat().st_size > 0 and not force_downloads:
         print(f"Reusing cached catalog GML: {out} ({out.stat().st_size} bytes)")
-        return out
-    print(f"Downloading catalog GML: {catalog_gml_url.strip()}")
-    _download_with_progress(catalog_gml_url.strip(), out, label="[CATALOG]")
-    print(f"Catalog GML saved: {out} ({out.stat().st_size} bytes)")
+        # Continue below to normalize cached payload into a parseable GML if needed.
+    else:
+        print(f"Downloading catalog GML: {catalog_gml_url.strip()}")
+        _download_with_progress(catalog_gml_url.strip(), out, label="[CATALOG]")
+        print(f"Catalog GML saved: {out} ({out.stat().st_size} bytes)")
+
+    # Some endpoints return ZIP or non-.gml filename payloads.
+    try:
+        head = out.read_bytes()[:4]
+    except OSError:
+        head = b""
+    if head.startswith(b"PK\x03\x04"):
+        with zipfile.ZipFile(out) as zf:
+            gml_members = [n for n in zf.namelist() if n.lower().endswith(".gml") or n.lower().endswith(".xml")]
+            if not gml_members:
+                raise RuntimeError("Catalog archive downloaded, but no .gml/.xml file found inside")
+            gml_members.sort()
+            pick = gml_members[0]
+            out_gml = work_dir / Path(pick).name
+            with zf.open(pick) as src, out_gml.open("wb") as dst:
+                dst.write(src.read())
+            print(f"Resolved catalog GML from archive member: {pick}")
+            return out_gml
+
+    # Heuristic: if download is HTML, fail with explicit guidance.
+    text_head = out.read_text(encoding="utf-8", errors="ignore")[:512].lstrip().lower()
+    if text_head.startswith("<!doctype html") or text_head.startswith("<html"):
+        raise RuntimeError(
+            "Catalog URL returned HTML instead of GML. Use a direct download URL, "
+            "or provide --catalog-gml with a local .gml file."
+        )
+
     return out
 
 

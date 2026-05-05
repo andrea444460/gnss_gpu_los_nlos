@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import time
 import urllib.request
 import zipfile
 import xml.etree.ElementTree as ET
@@ -36,26 +37,47 @@ URL_FIELD_MAP = {
 
 def _download_with_progress(url: str, dst: Path, label: str = "") -> None:
     """Download URL to path with lightweight console progress logging."""
-    state = {"last_pct": -10, "last_mb": -1}
     prefix = f"{label} " if label else ""
+    max_attempts = 5
+    last_err: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        state = {"last_pct": -10, "last_mb": -1}
 
-    def _hook(block_count: int, block_size: int, total_size: int) -> None:
-        downloaded = block_count * block_size
-        downloaded_mb = int(downloaded / (1024 * 1024))
-        if total_size > 0:
-            pct = int(min(100, (downloaded * 100) / total_size))
-            # Print every 10% (and always at completion)
-            if pct >= state["last_pct"] + 10 or pct == 100:
-                total_mb = max(1, int(total_size / (1024 * 1024)))
-                print(f"{prefix}progress: {pct:3d}% ({downloaded_mb} / {total_mb} MiB)")
-                state["last_pct"] = pct
-        else:
-            # Unknown total size fallback
-            if downloaded_mb >= state["last_mb"] + 20:
-                print(f"{prefix}downloaded: {downloaded_mb} MiB")
-                state["last_mb"] = downloaded_mb
+        def _hook(block_count: int, block_size: int, total_size: int) -> None:
+            downloaded = block_count * block_size
+            downloaded_mb = int(downloaded / (1024 * 1024))
+            if total_size > 0:
+                pct = int(min(100, (downloaded * 100) / total_size))
+                # Print every 10% (and always at completion)
+                if pct >= state["last_pct"] + 10 or pct == 100:
+                    total_mb = max(1, int(total_size / (1024 * 1024)))
+                    print(f"{prefix}progress: {pct:3d}% ({downloaded_mb} / {total_mb} MiB)")
+                    state["last_pct"] = pct
+            else:
+                # Unknown total size fallback
+                if downloaded_mb >= state["last_mb"] + 20:
+                    print(f"{prefix}downloaded: {downloaded_mb} MiB")
+                    state["last_mb"] = downloaded_mb
 
-    urllib.request.urlretrieve(url, dst, reporthook=_hook)
+        try:
+            urllib.request.urlretrieve(url, dst, reporthook=_hook)
+            return
+        except Exception as exc:
+            last_err = exc
+            # Remove potentially partial file before retry.
+            try:
+                if dst.exists():
+                    dst.unlink()
+            except OSError:
+                pass
+            if attempt >= max_attempts:
+                break
+            wait_s = min(2 ** attempt, 20)
+            print(f"{prefix}download failed (attempt {attempt}/{max_attempts}): {exc}")
+            print(f"{prefix}retrying in {wait_s}s ...")
+            time.sleep(wait_s)
+
+    raise RuntimeError(f"{prefix}download failed after {max_attempts} attempts: {last_err}")
 
 
 def _parse_poslist_2d(text: str) -> list[tuple[float, float]]:

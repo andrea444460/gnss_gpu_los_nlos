@@ -32,12 +32,7 @@ if str(_PROJECT_ROOT / "python") not in sys.path:
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
-from gnss_gpu.io.plateau import (
-    PlateauLoader,
-    apply_plateau_mesh_ecef_shift,
-    parse_optional_comma_xyz,
-    plateau_mesh_total_ecef_shift_m,
-)
+from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.io.rinex import read_rinex_obs
 from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, _sat_elevation_azimuth
 
@@ -134,21 +129,6 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated systems to label (e.g. G or G,E,J)",
     )
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane-rectangular coordinate zone")
-    parser.add_argument(
-        "--plateau-mesh-vertical-shift-m",
-        type=float,
-        default=0.0,
-        help=(
-            "Translate PLATEAU mesh along GRS80 ellipsoid outward direction at reference.csv centroid [m]; "
-            "applied before BVH (same semantics as build_3d_visualization.py)."
-        ),
-    )
-    parser.add_argument(
-        "--plateau-mesh-ecef-shift-m",
-        type=str,
-        default="",
-        help='Additional uniform ECEF mesh translation after vertical shift: "dx,dy,dz"',
-    )
     parser.add_argument("--epoch-step", type=int, default=1, help="Use every Nth epoch from OBS")
     parser.add_argument("--max-epochs", type=int, default=0, help="0 means all, otherwise cap processed epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Epoch batch size for ephemeris.compute_batch")
@@ -158,10 +138,6 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     systems = tuple(s.strip().upper() for s in args.systems.split(",") if s.strip())
-    try:
-        plateau_extra_xyz = parse_optional_comma_xyz(str(getattr(args, "plateau_mesh_ecef_shift_m", "")))
-    except ValueError as e:
-        raise SystemExit(f"--plateau-mesh-ecef-shift-m: {e}") from e
 
     print("[1/5] Loading input files...")
     obs = read_rinex_obs(args.obs_path)
@@ -175,18 +151,6 @@ def main() -> None:
     print("[2/5] Loading PLATEAU and building BVH...")
     loader = PlateauLoader(zone=args.plateau_zone)
     building = loader.load_directory(str(args.plateau_dir))
-    pivot_ref = np.mean(track.rx_ecef, axis=0)
-    mesh_shift_m = plateau_mesh_total_ecef_shift_m(
-        pivot_ref,
-        float(getattr(args, "plateau_mesh_vertical_shift_m", 0.0)),
-        plateau_extra_xyz,
-    )
-    if np.any(mesh_shift_m != 0.0):
-        building = apply_plateau_mesh_ecef_shift(building, mesh_shift_m)
-        print(
-            "  PLATEAU mesh ECEF shift [m] (ray tracing): "
-            f"{float(mesh_shift_m[0]):.4f}, {float(mesh_shift_m[1]):.4f}, {float(mesh_shift_m[2]):.4f}"
-        )
     bvh = BVHAccelerator.from_building_model(building)
     usim = UrbanSignalSimulator(building_model=bvh, noise_floor_db=-35.0)
     print(f"  triangles: {len(building.triangles)}")

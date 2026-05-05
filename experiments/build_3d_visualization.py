@@ -249,6 +249,18 @@ class _ObsTowPrnLookup:
     def n_epochs(self) -> int:
         return len(self._sets)
 
+    @property
+    def tow_min(self) -> Optional[float]:
+        if self._tows.size == 0:
+            return None
+        return float(np.min(self._tows))
+
+    @property
+    def tow_max(self) -> Optional[float]:
+        if self._tows.size == 0:
+            return None
+        return float(np.max(self._tows))
+
     def nearest_sat_ids(self, tow_csv: float) -> Optional[frozenset[str]]:
         """Satellite ids observed at nearest OBS epoch, or ``None`` if outside tolerance."""
         if not self._sets:
@@ -535,6 +547,41 @@ def select_viz_epoch_indices(
     return np.asarray([greedy_idx[int(s)] for s in slot_i], dtype=int), info
 
 
+def _validate_time_alignment_for_viz(
+    times_tow: np.ndarray,
+    eph: Ephemeris,
+    prn_catalog,
+    obs_lookup: Optional[_ObsTowPrnLookup] = None,
+) -> None:
+    """Fail early for obvious time-base mismatches before expensive geometry."""
+    if times_tow.size == 0:
+        raise RuntimeError("Trajectory has no usable time samples.")
+    t_min = float(np.min(times_tow))
+    t_max = float(np.max(times_tow))
+    if t_max - t_min < 1e-6:
+        raise RuntimeError("Trajectory time span is zero; check reference/gt CSV.")
+
+    probe_n = min(8, max(2, int(times_tow.size)))
+    probe_tows = np.linspace(t_min, t_max, num=probe_n, dtype=np.float64)
+    sat_probe, _, _ = eph.compute_batch(probe_tows, prn_list=prn_catalog)
+    if sat_probe.size == 0 or sat_probe.shape[1] == 0:
+        raise RuntimeError(
+            "NAV ephemeris provides no satellites for trajectory time range "
+            f"[{t_min:.1f}, {t_max:.1f}] TOW. Check NAV file/date."
+        )
+
+    if obs_lookup is not None and obs_lookup.n_epochs > 0:
+        o_min = obs_lookup.tow_min
+        o_max = obs_lookup.tow_max
+        if o_min is not None and o_max is not None:
+            overlap = max(0.0, min(t_max, o_max) - max(t_min, o_min))
+            if overlap < 1.0:
+                raise RuntimeError(
+                    "Trajectory and OBS time windows have almost no overlap: "
+                    f"traj=[{t_min:.1f},{t_max:.1f}] obs=[{o_min:.1f},{o_max:.1f}]"
+                )
+
+
 def compute_all_epochs(
     area_name,
     plateau_dir,
@@ -679,6 +726,13 @@ def compute_all_epochs(
             f"(match nearest OBS epoch if |ΔGPS TOW|≤{obs_match_tol_s:g}s; strict={obs_strict})"
         )
         print(f"  OBS epochs with code pseudorange: {obs_lookup.n_epochs}")
+
+    _validate_time_alignment_for_viz(
+        times_tow=np.asarray(times, dtype=np.float64),
+        eph=eph,
+        prn_catalog=prn_catalog,
+        obs_lookup=obs_lookup,
+    )
 
     cnr_by_prn: dict[str, list] = {}
     cnr_obs_source = ""

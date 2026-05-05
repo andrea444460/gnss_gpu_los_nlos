@@ -566,7 +566,17 @@ def compute_all_epochs(
     eph = Ephemeris(nav_messages)
     prn_catalog = eph.available_prns
     print(f"  Satellites in NAV: {len(prn_catalog)}")
-    print(f"  Elevation mask: {elevation_mask_deg:g}° above horizon")
+    effective_elevation_mask_deg = float(elevation_mask_deg)
+    if obs_rover_path:
+        # When OBS is provided, use observation availability as the visibility gate:
+        # keep all elevations and let OBS filtering decide what to show.
+        effective_elevation_mask_deg = -90.0
+        print(
+            "  Elevation mask: disabled (-90°) because OBS filtering is active "
+            f"({obs_rover_path})"
+        )
+    else:
+        print(f"  Elevation mask: {effective_elevation_mask_deg:g}° above horizon")
     if viz_multipath:
         print(
             f"  Multipath viz: enabled (delay ≥ {multipath_min_delay_m:g} m); "
@@ -576,7 +586,7 @@ def compute_all_epochs(
     usim = UrbanSignalSimulator(
         building_model=bvh,
         noise_floor_db=-35,
-        elevation_mask_deg=elevation_mask_deg,
+        elevation_mask_deg=effective_elevation_mask_deg,
     )
 
     obs_lookup: Optional[_ObsTowPrnLookup] = None
@@ -946,11 +956,37 @@ function towDeltaSec(a, b) {
   else if (d > 302400.0) d -= 604800.0;
   return d;
 }
+function satStateAtEpoch(ep, prnRaw) {
+  const prn = normalizeCnrPrnKey(prnRaw);
+  const refl = ((ep && ep.reflections) || []).filter(function (mp) {
+    return normalizeCnrPrnKey(mp && mp.prn) === prn;
+  });
+  if (refl.some(function (mp) { return !!mp.nlosMp; })) {
+    return { label: 'NLOS MP', cls: 's-nlosmp' };
+  }
+  if (refl.length > 0) {
+    return { label: 'LOS MP', cls: 's-losmp' };
+  }
+  const rays = (ep && ep.rays) || [];
+  for (let i = 0; i < rays.length; i++) {
+    const r = rays[i];
+    if (normalizeCnrPrnKey(r && r.prn) !== prn) continue;
+    return r.los ? { label: 'LOS', cls: 's-los' } : { label: 'NLOS', cls: 's-nlos' };
+  }
+  return { label: '-', cls: '' };
+}
 function drawCnrChart(ds, prn, cursorTow) {
   const canvas = document.getElementById('cnrCanvas');
   const titleEl = document.getElementById('cnrTitle');
   const hintEl = document.getElementById('cnrHint');
+  const statusEl = document.getElementById('cnrSatStatus');
   if (!canvas || !titleEl || !hintEl) return;
+  if (statusEl) {
+    const ep = (ds && ds.epochs && ds.epochs[displayedEpochIndex]) || null;
+    const st = satStateAtEpoch(ep, prn);
+    statusEl.textContent = st.label;
+    statusEl.className = st.cls ? st.cls : '';
+  }
   const series = lookupCnrSeries(ds, prn);
   const src = (ds && ds.cnrObsSource) ? ds.cnrObsSource : '';
   titleEl.textContent = 'C/N\u2080 — PRN ' + prn + (src ? ' — ' + src : '');
@@ -1243,6 +1279,22 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
     min-width: 4.5rem;
   }}
   #cnrEpochSlider {{ flex: 1; min-width: 160px; accent-color: #3b7ddd; }}
+  #cnrSatStatus {{
+    margin-left: auto;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid #445;
+    background: #1b2333;
+    color: #dbe5ff;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }}
+  #cnrSatStatus.s-los {{ border-color: #15705e; color: #8ff3df; }}
+  #cnrSatStatus.s-nlos {{ border-color: #8a3a3a; color: #ffb2b2; }}
+  #cnrSatStatus.s-losmp {{ border-color: #8a5a1f; color: #ffd59b; }}
+  #cnrSatStatus.s-nlosmp {{ border-color: #a24646; color: #ff9f9f; }}
 </style>
 </head>
 <body>
@@ -1331,6 +1383,7 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
         <span style="white-space:nowrap;">Epoch</span>
         <input type="range" id="cnrEpochSlider" min="0" max="0" value="0" />
       </label>
+      <span id="cnrSatStatus" title="Satellite state at current epoch">-</span>
     </div>
     <canvas id="cnrCanvas" width="680" height="240"></canvas>
     <div id="cnrHint"></div>

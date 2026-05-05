@@ -80,6 +80,7 @@ from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.rinex import read_rinex_obs
 from gnss_gpu.io.plateau import PlateauLoader
+from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.urban_signal_sim import (
@@ -499,6 +500,7 @@ def compute_all_epochs(
     atmo_bending_lite: bool = False,
     atmo_pressure_hpa: float = 1010.0,
     atmo_temp_c: float = 10.0,
+    triangles_npy: Optional[str] = None,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -530,9 +532,17 @@ def compute_all_epochs(
     (uniform subsample along a greedy ladder); if ``0`` (default), epochs are evenly spaced in
     **row index** after ``step`` (same as legacy ``np.linspace``).
     """
-    print(f"[{area_name}] Loading PLATEAU...")
-    loader = PlateauLoader(zone=int(plateau_zone))
-    building = loader.load_directory(plateau_dir)
+    print(f"[{area_name}] Loading geometry...")
+    if triangles_npy:
+        tri = np.asarray(np.load(triangles_npy), dtype=np.float64)
+        if tri.ndim != 3 or tri.shape[1:] != (3, 3):
+            raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri.shape}")
+        building = BuildingModel(tri)
+        print(f"  source: triangles npy ({triangles_npy})")
+    else:
+        loader = PlateauLoader(zone=int(plateau_zone))
+        building = loader.load_directory(plateau_dir)
+        print(f"  source: PLATEAU directory ({plateau_dir})")
     print(f"  {len(building.triangles)} triangles")
 
     multipath_warned = False
@@ -2211,6 +2221,12 @@ def main(argv=None):
     )
     parser.add_argument("--area-name", type=str, default="Area", help="Label shown in the viewer overlay")
     parser.add_argument("--plateau-dir", type=str, default="", help="Directory with PLATEAU CityGML tiles")
+    parser.add_argument(
+        "--triangles-npy",
+        type=str,
+        default="",
+        help="Alternative mesh input: .npy triangles with shape [N,3,3] in ECEF meters",
+    )
     parser.add_argument("--reference-csv", type=str, default="", help="UrbanNav reference.csv (ECEF trajectory)")
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane zone (Tokyo area = 9)")
     parser.add_argument("--n-epochs", type=int, default=12, help="Number of epochs along trajectory")
@@ -2435,8 +2451,10 @@ def main(argv=None):
             print("Tip: set CESIUM_ION_TOKEN or --cesium-ion-token for terrain + OSM buildings.")
         return
 
-    if not args.plateau_dir or not args.reference_csv:
-        parser.error("--plateau-dir and --reference-csv are required unless --legacy is set.")
+    if not args.reference_csv:
+        parser.error("--reference-csv is required unless --legacy is set.")
+    if bool(args.plateau_dir) == bool(args.triangles_npy):
+        parser.error("Provide exactly one of --plateau-dir or --triangles-npy.")
 
     ds = compute_all_epochs(
         args.area_name,
@@ -2459,6 +2477,7 @@ def main(argv=None):
         atmo_bending_lite=atmo_bending_lite,
         atmo_pressure_hpa=atmo_pressure_hpa,
         atmo_temp_c=atmo_temp_c,
+        triangles_npy=(args.triangles_npy.strip() or None),
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

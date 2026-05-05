@@ -34,6 +34,7 @@ from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.io.rinex import read_rinex_obs
+from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
     _sat_elevation_azimuth,
@@ -124,7 +125,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-path", type=Path, required=True, help="RINEX observation file (.obs)")
     parser.add_argument("--nav-path", type=Path, required=True, help="RINEX navigation file (.nav)")
     parser.add_argument("--reference-csv", type=Path, required=True, help="UrbanNav reference.csv (ECEF trajectory)")
-    parser.add_argument("--plateau-dir", type=Path, required=True, help="Directory containing PLATEAU .gml tiles")
+    parser.add_argument("--plateau-dir", type=Path, help="Directory containing PLATEAU .gml tiles")
+    parser.add_argument(
+        "--triangles-npy",
+        type=Path,
+        help="Alternative mesh input: .npy triangles with shape [N,3,3] in ECEF meters",
+    )
     parser.add_argument("--output-csv", type=Path, required=True, help="Output labels CSV path")
     parser.add_argument("--obs-code", type=str, default="C1C", help="Observation code to require in OBS file")
     parser.add_argument(
@@ -170,9 +176,20 @@ def main() -> None:
     print(f"  ephemeris satellites: {len(eph.available_prns)}")
     print(f"  reference samples: {len(track.tows)}")
 
-    print("[2/5] Loading PLATEAU and building BVH...")
-    loader = PlateauLoader(zone=args.plateau_zone)
-    building = loader.load_directory(str(args.plateau_dir))
+    if bool(args.plateau_dir) == bool(args.triangles_npy):
+        raise ValueError("Provide exactly one of --plateau-dir or --triangles-npy")
+
+    print("[2/5] Loading geometry and building BVH...")
+    if args.triangles_npy:
+        tri = np.asarray(np.load(args.triangles_npy), dtype=np.float64)
+        if tri.ndim != 3 or tri.shape[1:] != (3, 3):
+            raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri.shape}")
+        building = BuildingModel(tri)
+        print(f"  mesh source: triangles npy ({args.triangles_npy})")
+    else:
+        loader = PlateauLoader(zone=args.plateau_zone)
+        building = loader.load_directory(str(args.plateau_dir))
+        print(f"  mesh source: PLATEAU directory ({args.plateau_dir})")
     bvh = BVHAccelerator.from_building_model(building)
     usim = UrbanSignalSimulator(
         building_model=bvh,

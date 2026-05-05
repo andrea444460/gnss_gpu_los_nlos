@@ -99,25 +99,81 @@ def _normalize_csv_row(row: dict) -> dict:
     return {k.strip(): v for k, v in row.items()}
 
 
+def _lla_deg_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> np.ndarray:
+    """Convert geodetic degrees to ECEF meters (WGS-84)."""
+    a = 6378137.0
+    f = 1.0 / 298.257223563
+    e2 = 2.0 * f - f * f
+    lat = math.radians(float(lat_deg))
+    lon = math.radians(float(lon_deg))
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    sin_lon = math.sin(lon)
+    cos_lon = math.cos(lon)
+    n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
+    x = (n + float(alt_m)) * cos_lat * cos_lon
+    y = (n + float(alt_m)) * cos_lat * sin_lon
+    z = (n * (1.0 - e2) + float(alt_m)) * sin_lat
+    return np.array([x, y, z], dtype=np.float64)
+
+
+def _to_gps_tow_seconds(ts: float) -> float:
+    """Normalize time to GPS TOW-like seconds for ephemeris calls."""
+    t = float(ts)
+    if t < 0.0:
+        return t % 604800.0
+    # If already in TOW range, keep as is.
+    if t <= 604800.0:
+        return t
+    # Likely absolute timestamp (GPS/Unix-like); fold to week seconds.
+    return t % 604800.0
+
+
 def load_trajectory(csv_path, step=200):
     """Return positions, GPS TOW times, and raw CSV row count.
 
     Points loaded ≈ ``ceil(n_csv_rows / step)`` (every ``step``-th row, zero-based).
     """
     with open(csv_path, encoding="utf-8") as f:
-        rows = [_normalize_csv_row(r) for r in csv.DictReader(f)]
-    n_csv = len(rows)
-    positions, times = [], []
+        rows_dict = [_normalize_csv_row(r) for r in csv.DictReader(f)]
+
+    positions: list[list[float]] = []
+    times: list[float] = []
+
+    # UrbanNav reference.csv mode (ECEF columns present).
+    if rows_dict and {"ECEF X (m)", "ECEF Y (m)", "ECEF Z (m)", "GPS TOW (s)"} <= set(rows_dict[0].keys()):
+        n_csv = len(rows_dict)
+        for i in range(0, n_csv, step):
+            r = rows_dict[i]
+            positions.append(
+                [
+                    float(r["ECEF X (m)"]),
+                    float(r["ECEF Y (m)"]),
+                    float(r["ECEF Z (m)"]),
+                ]
+            )
+            times.append(_to_gps_tow_seconds(float(r["GPS TOW (s)"])))
+        return np.array(positions), np.array(times), int(n_csv)
+
+    # KLT gt.csv mode: headerless rows [timestamp, lat, lon, alt].
+    with open(csv_path, encoding="utf-8") as f:
+        reader = csv.reader(f)
+        raw_rows = [r for r in reader if r]
+    n_csv = len(raw_rows)
     for i in range(0, n_csv, step):
-        r = rows[i]
-        positions.append(
-            [
-                float(r["ECEF X (m)"]),
-                float(r["ECEF Y (m)"]),
-                float(r["ECEF Z (m)"]),
-            ]
-        )
-        times.append(float(r["GPS TOW (s)"]))
+        r = raw_rows[i]
+        if len(r) < 4:
+            continue
+        ts = float(r[0])
+        lat = float(r[1])
+        lon = float(r[2])
+        alt = float(r[3])
+        ecef = _lla_deg_to_ecef(lat, lon, alt)
+        positions.append([float(ecef[0]), float(ecef[1]), float(ecef[2])])
+        times.append(_to_gps_tow_seconds(ts))
+    if not positions:
+        raise ValueError(f"Could not parse trajectory CSV format: {csv_path}")
+    print("  Trajectory parser: detected gt.csv-style [timestamp,lat,lon,alt], converted to ECEF.")
     return np.array(positions), np.array(times), int(n_csv)
 
 

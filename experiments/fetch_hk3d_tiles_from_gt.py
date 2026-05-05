@@ -227,6 +227,35 @@ def _resolve_gt_csv(
     raise RuntimeError("Could not resolve gt.csv from provided Dropbox URL")
 
 
+def _resolve_catalog_gml(catalog_gml: Path | None, catalog_gml_url: str, work_dir: Path) -> Path:
+    """Resolve catalog GML from local path or URL."""
+    if catalog_gml is not None:
+        p = catalog_gml.resolve()
+        if p.exists():
+            return p
+        raw = str(catalog_gml)
+        if ":" in raw and "\\" in raw and os.name != "nt":
+            raise FileNotFoundError(
+                f"Catalog GML looks like a Windows path on Linux/Colab: {raw}. "
+                "Use a Colab/Linux path (e.g. /content/...gml) or provide --catalog-gml-url."
+            )
+        raise FileNotFoundError(f"Catalog GML not found: {p}")
+
+    if not catalog_gml_url.strip():
+        raise ValueError("Provide either --catalog-gml or --catalog-gml-url")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    parts = urlsplit(catalog_gml_url.strip())
+    name = os.path.basename(parts.path) or "catalog.gml"
+    if not name.lower().endswith(".gml"):
+        name = "catalog.gml"
+    out = work_dir / name
+    print(f"Downloading catalog GML: {catalog_gml_url.strip()}")
+    _download_with_progress(catalog_gml_url.strip(), out, label="[CATALOG]")
+    print(f"Catalog GML saved: {out} ({out.stat().st_size} bytes)")
+    return out
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fetch HK 3D tile ZIPs intersecting GT trajectory bbox")
     p.add_argument("--gt-csv", type=Path, help="Local GT CSV path (e.g., KLT gt.csv)")
@@ -236,7 +265,13 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Dropbox shared URL to GT folder/file; gt.csv is auto-resolved and downloaded",
     )
-    p.add_argument("--catalog-gml", type=Path, required=True, help="HK 3D catalog GML path")
+    p.add_argument("--catalog-gml", type=Path, help="Local HK 3D catalog GML path")
+    p.add_argument(
+        "--catalog-gml-url",
+        type=str,
+        default="",
+        help="URL to HK 3D catalog GML (downloaded when --catalog-gml is not provided)",
+    )
     p.add_argument("--output-dir", type=Path, required=True, help="Destination directory for downloaded ZIPs")
     p.add_argument("--out-manifest-csv", type=Path, default=Path("experiments/results/hk_tiles_manifest.csv"))
     p.add_argument(
@@ -276,10 +311,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    gt_csv = _resolve_gt_csv(args.gt_csv, args.gt_dropbox_url, args.work_dir.resolve())
-    catalog_gml = args.catalog_gml.resolve()
-    if not catalog_gml.exists():
-        raise FileNotFoundError(f"Catalog GML not found: {catalog_gml}")
+    work_dir = args.work_dir.resolve()
+    gt_csv = _resolve_gt_csv(args.gt_csv, args.gt_dropbox_url, work_dir)
+    catalog_gml = _resolve_catalog_gml(args.catalog_gml, args.catalog_gml_url, work_dir)
 
     query_bbox = _trajectory_bbox_from_gt(
         gt_csv=gt_csv,

@@ -2256,6 +2256,41 @@ def _export_plateau_glb_sidecar(
     print(f"PLATEAU GLB: {glb_path} ({n_kept} / {n_tot} triangles in ROI)")
 
 
+def _export_triangles_glb_sidecar(
+    ds: dict,
+    triangles_npy: str,
+    out_html: str,
+    *,
+    radius_m: float,
+    max_triangles: int,
+    glb_out_explicit: str,
+    full_mesh: bool,
+) -> None:
+    """Populate ``ds['plateauModel']`` and write GLB from ``--triangles-npy`` mesh."""
+    pivot = np.asarray(ds["pivot_ecef"], dtype=np.float64).reshape(3)
+    tri_ecef = np.asarray(np.load(triangles_npy), dtype=np.float64)
+    if tri_ecef.ndim != 3 or tri_ecef.shape[1:] != (3, 3):
+        raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri_ecef.shape}")
+    base = os.path.splitext(os.path.abspath(out_html))[0]
+    glb_path = glb_out_explicit.strip() or (base + "_mesh.glb")
+    n_kept, n_tot = export_plateau_roi_glb(
+        tri_ecef,
+        pivot,
+        glb_path,
+        radius_m=float(radius_m),
+        max_triangles=int(max_triangles),
+        full_mesh=bool(full_mesh),
+    )
+    lat, lon, h = ecef_to_lla(float(pivot[0]), float(pivot[1]), float(pivot[2]))
+    ds["plateauModel"] = {
+        "url": os.path.basename(glb_path),
+        "lat": math.degrees(lat),
+        "lon": math.degrees(lon),
+        "height": float(h),
+    }
+    print(f"Mesh GLB: {glb_path} ({n_kept} / {n_tot} triangles in ROI)")
+
+
 def _default_legacy_paths():
     root = os.path.join(os.path.dirname(__file__), "..")
     return {
@@ -2323,6 +2358,11 @@ def main(argv=None):
         "--export-plateau-glb",
         action="store_true",
         help="Write ROI-filtered PLATEAU mesh as GLB beside HTML and load it in Cesium (needs http://)",
+    )
+    parser.add_argument(
+        "--export-mesh-glb",
+        action="store_true",
+        help="Write ROI-filtered GLB from --triangles-npy mesh beside HTML and load it in Cesium",
     )
     parser.add_argument(
         "--plateau-glb-radius-m",
@@ -2539,18 +2579,30 @@ def main(argv=None):
     _out_dir = os.path.dirname(out_html)
     if _out_dir:
         os.makedirs(_out_dir, exist_ok=True)
-    if getattr(args, "export_plateau_glb", False):
+    export_glb = bool(getattr(args, "export_plateau_glb", False) or getattr(args, "export_mesh_glb", False))
+    if export_glb:
         try:
-            _export_plateau_glb_sidecar(
-                ds,
-                args.plateau_dir,
-                args.plateau_zone,
-                out_html,
-                radius_m=float(getattr(args, "plateau_glb_radius_m", 1200.0)),
-                max_triangles=int(getattr(args, "plateau_glb_max_tris", 300_000)),
-                glb_out_explicit=str(getattr(args, "plateau_glb_out", "") or ""),
-                full_mesh=bool(getattr(args, "plateau_glb_full_mesh", False)),
-            )
+            if args.triangles_npy:
+                _export_triangles_glb_sidecar(
+                    ds,
+                    args.triangles_npy,
+                    out_html,
+                    radius_m=float(getattr(args, "plateau_glb_radius_m", 1200.0)),
+                    max_triangles=int(getattr(args, "plateau_glb_max_tris", 300_000)),
+                    glb_out_explicit=str(getattr(args, "plateau_glb_out", "") or ""),
+                    full_mesh=bool(getattr(args, "plateau_glb_full_mesh", False)),
+                )
+            else:
+                _export_plateau_glb_sidecar(
+                    ds,
+                    args.plateau_dir,
+                    args.plateau_zone,
+                    out_html,
+                    radius_m=float(getattr(args, "plateau_glb_radius_m", 1200.0)),
+                    max_triangles=int(getattr(args, "plateau_glb_max_tris", 300_000)),
+                    glb_out_explicit=str(getattr(args, "plateau_glb_out", "") or ""),
+                    full_mesh=bool(getattr(args, "plateau_glb_full_mesh", False)),
+                )
         except Exception as e:
             print(f"PLATEAU GLB export failed: {e}")
             ds["plateauModel"] = None

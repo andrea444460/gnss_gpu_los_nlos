@@ -51,40 +51,58 @@ DEFAULT_KLT_LABEL_IDS = [
 
 
 def _download_with_progress(url: str, dst: Path, label: str = "") -> None:
-    """Download URL to path with lightweight console progress logging."""
+    """Download URL to path with retry + HTTP range-resume progress logging."""
     prefix = f"{label} " if label else ""
     max_attempts = 5
     last_err: Exception | None = None
     for attempt in range(1, max_attempts + 1):
         state = {"last_pct": -10, "last_mb": -1}
-
-        def _hook(block_count: int, block_size: int, total_size: int) -> None:
-            downloaded = block_count * block_size
-            downloaded_mb = int(downloaded / (1024 * 1024))
-            if total_size > 0:
-                pct = int(min(100, (downloaded * 100) / total_size))
-                # Print every 10% (and always at completion)
-                if pct >= state["last_pct"] + 10 or pct == 100:
-                    total_mb = max(1, int(total_size / (1024 * 1024)))
-                    print(f"{prefix}progress: {pct:3d}% ({downloaded_mb} / {total_mb} MiB)")
-                    state["last_pct"] = pct
-            else:
-                # Unknown total size fallback
-                if downloaded_mb >= state["last_mb"] + 20:
-                    print(f"{prefix}downloaded: {downloaded_mb} MiB")
-                    state["last_mb"] = downloaded_mb
-
         try:
-            urllib.request.urlretrieve(url, dst, reporthook=_hook)
+            current_size = dst.stat().st_size if dst.exists() else 0
+            headers: dict[str, str] = {}
+            if current_size > 0:
+                headers["Range"] = f"bytes={current_size}-"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req) as resp:
+                status = getattr(resp, "status", None)
+                # If server ignored Range and returned full payload, restart clean.
+                if current_size > 0 and status != 206:
+                    try:
+                        dst.unlink()
+                    except OSError:
+                        pass
+                    current_size = 0
+                content_len_hdr = resp.headers.get("Content-Length")
+                payload_len = int(content_len_hdr) if content_len_hdr and content_len_hdr.isdigit() else -1
+                total_size = (current_size + payload_len) if payload_len >= 0 else -1
+                mode = "ab" if current_size > 0 and status == 206 else "wb"
+                downloaded = current_size
+                with dst.open(mode) as fh:
+                    while True:
+                        chunk = resp.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+                        downloaded_mb = int(downloaded / (1024 * 1024))
+                        if total_size > 0:
+                            pct = int(min(100, (downloaded * 100) / total_size))
+                            if pct >= state["last_pct"] + 10 or pct == 100:
+                                total_mb = max(1, int(total_size / (1024 * 1024)))
+                                print(f"{prefix}progress: {pct:3d}% ({downloaded_mb} / {total_mb} MiB)")
+                                state["last_pct"] = pct
+                        else:
+                            if downloaded_mb >= state["last_mb"] + 20:
+                                print(f"{prefix}downloaded: {downloaded_mb} MiB")
+                                state["last_mb"] = downloaded_mb
+                final_size = dst.stat().st_size if dst.exists() else 0
+                if total_size > 0 and final_size < total_size:
+                    raise RuntimeError(
+                        f"retrieval incomplete: got only {final_size} out of {total_size} bytes"
+                    )
             return
         except Exception as exc:
             last_err = exc
-            # Remove potentially partial file before retry.
-            try:
-                if dst.exists():
-                    dst.unlink()
-            except OSError:
-                pass
             if attempt >= max_attempts:
                 break
             wait_s = min(2 ** attempt, 20)
@@ -195,9 +213,16 @@ def _download_tiles(
         fname = os.path.basename(url.split("?", 1)[0])
         dst = out_dir / fname
         if dst.exists() and dst.stat().st_size > 0:
-            print(f"[{i}/{len(rows)}] skip {fname} (exists {dst.stat().st_size} bytes)")
-            n += 1
-            continue
+            if fname.lower().endswith(".zip") and (not zipfile.is_zipfile(dst)):
+                print(f"[{i}/{len(rows)}] cached {fname} is corrupted; re-downloading")
+                try:
+                    dst.unlink()
+                except OSError:
+                    pass
+            else:
+                print(f"[{i}/{len(rows)}] skip {fname} (exists {dst.stat().st_size} bytes)")
+                n += 1
+                continue
         print(f"[{i}/{len(rows)}] download {fname} ...")
         try:
             _download_with_progress(url, dst, label=f"[{i}/{len(rows)}] {fname}")

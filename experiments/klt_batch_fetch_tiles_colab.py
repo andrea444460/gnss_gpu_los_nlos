@@ -110,6 +110,7 @@ def _run_fetch(
 ) -> int:
     cmd = [
         sys.executable,
+        "-u",
         str(fetch_script),
         "--gt-csv",
         str(gt_csv),
@@ -126,10 +127,19 @@ def _run_fetch(
         "--max-tiles",
         str(max_tiles),
     ]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    p = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
     assert p.stdout is not None
     for line in p.stdout:
-        print(line, end="")
+        print(line, end="", flush=True)
     return p.wait()
 
 

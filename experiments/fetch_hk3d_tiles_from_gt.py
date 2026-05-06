@@ -379,6 +379,147 @@ def _download_all_klt_label_gt_csvs(
     return n_ok
 
 
+def _dropbox_api_json_post(api_url: str, token: str, payload: dict) -> dict:
+    req = urllib.request.Request(
+        api_url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            return json.loads(raw) if raw.strip() else {}
+    except urllib.error.HTTPError as http_err:
+        body = ""
+        try:
+            body = http_err.read().decode("utf-8", errors="ignore")
+        except Exception:
+            body = "<unable to read error body>"
+        raise RuntimeError(f"Dropbox API HTTP {http_err.code}: {body}") from http_err
+
+
+def _download_all_klt_obs_from_gnss_dir(
+    klt_root_dropbox_url: str,
+    output_dir: Path,
+    force_downloads: bool,
+    dropbox_access_token: str,
+    dataset_ids: list[str] | None = None,
+) -> int:
+    """Download all .obs files from /data/GNSS in the KLT shared link.
+
+    Requires Dropbox API token. Optionally filters files by dataset id substring.
+    """
+    root = klt_root_dropbox_url.strip()
+    token = dropbox_access_token.strip()
+    if not root:
+        raise ValueError("--klt-root-dropbox-url is required for OBS batch download")
+    if not token:
+        raise ValueError("OBS batch download requires --dropbox-access-token or DROPBOX_ACCESS_TOKEN")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    id_filters = [x.strip().lower() for x in (dataset_ids or []) if x.strip()]
+
+    entries: list[dict] = []
+    payload = {
+        "path": "/data/GNSS",
+        "recursive": True,
+        "include_deleted": False,
+        "include_has_explicit_shared_members": False,
+        "include_mounted_folders": True,
+        "include_non_downloadable_files": False,
+        "shared_link": {"url": root},
+    }
+    data = _dropbox_api_json_post("https://api.dropboxapi.com/2/files/list_folder", token, payload)
+    entries.extend(data.get("entries", []))
+    while data.get("has_more"):
+        data = _dropbox_api_json_post(
+            "https://api.dropboxapi.com/2/files/list_folder/continue",
+            token,
+            {"cursor": data.get("cursor", "")},
+        )
+        entries.extend(data.get("entries", []))
+
+    # Build allowed MMDD suffixes from dataset ids (e.g., 0610_KLT2_209 -> "0610")
+    allowed_mmdd: set[str] = set()
+    for ds in (dataset_ids or []):
+        token = ds.strip()
+        if len(token) >= 4 and token[:4].isdigit():
+            allowed_mmdd.add(token[:4])
+
+    obs_entries = []
+    for e in entries:
+        if e.get(".tag") != "file":
+            continue
+        name = str(e.get("name", ""))
+        if not name.lower().endswith(".obs"):
+            continue
+        path_lower = str(e.get("path_lower", "")).lower().strip()
+        parts = [p for p in path_lower.split("/") if p]
+        # Keep only files exactly at /data/gnss/<yyyymmdd>/<file>.obs
+        # This excludes nested station/base subfolders.
+        if len(parts) != 4:
+            continue
+        if parts[0] != "data" or parts[1] != "gnss":
+            continue
+        yyyymmdd = parts[2]
+        if len(yyyymmdd) != 8 or (not yyyymmdd.isdigit()):
+            continue
+        if allowed_mmdd and yyyymmdd[-4:] not in allowed_mmdd:
+            continue
+        if id_filters:
+            lname = name.lower()
+            if not any(fid in lname or fid in path_lower for fid in id_filters):
+                # Keep date-level files even when filename does not embed dataset id.
+                # They are still rover candidates for that day; let user disambiguate later.
+                pass
+        obs_entries.append(e)
+
+    # Stable ordering for deterministic logs.
+    obs_entries.sort(key=lambda x: str(x.get("path_lower", x.get("name", ""))))
+    n_ok = 0
+    for i, e in enumerate(obs_entries, start=1):
+        path_lower = str(e.get("path_lower", "")).strip()
+        name = str(e.get("name", "obs_file.obs")).strip() or "obs_file.obs"
+        dst = output_dir / name
+        if dst.exists() and dst.stat().st_size > 0 and not force_downloads:
+            print(f"[OBS {i}/{len(obs_entries)}] reuse {dst.name} ({dst.stat().st_size} bytes)")
+            n_ok += 1
+            continue
+        print(f"[OBS {i}/{len(obs_entries)}] download {path_lower}")
+        req = urllib.request.Request(
+            "https://content.dropboxapi.com/2/sharing/get_shared_link_file",
+            data=b"",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Dropbox-API-Arg": json.dumps({"url": root, "path": path_lower}),
+                "Content-Type": "text/plain; charset=utf-8",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req) as resp:
+                payload = resp.read()
+            dst.write_bytes(payload)
+            # Guard against HTML error body
+            txt_head = dst.read_text(encoding="utf-8", errors="ignore")[:256].lstrip().lower()
+            if txt_head.startswith("<!doctype html") or txt_head.startswith("<html"):
+                raise RuntimeError("received HTML instead of OBS content")
+            print(f"[OBS {i}/{len(obs_entries)}] done {dst.name} ({dst.stat().st_size} bytes)")
+            n_ok += 1
+        except Exception as exc:
+            print(f"[OBS {i}/{len(obs_entries)}] failed {path_lower}: {exc}")
+            try:
+                if dst.exists():
+                    dst.unlink()
+            except OSError:
+                pass
+    return n_ok
+
+
 def _resolve_gt_csv(
     gt_csv: Path | None,
     gt_dropbox_url: str,
@@ -589,6 +730,17 @@ def _parse_args() -> argparse.Namespace:
         default=os.environ.get("DROPBOX_ACCESS_TOKEN", ""),
         help="Dropbox access token for API download in batch KLT mode (or set DROPBOX_ACCESS_TOKEN)",
     )
+    p.add_argument(
+        "--download-klt-obs",
+        action="store_true",
+        help="Also download OBS files from /data/GNSS in the same KLT Dropbox shared link",
+    )
+    p.add_argument(
+        "--klt-obs-output-dir",
+        type=Path,
+        default=Path("experiments/data/klt_obs"),
+        help="Output directory for downloaded OBS files in KLT mode",
+    )
     p.add_argument("--lat-col", type=int, default=1, help="0-based latitude column index in gt.csv (default 1)")
     p.add_argument("--lon-col", type=int, default=2, help="0-based longitude column index in gt.csv (default 2)")
     p.add_argument(
@@ -638,6 +790,16 @@ def main() -> None:
         )
         print(f"KLT batch completed: downloaded/reused {n} gt.csv files")
         print(f"KLT output dir: {args.klt_label_output_dir.resolve()}")
+        if bool(args.download_klt_obs):
+            n_obs = _download_all_klt_obs_from_gnss_dir(
+                klt_root_dropbox_url=str(args.klt_root_dropbox_url),
+                output_dir=args.klt_obs_output_dir.resolve(),
+                force_downloads=bool(args.force_downloads),
+                dropbox_access_token=str(args.dropbox_access_token),
+                dataset_ids=ids,
+            )
+            print(f"KLT OBS batch completed: downloaded/reused {n_obs} .obs files")
+            print(f"KLT OBS output dir: {args.klt_obs_output_dir.resolve()}")
         return
 
     work_dir = args.work_dir.resolve()

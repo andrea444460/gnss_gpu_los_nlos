@@ -62,9 +62,22 @@ def _download_with_progress(url: str, dst: Path, label: str = "") -> None:
             headers: dict[str, str] = {}
             if current_size > 0:
                 headers["Range"] = f"bytes={current_size}-"
+            print(f"{prefix}attempt {attempt}/{max_attempts} url: {url}")
+            if "Range" in headers:
+                print(f"{prefix}attempt {attempt}/{max_attempts} request Range: {headers['Range']}")
+            else:
+                print(f"{prefix}attempt {attempt}/{max_attempts} request Range: <none>")
             req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req) as resp:
                 status = getattr(resp, "status", None)
+                accept_ranges = resp.headers.get("Accept-Ranges", "")
+                content_range = resp.headers.get("Content-Range", "")
+                content_len_hdr = resp.headers.get("Content-Length", "")
+                print(
+                    f"{prefix}attempt {attempt}/{max_attempts} response: "
+                    f"status={status} Accept-Ranges={accept_ranges or '<none>'} "
+                    f"Content-Range={content_range or '<none>'} Content-Length={content_len_hdr or '<none>'}"
+                )
                 # If server ignored Range and returned full payload, restart clean.
                 if current_size > 0 and status != 206:
                     try:
@@ -72,7 +85,6 @@ def _download_with_progress(url: str, dst: Path, label: str = "") -> None:
                     except OSError:
                         pass
                     current_size = 0
-                content_len_hdr = resp.headers.get("Content-Length")
                 payload_len = int(content_len_hdr) if content_len_hdr and content_len_hdr.isdigit() else -1
                 total_size = (current_size + payload_len) if payload_len >= 0 else -1
                 mode = "ab" if current_size > 0 and status == 206 else "wb"

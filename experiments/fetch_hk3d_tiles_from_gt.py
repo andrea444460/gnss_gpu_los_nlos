@@ -17,6 +17,7 @@ import json
 import os
 import time
 import urllib.request
+import urllib.error
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -290,11 +291,23 @@ def _download_all_klt_label_gt_csvs(
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Dropbox-API-Arg": json.dumps(api_arg),
+                        "Content-Type": "text/plain; charset=utf-8",
                     },
                     method="POST",
                 )
-                with urllib.request.urlopen(req) as resp:
-                    payload = resp.read()
+                try:
+                    with urllib.request.urlopen(req) as resp:
+                        payload = resp.read()
+                except urllib.error.HTTPError as http_err:
+                    body = ""
+                    try:
+                        body = http_err.read().decode("utf-8", errors="ignore")
+                    except Exception:
+                        body = "<unable to read error body>"
+                    raise RuntimeError(
+                        f"Dropbox API HTTP {http_err.code} for {ds_clean}/gt.csv. "
+                        f"Response body: {body}"
+                    ) from http_err
                 dst.write_bytes(payload)
                 # Guardrail: Dropbox web error pages are HTML, not CSV.
                 head = dst.read_text(encoding="utf-8", errors="ignore")[:256].lstrip().lower()

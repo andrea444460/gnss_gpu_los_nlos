@@ -34,6 +34,19 @@ URL_FIELD_MAP = {
     "max": "Format_MAX",
 }
 
+DEFAULT_KLT_LABEL_IDS = [
+    "0610_KLT1_203",
+    "0610_KLT2_209",
+    "0610_KLT3_404",
+    "1109_KLT1_421",
+    "1109_KLT2_294",
+    "1109_KLT2_301",
+    "1109_KLT3_666",
+    "1116_KLT1_184",
+    "1116_KLT2_169",
+    "1116_KLT3_649",
+]
+
 
 def _download_with_progress(url: str, dst: Path, label: str = "") -> None:
     """Download URL to path with lightweight console progress logging."""
@@ -220,6 +233,59 @@ def _to_dropbox_direct_download(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(q), parts.fragment))
 
 
+def _join_dropbox_path(base_url: str, suffix_path: str) -> str:
+    """Append a path suffix to a Dropbox shared URL path preserving query."""
+    parts = urlsplit(base_url.strip())
+    base_path = parts.path.rstrip("/")
+    suffix = suffix_path.strip().lstrip("/")
+    joined_path = f"{base_path}/{suffix}" if suffix else base_path
+    return urlunsplit((parts.scheme, parts.netloc, joined_path, parts.query, parts.fragment))
+
+
+def _download_all_klt_label_gt_csvs(
+    klt_root_dropbox_url: str,
+    dataset_ids: list[str],
+    output_dir: Path,
+    force_downloads: bool,
+    skip_names: set[str],
+) -> int:
+    """Download gt.csv for multiple KLT label datasets from one root Dropbox URL.
+
+    This mode intentionally fetches only gt.csv files (per dataset) so large files
+    like image.zip and nlos.pkl are not downloaded.
+    """
+    root = klt_root_dropbox_url.strip()
+    if not root:
+        raise ValueError("--klt-root-dropbox-url is required for --download-all-klt-labels mode")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    n_ok = 0
+    for i, ds in enumerate(dataset_ids, start=1):
+        ds_clean = ds.strip()
+        if not ds_clean:
+            continue
+        gt_name = "gt.csv"
+        if gt_name.lower() in skip_names:
+            print(f"[KLT {i}/{len(dataset_ids)}] skip {ds_clean}/{gt_name} (excluded)")
+            continue
+        dst = output_dir / f"{ds_clean}_gt.csv"
+        if dst.exists() and dst.stat().st_size > 0 and not force_downloads:
+            print(f"[KLT {i}/{len(dataset_ids)}] reuse {dst.name} ({dst.stat().st_size} bytes)")
+            n_ok += 1
+            continue
+
+        url = _join_dropbox_path(root, f"label/{ds_clean}/gt.csv")
+        direct_url = _to_dropbox_direct_download(url)
+        print(f"[KLT {i}/{len(dataset_ids)}] download {ds_clean}/gt.csv")
+        try:
+            _download_with_progress(direct_url, dst, label=f"[KLT {i}/{len(dataset_ids)}]")
+            print(f"[KLT {i}/{len(dataset_ids)}] done {dst.name} ({dst.stat().st_size} bytes)")
+            n_ok += 1
+        except Exception as exc:
+            print(f"[KLT {i}/{len(dataset_ids)}] failed {ds_clean}/gt.csv: {exc}")
+    return n_ok
+
+
 def _resolve_gt_csv(
     gt_csv: Path | None,
     gt_dropbox_url: str,
@@ -395,6 +461,35 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force re-download of GT/Catalog even if cached files exist",
     )
+    p.add_argument(
+        "--download-all-klt-labels",
+        action="store_true",
+        help="Batch-download gt.csv for all KLT label subdatasets from one Dropbox root URL",
+    )
+    p.add_argument(
+        "--klt-root-dropbox-url",
+        type=str,
+        default="",
+        help="Dropbox shared root URL containing config/data/label folders for KLT",
+    )
+    p.add_argument(
+        "--klt-label-ids",
+        type=str,
+        default=",".join(DEFAULT_KLT_LABEL_IDS),
+        help="Comma-separated KLT label IDs for batch mode (default: known 10 IDs)",
+    )
+    p.add_argument(
+        "--klt-label-output-dir",
+        type=Path,
+        default=Path("experiments/data/klt_labels"),
+        help="Output directory for batch-downloaded *gt.csv files in KLT mode",
+    )
+    p.add_argument(
+        "--klt-skip-names",
+        type=str,
+        default="image.zip,nlos.pkl",
+        help="Comma-separated file names to exclude in KLT mode",
+    )
     p.add_argument("--lat-col", type=int, default=1, help="0-based latitude column index in gt.csv (default 1)")
     p.add_argument("--lon-col", type=int, default=2, help="0-based longitude column index in gt.csv (default 2)")
     p.add_argument(
@@ -426,6 +521,20 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
+    if bool(args.download_all_klt_labels):
+        ids = [x.strip() for x in str(args.klt_label_ids).split(",") if x.strip()]
+        skip_names = {x.strip().lower() for x in str(args.klt_skip_names).split(",") if x.strip()}
+        n = _download_all_klt_label_gt_csvs(
+            klt_root_dropbox_url=str(args.klt_root_dropbox_url),
+            dataset_ids=ids,
+            output_dir=args.klt_label_output_dir.resolve(),
+            force_downloads=bool(args.force_downloads),
+            skip_names=skip_names,
+        )
+        print(f"KLT batch completed: downloaded/reused {n} gt.csv files")
+        print(f"KLT output dir: {args.klt_label_output_dir.resolve()}")
+        return
+
     work_dir = args.work_dir.resolve()
     gt_csv = _resolve_gt_csv(args.gt_csv, args.gt_dropbox_url, work_dir, bool(args.force_downloads))
     catalog_gml = _resolve_catalog_gml(args.catalog_gml, args.catalog_gml_url, work_dir, bool(args.force_downloads))

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import os
 import time
 import urllib.request
@@ -248,6 +249,7 @@ def _download_all_klt_label_gt_csvs(
     output_dir: Path,
     force_downloads: bool,
     skip_names: set[str],
+    dropbox_access_token: str = "",
 ) -> int:
     """Download gt.csv for multiple KLT label datasets from one root Dropbox URL.
 
@@ -257,6 +259,7 @@ def _download_all_klt_label_gt_csvs(
     root = klt_root_dropbox_url.strip()
     if not root:
         raise ValueError("--klt-root-dropbox-url is required for --download-all-klt-labels mode")
+    token = dropbox_access_token.strip()
 
     output_dir.mkdir(parents=True, exist_ok=True)
     n_ok = 0
@@ -274,11 +277,36 @@ def _download_all_klt_label_gt_csvs(
             n_ok += 1
             continue
 
-        url = _join_dropbox_path(root, f"label/{ds_clean}/gt.csv")
-        direct_url = _to_dropbox_direct_download(url)
         print(f"[KLT {i}/{len(dataset_ids)}] download {ds_clean}/gt.csv")
         try:
-            _download_with_progress(direct_url, dst, label=f"[KLT {i}/{len(dataset_ids)}]")
+            if token:
+                # Prefer Dropbox API: robust even when anonymous shared links return "No Access" HTML.
+                api_url = "https://content.dropboxapi.com/2/sharing/get_shared_link_file"
+                rel_path = f"/label/{ds_clean}/gt.csv"
+                api_arg = {"url": root, "path": rel_path}
+                req = urllib.request.Request(
+                    api_url,
+                    data=b"",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Dropbox-API-Arg": json.dumps(api_arg),
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(req) as resp:
+                    payload = resp.read()
+                dst.write_bytes(payload)
+                # Guardrail: Dropbox web error pages are HTML, not CSV.
+                head = dst.read_text(encoding="utf-8", errors="ignore")[:256].lstrip().lower()
+                if head.startswith("<!doctype html") or head.startswith("<html"):
+                    raise RuntimeError(
+                        "Dropbox API returned HTML content; verify token/scopes and shared-link access."
+                    )
+            else:
+                # Public-link fallback.
+                url = _join_dropbox_path(root, f"label/{ds_clean}/gt.csv")
+                direct_url = _to_dropbox_direct_download(url)
+                _download_with_progress(direct_url, dst, label=f"[KLT {i}/{len(dataset_ids)}]")
             print(f"[KLT {i}/{len(dataset_ids)}] done {dst.name} ({dst.stat().st_size} bytes)")
             n_ok += 1
         except Exception as exc:
@@ -490,6 +518,12 @@ def _parse_args() -> argparse.Namespace:
         default="image.zip,nlos.pkl",
         help="Comma-separated file names to exclude in KLT mode",
     )
+    p.add_argument(
+        "--dropbox-access-token",
+        type=str,
+        default=os.environ.get("DROPBOX_ACCESS_TOKEN", ""),
+        help="Dropbox access token for API download in batch KLT mode (or set DROPBOX_ACCESS_TOKEN)",
+    )
     p.add_argument("--lat-col", type=int, default=1, help="0-based latitude column index in gt.csv (default 1)")
     p.add_argument("--lon-col", type=int, default=2, help="0-based longitude column index in gt.csv (default 2)")
     p.add_argument(
@@ -530,6 +564,7 @@ def main() -> None:
             output_dir=args.klt_label_output_dir.resolve(),
             force_downloads=bool(args.force_downloads),
             skip_names=skip_names,
+            dropbox_access_token=str(args.dropbox_access_token),
         )
         print(f"KLT batch completed: downloaded/reused {n} gt.csv files")
         print(f"KLT output dir: {args.klt_label_output_dir.resolve()}")

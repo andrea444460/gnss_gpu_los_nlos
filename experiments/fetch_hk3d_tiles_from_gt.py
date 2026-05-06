@@ -180,7 +180,12 @@ def _select_tiles(catalog_gml: Path, query_bbox: tuple[float, float, float, floa
     return out
 
 
-def _download_tiles(rows: list[dict[str, str]], out_dir: Path, max_tiles: int) -> int:
+def _download_tiles(
+    rows: list[dict[str, str]],
+    out_dir: Path,
+    max_tiles: int,
+    continue_on_download_error: bool = True,
+) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     n = 0
     for i, r in enumerate(rows, start=1):
@@ -194,9 +199,19 @@ def _download_tiles(rows: list[dict[str, str]], out_dir: Path, max_tiles: int) -
             n += 1
             continue
         print(f"[{i}/{len(rows)}] download {fname} ...")
-        _download_with_progress(url, dst, label=f"[{i}/{len(rows)}] {fname}")
-        print(f"[{i}/{len(rows)}] done {fname} ({dst.stat().st_size} bytes)")
-        n += 1
+        try:
+            _download_with_progress(url, dst, label=f"[{i}/{len(rows)}] {fname}")
+            print(f"[{i}/{len(rows)}] done {fname} ({dst.stat().st_size} bytes)")
+            n += 1
+        except Exception as exc:
+            print(f"[{i}/{len(rows)}] failed {fname}: {exc}")
+            if not continue_on_download_error:
+                raise
+            try:
+                if dst.exists():
+                    dst.unlink()
+            except OSError:
+                pass
     return n
 
 
@@ -563,6 +578,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print selected tile URLs",
     )
+    p.add_argument(
+        "--strict-downloads",
+        action="store_true",
+        help="Fail fast if any tile download fails (default: continue with remaining tiles)",
+    )
     return p.parse_args()
 
 
@@ -626,7 +646,12 @@ def main() -> None:
         for r in rows:
             print(r["url"])
 
-    n_downloaded = _download_tiles(rows, args.output_dir.resolve(), max_tiles=int(args.max_tiles))
+    n_downloaded = _download_tiles(
+        rows,
+        args.output_dir.resolve(),
+        max_tiles=int(args.max_tiles),
+        continue_on_download_error=not bool(args.strict_downloads),
+    )
     print(f"Downloaded/skipped tiles: {n_downloaded}")
     print(f"Output dir: {args.output_dir.resolve()}")
 

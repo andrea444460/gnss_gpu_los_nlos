@@ -34,6 +34,36 @@ QZS_MU = GPS_MU
 QZS_OMEGA_E = GPS_OMEGA_E
 QZS_F = GPS_F
 
+# BeiDou broadcast orbit uses CGCS2000 constants (same μ / ω_e / relativistic F as Galileo in ICD).
+BDS_MU = GAL_MU
+BDS_OMEGA_E = 7.292115e-5
+BDS_F = GAL_F
+
+# GPST minus BDT ≈ 14 s at BDT epoch alignment (RTKLIB ``gpst2bdt`` / BeiDou ICD convention).
+_GPST_MINUS_BDT_S = 14.0
+
+
+def _unwrap_week_seconds(x: float) -> float:
+    """Fold scalar seconds into one GPS week [0, GPS_WEEK_SEC)."""
+    y = float(x)
+    while y < 0.0:
+        y += GPS_WEEK_SEC
+    while y >= GPS_WEEK_SEC:
+        y -= GPS_WEEK_SEC
+    return y
+
+
+def _broadcast_rx_seconds_of_week(nav: NavMessage, recv_gpst_sow: float) -> float:
+    """Receiver sow aligned with ``NavMessage.toe`` / ``toc_seconds`` time scale.
+
+    RINEX BeiDou navigation records express ``toe`` / clock references in BDT seconds-of-week,
+    while this codebase drives epochs from GPST. Apply the standard GPST−BDT offset before
+    differencing against broadcast parameters (same adjustment RTKLIB uses before ``eph2pos``).
+    """
+    if nav.system != "C":
+        return float(recv_gpst_sow)
+    return _unwrap_week_seconds(float(recv_gpst_sow) - _GPST_MINUS_BDT_S)
+
 
 def _constellation_constants(system: str) -> tuple[float, float, float]:
     system = system.upper()
@@ -41,6 +71,8 @@ def _constellation_constants(system: str) -> tuple[float, float, float]:
         return GAL_MU, GAL_OMEGA_E, GAL_F
     if system == "J":
         return QZS_MU, QZS_OMEGA_E, QZS_F
+    if system == "C":
+        return BDS_MU, BDS_OMEGA_E, BDS_F
     return GPS_MU, GPS_OMEGA_E, GPS_F
 
 
@@ -289,7 +321,8 @@ class Ephemeris:
         best = None
         best_key = None
         for msg in messages:
-            dt = abs(gps_time - msg.toe)
+            rx_sow = _broadcast_rx_seconds_of_week(msg, gps_time)
+            dt = abs(rx_sow - msg.toe)
             # Handle week crossover
             if dt > GPS_WEEK_SEC / 2.0:
                 dt = GPS_WEEK_SEC - dt
@@ -508,7 +541,8 @@ class Ephemeris:
         n0 = math.sqrt(mu / (a ** 3))
         n = n0 + nav.delta_n
 
-        tk = gps_time - nav.toe
+        rx_sow = _broadcast_rx_seconds_of_week(nav, gps_time)
+        tk = rx_sow - nav.toe
         if tk > GPS_WEEK_SEC / 2.0:
             tk -= GPS_WEEK_SEC
         if tk < -GPS_WEEK_SEC / 2.0:
@@ -552,8 +586,8 @@ class Ephemeris:
             yp * sini,
         ])
 
-        # Clock correction
-        dt = gps_time - nav.toc_seconds
+        # Clock correction (receive time aligned with broadcast TOC scale when needed)
+        dt = rx_sow - nav.toc_seconds
         if dt > GPS_WEEK_SEC / 2.0:
             dt -= GPS_WEEK_SEC
         if dt < -GPS_WEEK_SEC / 2.0:

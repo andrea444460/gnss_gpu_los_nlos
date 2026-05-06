@@ -61,6 +61,7 @@ class EpochJob:
     rx_xyz: np.ndarray
     sat_ids: list[str]
     pseudoranges: list[float]
+    obs_codes: list[str]
 
 
 def _lla_deg_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> np.ndarray:
@@ -271,6 +272,60 @@ def _parse_sat_id(sat_id: str) -> tuple[str, int] | None:
     return system, int(prn_text)
 
 
+_PR_CODE_PRIORITY = (
+    "C1C",
+    "C1X",
+    "C1P",
+    "C1W",
+    "C2I",
+    "C2X",
+    "C2P",
+    "C2W",
+    "C5X",
+    "C5Q",
+    "C6I",
+    "C6X",
+    "C7Q",
+    "C7X",
+    "C8X",
+)
+
+
+def _pick_pseudorange_m(sat_obs: dict, obs_spec: str) -> tuple[float | None, str]:
+    """Return (pseudorange_m, rinex_code). ``obs_spec`` is ``AUTO`` or a single code like ``C1C``.
+
+    For BeiDou/Galileo/etc., receivers rarely populate GPS-centric ``C1C`` on ``C``/``E`` satellites,
+    so ``AUTO`` walks a sensible priority list then falls back to any RINEX *code* measurement whose
+    name starts with ``C`` (RINEX 3 first letter = pseudorange).
+    """
+    mode = obs_spec.strip().upper()
+    if mode != "AUTO":
+        pr = float(sat_obs.get(obs_spec, 0.0))
+        if not np.isfinite(pr) or pr <= 0.0:
+            return None, obs_spec
+        return pr, obs_spec
+    for code in _PR_CODE_PRIORITY:
+        if code not in sat_obs:
+            continue
+        try:
+            pr = float(sat_obs[code])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(pr) and pr > 0.0:
+            return pr, code
+    for code in sorted(sat_obs.keys()):
+        co = str(code)
+        if len(co) < 2 or co[0] != "C":
+            continue
+        try:
+            pr = float(sat_obs[code])
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(pr) and pr > 0.0:
+            return pr, co
+    return None, obs_spec
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export geometric LOS/NLOS labels for UrbanNav RINEX epochs")
     parser.add_argument("--obs-path", type=Path, required=True, help="RINEX observation file (.obs)")
@@ -283,12 +338,17 @@ def _parse_args() -> argparse.Namespace:
         help="Alternative mesh input: .npy triangles with shape [N,3,3] in ECEF meters",
     )
     parser.add_argument("--output-csv", type=Path, required=True, help="Output labels CSV path")
-    parser.add_argument("--obs-code", type=str, default="C1C", help="Observation code to require in OBS file")
+    parser.add_argument(
+        "--obs-code",
+        type=str,
+        default="AUTO",
+        help="Single RINEX pseudorange code (e.g. C1C) or AUTO to pick per-satellite (recommended for multi-GNSS)",
+    )
     parser.add_argument(
         "--systems",
         type=str,
-        default="G",
-        help="Comma-separated systems to label (e.g. G or G,E,J)",
+        default="G,E,J,C",
+        help="Comma-separated systems to label (e.g. G or G,E,J,C)",
     )
     parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU plane-rectangular coordinate zone")
     parser.add_argument("--epoch-step", type=int, default=1, help="Use every Nth epoch from OBS")
@@ -379,6 +439,7 @@ def main() -> None:
 
         selected_sat_ids: list[str] = []
         selected_pr: list[float] = []
+        selected_codes: list[str] = []
         for sat_id, sat_obs in epoch.observations.items():
             sat = _parse_sat_id(sat_id)
             if sat is None:
@@ -386,11 +447,12 @@ def main() -> None:
             system, _ = sat
             if system not in systems:
                 continue
-            pr = float(sat_obs.get(args.obs_code, 0.0))
-            if not np.isfinite(pr) or pr <= 0.0:
+            pr, code_used = _pick_pseudorange_m(sat_obs, args.obs_code)
+            if pr is None:
                 continue
             selected_sat_ids.append(sat_id.strip().upper())
             selected_pr.append(pr)
+            selected_codes.append(code_used)
 
         if not selected_sat_ids:
             skipped_no_obs += 1
@@ -403,6 +465,7 @@ def main() -> None:
                 rx_xyz=np.asarray(rx_xyz, dtype=np.float64),
                 sat_ids=selected_sat_ids,
                 pseudoranges=selected_pr,
+                obs_codes=selected_codes,
             )
         )
 
@@ -513,6 +576,7 @@ def main() -> None:
                     continue
 
                 pr_by_sat = {sid: pr for sid, pr in zip(job.sat_ids, job.pseudoranges)}
+                obs_code_by_sat = dict(zip(job.sat_ids, job.obs_codes))
                 if has_bvh_batch and los_pad is not None and delay_pad is not None:
                     el, az = _sat_elevation_azimuth(job.rx_xyz, sat_ecef)
                     el_vis = el
@@ -544,7 +608,7 @@ def main() -> None:
                                 "sat_id": sat_id,
                                 "system": system,
                                 "prn": prn,
-                                "obs_code": args.obs_code,
+                                "obs_code": obs_code_by_sat.get(sat_id, args.obs_code),
                                 "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
                                 "is_los": int(bool(is_los[i])),
                                 "is_visible": int(bool(visible[i])),
@@ -588,7 +652,7 @@ def main() -> None:
                                 "sat_id": sat_id,
                                 "system": system,
                                 "prn": prn,
-                                "obs_code": args.obs_code,
+                                "obs_code": obs_code_by_sat.get(sat_id, args.obs_code),
                                 "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
                                 "is_los": int(bool(result["is_los"][i])),
                                 "is_visible": int(bool(result["visible"][i])),

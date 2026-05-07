@@ -105,6 +105,31 @@ def _infer_nav_date_from_filename(nav_path: Path) -> datetime | None:
         return None
 
 
+def _guess_datetime_utc_from_numeric_timestamp(ts: float) -> datetime | None:
+    """Best-effort UTC datetime from a numeric timestamp.
+
+    Accepted formats:
+    - Unix seconds (e.g. 1699510934)
+    - Unix milliseconds (e.g. 1699510934000)
+
+    Values that look like week-seconds / TOW-only are intentionally rejected,
+    because they do not encode a calendar date and can break NAV-date sanity checks.
+    """
+    x = float(ts)
+    if not np.isfinite(x):
+        return None
+    try:
+        # Unix milliseconds
+        if abs(x) >= 1.0e11:
+            return datetime.fromtimestamp(x / 1000.0, tz=timezone.utc)
+        # Unix seconds
+        if abs(x) >= 1.0e8:
+            return datetime.fromtimestamp(x, tz=timezone.utc)
+    except Exception:
+        return None
+    return None
+
+
 def _validate_nav_date_sanity(nav_path: Path, reference_csv: Path, obs) -> None:
     nav_dt = _infer_nav_date_from_filename(nav_path)
     if nav_dt is None:
@@ -129,7 +154,7 @@ def _validate_nav_date_sanity(nav_path: Path, reference_csv: Path, obs) -> None:
             for row in r2:
                 if row and len(row) >= 1:
                     try:
-                        ref_dt = datetime.fromtimestamp(float(row[0]), tz=timezone.utc)
+                        ref_dt = _guess_datetime_utc_from_numeric_timestamp(float(row[0]))
                         break
                     except Exception:
                         continue
@@ -256,6 +281,12 @@ def _nearest_reference_xyz(track: ReferenceTrack, week: int, tow: float) -> np.n
     if not np.any(mask):
         return None
     tows = track.tows[mask]
+    # Do not extrapolate outside reference time support: labeling is restricted
+    # to OBS epochs inside the GT/reference window [t0, t1].
+    t_min = float(np.min(tows))
+    t_max = float(np.max(tows))
+    if float(tow) < t_min or float(tow) > t_max:
+        return None
     idx_local = int(np.argmin(np.abs(tows - tow)))
     idx_global = np.where(mask)[0][idx_local]
     return track.rx_ecef[idx_global]
@@ -476,7 +507,7 @@ def main() -> None:
         raise RuntimeError("No valid epochs to process after filtering. Check input paths/flags.")
 
     print(f"  queued epochs: {len(jobs)}")
-    print(f"  skipped (no matching reference week): {skipped_no_rx}")
+    print(f"  skipped (outside reference week/time window): {skipped_no_rx}")
     print(f"  skipped (no usable observations): {skipped_no_obs}")
 
     print("[4/5] Processing epoch batches...")

@@ -130,6 +130,13 @@ def _to_gps_tow_seconds(ts: float) -> float:
     return t % 604800.0
 
 
+def _unix_to_gps_tow_seconds(unix_s: float, leap_seconds: float = 18.0) -> float:
+    """Convert Unix seconds to GPS TOW [s] using a fixed leap-second offset."""
+    gps_unix_offset = 315964800.0  # 1980-01-06 - 1970-01-01
+    gps_seconds = float(unix_s) - gps_unix_offset + float(leap_seconds)
+    return gps_seconds % 604800.0
+
+
 def load_trajectory(csv_path, step=200):
     """Return positions, GPS TOW times, and raw CSV row count.
 
@@ -171,7 +178,8 @@ def load_trajectory(csv_path, step=200):
         alt = float(r[3])
         ecef = _lla_deg_to_ecef(lat, lon, alt)
         positions.append([float(ecef[0]), float(ecef[1]), float(ecef[2])])
-        times.append(_to_gps_tow_seconds(ts))
+        # KLT gt.csv stores Unix timestamps in the first column.
+        times.append(_unix_to_gps_tow_seconds(ts))
     if not positions:
         raise ValueError(f"Could not parse trajectory CSV format: {csv_path}")
     print("  Trajectory parser: detected gt.csv-style [timestamp,lat,lon,alt], converted to ECEF.")

@@ -41,6 +41,13 @@ BDS_F = GAL_F
 
 # GPST minus BDT ≈ 14 s at BDT epoch alignment (RTKLIB ``gpst2bdt`` / BeiDou ICD convention).
 _GPST_MINUS_BDT_S = 14.0
+# GPST minus UTC offset used by GLONASS broadcast epochs in mixed RINEX nav.
+# For current datasets in this repository this is 18 s.
+_GPST_MINUS_UTC_S = 18.0
+# BeiDou GEO PRNs (legacy BDS-2 + BDS-3 GEO assignments commonly seen in RINEX).
+# These are temporarily excluded because GEO-specific broadcast-frame handling
+# is not yet implemented in this module.
+_BEIDOU_GEO_PRNS = {1, 2, 3, 4, 5, 59, 60, 61, 62, 63}
 
 
 def _unwrap_week_seconds(x: float) -> float:
@@ -57,12 +64,16 @@ def _broadcast_rx_seconds_of_week(nav: NavMessage, recv_gpst_sow: float) -> floa
     """Receiver sow aligned with ``NavMessage.toe`` / ``toc_seconds`` time scale.
 
     RINEX BeiDou navigation records express ``toe`` / clock references in BDT seconds-of-week,
-    while this codebase drives epochs from GPST. Apply the standard GPST−BDT offset before
-    differencing against broadcast parameters (same adjustment RTKLIB uses before ``eph2pos``).
+    while this codebase drives epochs from GPST. Mixed RINEX GLONASS records use UTC(SU)-based
+    broadcast epoching. Apply the proper GPST offset before differencing against broadcast
+    parameters (same style as RTKLIB time-scale conversion before ``eph2pos`` / ``geph2pos``).
     """
-    if nav.system != "C":
-        return float(recv_gpst_sow)
-    return _unwrap_week_seconds(float(recv_gpst_sow) - _GPST_MINUS_BDT_S)
+    recv = float(recv_gpst_sow)
+    if nav.system == "C":
+        return _unwrap_week_seconds(recv - _GPST_MINUS_BDT_S)
+    if nav.system == "R":
+        return _unwrap_week_seconds(recv - _GPST_MINUS_UTC_S)
+    return recv
 
 
 def _constellation_constants(system: str) -> tuple[float, float, float]:
@@ -143,8 +154,16 @@ def _nav_glonass_broadcast_valid(nav: NavMessage | None) -> bool:
     return True
 
 
+def _is_beidou_geo(nav: NavMessage | None) -> bool:
+    if nav is None or nav.system != "C":
+        return False
+    return int(nav.prn) in _BEIDOU_GEO_PRNS
+
+
 def _nav_broadcast_usable(nav: NavMessage | None) -> bool:
     """Kepler broadcast or GLONASS state-vector broadcast."""
+    if _is_beidou_geo(nav):
+        return False
     return _nav_glonass_broadcast_valid(nav) or _nav_kepler_broadcast_valid(nav)
 
 
@@ -182,7 +201,8 @@ def _glorbit_rk4(t: float, x: np.ndarray, acc: np.ndarray) -> None:
 
 def _glonass_position_clock(nav: NavMessage, gps_time: float) -> tuple[np.ndarray, float]:
     """Broadcast GLONASS ECEF position [m] and clock correction [s] at ``gps_time``."""
-    t = float(gps_time) - float(nav.toe)
+    rx_sow = _broadcast_rx_seconds_of_week(nav, gps_time)
+    t = rx_sow - float(nav.toe)
     if t > GPS_WEEK_SEC / 2.0:
         t -= GPS_WEEK_SEC
     if t < -GPS_WEEK_SEC / 2.0:

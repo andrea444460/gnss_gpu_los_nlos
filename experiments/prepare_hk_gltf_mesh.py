@@ -20,6 +20,7 @@ import math
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 
@@ -48,6 +49,15 @@ def _parse_args() -> argparse.Namespace:
         "--latlon-order",
         action="store_true",
         help="For geographic CRS inputs (e.g. epsg:4979), treat x=lat and y=lon instead of x=lon,y=lat.",
+    )
+    p.add_argument(
+        "--geoid-correction",
+        type=str,
+        default="none",
+        help=(
+            "Vertical correction before ECEF conversion: "
+            "'none' (default), 'egm96', or a numeric constant in meters."
+        ),
     )
     p.add_argument(
         "--min-triangle-area-m2",
@@ -97,7 +107,46 @@ def _load_one_mesh(mesh_path: Path):
     return tri
 
 
-def _to_ecef(tri: np.ndarray, input_crs: str, latlon_order: bool, hk_local_axis: bool = False) -> np.ndarray:
+def _resolve_geoid_correction(spec: str) -> tuple[Callable[[np.ndarray, np.ndarray], np.ndarray] | None, str]:
+    s = str(spec).strip().lower()
+    if s in ("", "none", "off", "false", "0"):
+        return None, "none"
+    try:
+        c = float(s)
+        return (
+            lambda lat_deg, lon_deg: np.full_like(np.asarray(lat_deg, dtype=np.float64), c, dtype=np.float64),
+            f"constant({c:g}m)",
+        )
+    except ValueError:
+        pass
+    if s != "egm96":
+        raise ValueError(f"Unsupported --geoid-correction={spec!r}; use none, egm96, or numeric meters.")
+    try:
+        from pyproj import Transformer
+    except Exception as exc:
+        raise RuntimeError("geoid correction 'egm96' requires pyproj (`pip install pyproj`).") from exc
+
+    src = "+proj=longlat +ellps=WGS84 +geoidgrids=egm96_15.gtx +vunits=m +no_defs"
+    dst = "+proj=longlat +ellps=WGS84 +vunits=m +no_defs"
+    tr = Transformer.from_pipeline(f"{src} +step {dst}")
+
+    def _n(lat_deg: np.ndarray, lon_deg: np.ndarray) -> np.ndarray:
+        lon = np.asarray(lon_deg, dtype=np.float64)
+        lat = np.asarray(lat_deg, dtype=np.float64)
+        z0 = np.zeros_like(lat, dtype=np.float64)
+        _x, _y, z = tr.transform(lon, lat, z0)
+        return np.asarray(z, dtype=np.float64)
+
+    return _n, "egm96"
+
+
+def _to_ecef(
+    tri: np.ndarray,
+    input_crs: str,
+    latlon_order: bool,
+    hk_local_axis: bool = False,
+    geoid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
     crs = input_crs.strip().lower()
     if hk_local_axis:
         # HK non-textured glTFs often encode transformed vertices where:
@@ -124,11 +173,24 @@ def _to_ecef(tri: np.ndarray, input_crs: str, latlon_order: bool, hk_local_axis:
             lon = x
             lat = y
         h = z
+        if geoid_fn is not None:
+            h = h + geoid_fn(lat, lon)
         t = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
         xx, yy, zz = t.transform(lon, lat, h)
+    elif crs in ("ecef", "epsg:4978", "4978"):
+        if geoid_fn is not None:
+            print("Warning: --geoid-correction ignored for ECEF input CRS (already Cartesian).")
+        xx, yy, zz = x, y, z
     else:
-        t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
-        xx, yy, zz = t.transform(x, y, z)
+        if geoid_fn is None:
+            t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
+            xx, yy, zz = t.transform(x, y, z)
+        else:
+            t_to_geo = Transformer.from_crs(crs, "epsg:4979", always_xy=True)
+            lon, lat, h = t_to_geo.transform(x, y, z)
+            h = np.asarray(h, dtype=np.float64) + geoid_fn(np.asarray(lat, dtype=np.float64), np.asarray(lon, dtype=np.float64))
+            t_to_ecef = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
+            xx, yy, zz = t_to_ecef.transform(lon, lat, h)
     out = np.stack([xx, yy, zz], axis=1).reshape(tri.shape)
     return np.asarray(out, dtype=np.float64)
 
@@ -141,6 +203,7 @@ def _triangle_area(tri: np.ndarray) -> np.ndarray:
 
 def main() -> None:
     args = _parse_args()
+    geoid_fn, geoid_label = _resolve_geoid_correction(args.geoid_correction)
     root = args.extracted_dir.resolve()
     if not root.exists():
         raise FileNotFoundError(f"Extracted dir not found: {root}")
@@ -182,7 +245,13 @@ def main() -> None:
         raise RuntimeError("No usable triangles loaded from glTF/GLB files")
 
     tri = np.concatenate(all_tri, axis=0).astype(np.float64, copy=False)
-    tri = _to_ecef(tri, args.input_crs, bool(args.latlon_order), hk_local_axis=bool(args.hk_local_axis))
+    tri = _to_ecef(
+        tri,
+        args.input_crs,
+        bool(args.latlon_order),
+        hk_local_axis=bool(args.hk_local_axis),
+        geoid_fn=geoid_fn,
+    )
 
     finite_mask = np.isfinite(tri).all(axis=(1, 2))
     tri = tri[finite_mask]
@@ -205,6 +274,7 @@ def main() -> None:
         "gltf_files_skipped": skipped,
         "input_crs": args.input_crs,
         "hk_local_axis": bool(args.hk_local_axis),
+        "geoid_correction": geoid_label,
         "triangle_count": int(tri.shape[0]),
         "bbox_ecef_min_m": mins,
         "bbox_ecef_max_m": maxs,

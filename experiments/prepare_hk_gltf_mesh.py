@@ -19,6 +19,8 @@ import json
 import math
 import os
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
@@ -56,8 +58,38 @@ def _parse_args() -> argparse.Namespace:
         default="none",
         help=(
             "Vertical correction before ECEF conversion: "
-            "'none' (default), 'egm96', or a numeric constant in meters."
+            "'none' (default), 'egm96', 'hkapi', or a numeric constant in meters."
         ),
+    )
+    p.add_argument(
+        "--hkapi-url",
+        type=str,
+        default="https://www.geodetic.gov.hk/transform/v2/",
+        help="LandsD transformation API endpoint used when --geoid-correction hkapi",
+    )
+    p.add_argument(
+        "--hkapi-grid-step-m",
+        type=float,
+        default=100.0,
+        help="Grid spacing [m] for HKAPI geoid sampling (default 100)",
+    )
+    p.add_argument(
+        "--hkapi-cache-json",
+        type=Path,
+        default=Path("experiments/data/hkapi_geoid_cache.json"),
+        help="Persistent JSON cache for HKAPI sampled nodes",
+    )
+    p.add_argument(
+        "--hkapi-timeout-s",
+        type=float,
+        default=20.0,
+        help="HTTP timeout in seconds for HKAPI requests (default 20)",
+    )
+    p.add_argument(
+        "--hkapi-retries",
+        type=int,
+        default=2,
+        help="Retry count for failed HKAPI requests (default 2)",
     )
     p.add_argument(
         "--min-triangle-area-m2",
@@ -119,8 +151,10 @@ def _resolve_geoid_correction(spec: str) -> tuple[Callable[[np.ndarray, np.ndarr
         )
     except ValueError:
         pass
+    if s == "hkapi":
+        return None, "hkapi"
     if s != "egm96":
-        raise ValueError(f"Unsupported --geoid-correction={spec!r}; use none, egm96, or numeric meters.")
+        raise ValueError(f"Unsupported --geoid-correction={spec!r}; use none, egm96, hkapi, or numeric meters.")
     try:
         from pyproj import Transformer
     except Exception as exc:
@@ -140,12 +174,118 @@ def _resolve_geoid_correction(spec: str) -> tuple[Callable[[np.ndarray, np.ndarr
     return _n, "egm96"
 
 
+def _hkapi_undulation_on_hkgrid(
+    e: np.ndarray,
+    n: np.ndarray,
+    *,
+    api_url: str,
+    step_m: float,
+    cache_json: Path,
+    timeout_s: float,
+    retries: int,
+) -> np.ndarray:
+    """Return geoid undulation N(e,n) [m] sampled from LandsD API then bilinearly interpolated."""
+    e = np.asarray(e, dtype=np.float64).reshape(-1)
+    n = np.asarray(n, dtype=np.float64).reshape(-1)
+    if e.size == 0:
+        return np.zeros(0, dtype=np.float64)
+    step = max(float(step_m), 1.0)
+    e0 = math.floor(float(np.min(e)) / step) * step
+    e1 = math.ceil(float(np.max(e)) / step) * step
+    n0 = math.floor(float(np.min(n)) / step) * step
+    n1 = math.ceil(float(np.max(n)) / step) * step
+    e_nodes = np.arange(e0, e1 + step * 0.5, step, dtype=np.float64)
+    n_nodes = np.arange(n0, n1 + step * 0.5, step, dtype=np.float64)
+    if e_nodes.size < 2:
+        e_nodes = np.array([e0, e0 + step], dtype=np.float64)
+    if n_nodes.size < 2:
+        n_nodes = np.array([n0, n0 + step], dtype=np.float64)
+
+    cache: dict[str, float] = {}
+    if cache_json.exists():
+        try:
+            cache = {k: float(v) for k, v in json.loads(cache_json.read_text(encoding="utf-8")).items()}
+        except Exception:
+            cache = {}
+
+    def _key(ee: float, nn: float) -> str:
+        return f"{ee:.3f},{nn:.3f}"
+
+    def _fetch_node(ee: float, nn: float) -> float:
+        k = _key(ee, nn)
+        if k in cache:
+            return cache[k]
+        params = urllib.parse.urlencode(
+            {
+                "inSys": "hkgrid",
+                "e": f"{ee:.3f}",
+                "n": f"{nn:.3f}",
+                # Interpret input height as HKPD=0; returned wgsEllHgt is undulation N.
+                "h": "0",
+            }
+        )
+        url = api_url.rstrip("?") + ("&" if "?" in api_url else "?") + params
+        last_err: Exception | None = None
+        for _ in range(max(1, int(retries) + 1)):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "gnss_gpu/hkapi-geoid"})
+                with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if "wgsEllHgt" not in data:
+                    raise RuntimeError(f"HKAPI response missing wgsEllHgt for ({ee},{nn}): {data}")
+                v = float(data["wgsEllHgt"])
+                if not np.isfinite(v):
+                    raise RuntimeError(f"HKAPI response non-finite wgsEllHgt for ({ee},{nn}): {data}")
+                cache[k] = v
+                return v
+            except Exception as exc:
+                last_err = exc
+        raise RuntimeError(f"HKAPI failed for ({ee},{nn}) after retries: {last_err}")
+
+    total = int(e_nodes.size * n_nodes.size)
+    print(f"HKAPI geoid sampling grid: {n_nodes.size}x{e_nodes.size} ({total} nodes, step={step:g}m)")
+    grid = np.zeros((n_nodes.size, e_nodes.size), dtype=np.float64)
+    done = 0
+    for i, nn in enumerate(n_nodes):
+        for j, ee in enumerate(e_nodes):
+            grid[i, j] = _fetch_node(float(ee), float(nn))
+            done += 1
+        if i % 10 == 0 or i == n_nodes.size - 1:
+            print(f"  HKAPI rows {i + 1}/{n_nodes.size} (nodes {done}/{total})")
+
+    cache_json.parent.mkdir(parents=True, exist_ok=True)
+    cache_json.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+    ie = np.searchsorted(e_nodes, e, side="right") - 1
+    in_ = np.searchsorted(n_nodes, n, side="right") - 1
+    ie = np.clip(ie, 0, e_nodes.size - 2)
+    in_ = np.clip(in_, 0, n_nodes.size - 2)
+    e_lo = e_nodes[ie]
+    e_hi = e_nodes[ie + 1]
+    n_lo = n_nodes[in_]
+    n_hi = n_nodes[in_ + 1]
+    tx = np.where(e_hi > e_lo, (e - e_lo) / (e_hi - e_lo), 0.0)
+    ty = np.where(n_hi > n_lo, (n - n_lo) / (n_hi - n_lo), 0.0)
+    z00 = grid[in_, ie]
+    z10 = grid[in_, ie + 1]
+    z01 = grid[in_ + 1, ie]
+    z11 = grid[in_ + 1, ie + 1]
+    out = (1.0 - tx) * (1.0 - ty) * z00 + tx * (1.0 - ty) * z10 + (1.0 - tx) * ty * z01 + tx * ty * z11
+    return np.asarray(out, dtype=np.float64)
+
+
 def _to_ecef(
     tri: np.ndarray,
     input_crs: str,
     latlon_order: bool,
     hk_local_axis: bool = False,
     geoid_fn: Callable[[np.ndarray, np.ndarray], np.ndarray] | None = None,
+    geoid_label: str = "none",
+    hkapi_url: str = "",
+    hkapi_grid_step_m: float = 100.0,
+    hkapi_cache_json: Path | None = None,
+    hkapi_timeout_s: float = 20.0,
+    hkapi_retries: int = 2,
 ) -> np.ndarray:
     crs = input_crs.strip().lower()
     if hk_local_axis:
@@ -175,6 +315,18 @@ def _to_ecef(
         h = z
         if geoid_fn is not None:
             h = h + geoid_fn(lat, lon)
+        elif geoid_label == "hkapi":
+            t_hk = Transformer.from_crs("epsg:4979", "epsg:2326", always_xy=True)
+            e_hk, n_hk, _ = t_hk.transform(lon, lat, np.zeros_like(h))
+            h = h + _hkapi_undulation_on_hkgrid(
+                e_hk,
+                n_hk,
+                api_url=hkapi_url,
+                step_m=hkapi_grid_step_m,
+                cache_json=hkapi_cache_json or Path("experiments/data/hkapi_geoid_cache.json"),
+                timeout_s=hkapi_timeout_s,
+                retries=hkapi_retries,
+            )
         t = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
         xx, yy, zz = t.transform(lon, lat, h)
     elif crs in ("ecef", "epsg:4978", "4978"):
@@ -183,8 +335,24 @@ def _to_ecef(
         xx, yy, zz = x, y, z
     else:
         if geoid_fn is None:
-            t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
-            xx, yy, zz = t.transform(x, y, z)
+            if geoid_label != "hkapi":
+                t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
+                xx, yy, zz = t.transform(x, y, z)
+            else:
+                # hkapi needs HK grid coordinates: apply N(e,n) on HKPD heights first.
+                if crs not in ("epsg:2326", "2326"):
+                    raise ValueError("--geoid-correction hkapi currently supports input CRS epsg:2326/4979/4326 only.")
+                und = _hkapi_undulation_on_hkgrid(
+                    x,
+                    y,
+                    api_url=hkapi_url,
+                    step_m=hkapi_grid_step_m,
+                    cache_json=hkapi_cache_json or Path("experiments/data/hkapi_geoid_cache.json"),
+                    timeout_s=hkapi_timeout_s,
+                    retries=hkapi_retries,
+                )
+                t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
+                xx, yy, zz = t.transform(x, y, z + und)
         else:
             t_to_geo = Transformer.from_crs(crs, "epsg:4979", always_xy=True)
             lon, lat, h = t_to_geo.transform(x, y, z)
@@ -251,6 +419,12 @@ def main() -> None:
         bool(args.latlon_order),
         hk_local_axis=bool(args.hk_local_axis),
         geoid_fn=geoid_fn,
+        geoid_label=geoid_label,
+        hkapi_url=str(args.hkapi_url),
+        hkapi_grid_step_m=float(args.hkapi_grid_step_m),
+        hkapi_cache_json=args.hkapi_cache_json.resolve(),
+        hkapi_timeout_s=float(args.hkapi_timeout_s),
+        hkapi_retries=int(args.hkapi_retries),
     )
 
     finite_mask = np.isfinite(tri).all(axis=(1, 2))

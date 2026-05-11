@@ -19,6 +19,10 @@ Examples::
 
     # Reduce triangle count (RAM / BVH): see experiments/decimate_triangles_npy.py
 
+    # Drop typical watertight bottom closure (large low-altitude plates): post-merge filter
+    python experiments/b3dm_tileset_to_triangles_npy.py \\
+        --tileset-dir ... --output-npy ... --strip-bottom-slab
+
 Requires: ``trimesh``, ``numpy``.
 """
 
@@ -32,6 +36,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+from mesh_triangle_filters import remove_bottom_closure_slab
 
 
 def _align8(offset: int) -> int:
@@ -265,6 +271,24 @@ def main() -> None:
         help="Also decode every *.cmpt inner b3dm (can duplicate geometry vs loose *.b3dm)",
     )
     ap.add_argument("--summary-json", type=Path, default=None)
+    ap.add_argument(
+        "--strip-bottom-slab",
+        action="store_true",
+        help="After merge, remove large triangles in the lowest ellipsoidal-height band "
+        "(typical Cesium bottom closure cap). Tune --bottom-* if too aggressive.",
+    )
+    ap.add_argument(
+        "--bottom-alt-quantile",
+        type=float,
+        default=0.03,
+        help="With --strip-bottom-slab: centroid height quantile defining 'low band' (default 0.03).",
+    )
+    ap.add_argument(
+        "--bottom-min-area-m2",
+        type=float,
+        default=120.0,
+        help="With --strip-bottom-slab: only triangles with area ≥ this [m²] are removed (default 120).",
+    )
     args = ap.parse_args()
 
     ts_dir = args.tileset_dir.resolve()
@@ -295,6 +319,20 @@ def main() -> None:
         sys.exit("No triangles extracted from any b3dm.")
 
     merged = np.concatenate(all_parts, axis=0)
+    n_strip = 0
+    if bool(args.strip_bottom_slab):
+        n_before = int(merged.shape[0])
+        merged, n_strip = remove_bottom_closure_slab(
+            merged,
+            alt_quantile=float(args.bottom_alt_quantile),
+            min_area_m2=float(args.bottom_min_area_m2),
+        )
+        print(
+            f"[strip-bottom-slab] removed {n_strip}/{n_before} triangles "
+            f"(quantile={float(args.bottom_alt_quantile):.4f}, min_area_m2={float(args.bottom_min_area_m2):.1f})",
+            flush=True,
+        )
+
     verts_flat = merged.reshape(-1, 3)
     extent_m = float(np.linalg.norm(verts_flat.max(axis=0) - verts_flat.min(axis=0)))
     nuniq_mm = int(np.unique(np.round(verts_flat, decimals=3), axis=0).shape[0])
@@ -310,6 +348,10 @@ def main() -> None:
         "b3dm_tiles_read": len(blobs),
         "tiles_decoded_ok": ok,
         "triangle_count": int(merged.shape[0]),
+        "strip_bottom_slab": bool(args.strip_bottom_slab),
+        "triangles_removed_bottom_slab": int(n_strip),
+        "bottom_alt_quantile": float(args.bottom_alt_quantile),
+        "bottom_min_area_m2": float(args.bottom_min_area_m2),
         "mesh_extent_m": extent_m,
         "unique_vertices_rounded_mm": nuniq_mm,
         "output_triangles_npy": str(out),

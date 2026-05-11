@@ -816,12 +816,15 @@ def compute_all_epochs(
     multipath_batch_warned = False
 
     positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
-    if float(ellipsoid_height_offset_m) != 0.0:
-        positions = apply_ellipsoid_height_shift_ecef(positions, float(ellipsoid_height_offset_m))
+    dh_off = float(ellipsoid_height_offset_m)
+    if dh_off != 0.0:
+        positions_disp = apply_ellipsoid_height_shift_ecef(positions, dh_off)
         print(
-            f"  Ellipsoid height offset {float(ellipsoid_height_offset_m):+.3f} m applied "
-            "(trajectory + rays + RX; use when Cesium terrain skin sits above survey ellipsoid h)."
+            f"  Ellipsoid height offset {dh_off:+.3f} m applied for **viewer only** "
+            "(yellow path / RX / drawn rays); LOS+BVH+pivot/GLB still use survey trajectory)."
         )
+    else:
+        positions_disp = positions
     n_loaded = len(times)
     print(
         f"  Trajectory CSV: {n_csv_rows} rows; --traj-step={step} → {n_loaded} positions loaded "
@@ -1017,7 +1020,8 @@ def compute_all_epochs(
 
         for local_i, ei in enumerate(chunk_idx):
             fi += 1
-            rx = positions[ei]
+            rx_phys = positions[ei]
+            rx_disp = positions_disp[ei]
             t = times[ei] - times[0]
 
             if sat_rows is None:
@@ -1032,7 +1036,7 @@ def compute_all_epochs(
 
             n_sat = int(np.asarray(sat_ecef).reshape(-1, 3).shape[0])
             if n_sat == 0:
-                lat, lon, alt = ecef_to_lla(*rx)
+                lat, lon, alt = ecef_to_lla(*rx_disp)
                 epochs_data.append({
                     "rx": [math.degrees(lat), math.degrees(lon), alt],
                     "rays": [],
@@ -1055,14 +1059,14 @@ def compute_all_epochs(
                     is_los[vis_idx] = los_batch[local_i, vis_idx]
                 if usim.atmo_bending_lite:
                     sat_ecef_ray = virtual_satellite_ecef_lite(
-                        rx,
+                        rx_phys,
                         sat_ecef,
                         pressure_hpa=usim.atmo_pressure_hpa,
                         temp_c=usim.atmo_temp_c,
                     )
             else:
                 result = usim.compute_epoch(
-                    rx_ecef=rx,
+                    rx_ecef=rx_phys,
                     sat_ecef=sat_ecef,
                     sat_clk=sat_clk,
                     prn_list=used_prns_i,
@@ -1072,7 +1076,7 @@ def compute_all_epochs(
                 is_los = np.asarray(result["is_los"], dtype=bool)
                 if usim.atmo_bending_lite:
                     sat_ecef_ray = virtual_satellite_ecef_lite(
-                        rx,
+                        rx_phys,
                         sat_ecef,
                         pressure_hpa=usim.atmo_pressure_hpa,
                         temp_c=usim.atmo_temp_c,
@@ -1101,10 +1105,10 @@ def compute_all_epochs(
                     refl_pts_mp = mp_refl_batch[local_i]
                 else:
                     try:
-                        delays_mp, refl_pts_mp = bvh.compute_multipath(rx, sat_mat)
+                        delays_mp, refl_pts_mp = bvh.compute_multipath(rx_phys, sat_mat)
                     except Exception:
                         try:
-                            delays_mp, refl_pts_mp = building.compute_multipath(rx, sat_mat)
+                            delays_mp, refl_pts_mp = building.compute_multipath(rx_phys, sat_mat)
                         except Exception as _e:
                             if not multipath_warned:
                                 print(
@@ -1147,7 +1151,7 @@ def compute_all_epochs(
                         )
 
             hide_direct_prns = {r["prn"] for r in reflections if r.get("nlosMp")}
-            lat, lon, alt = ecef_to_lla(*rx)
+            lat, lon, alt = ecef_to_lla(*rx_disp)
             epoch = {
                 "rx": [math.degrees(lat), math.degrees(lon), alt],
                 "rays": [],
@@ -1163,10 +1167,17 @@ def compute_all_epochs(
                 prn_str = _sat_display_id(used_prns_i[i])
                 if prn_str in hide_direct_prns:
                     continue
-                direction = sat_ecef_ray[i] - rx
-                dist = np.linalg.norm(direction)
-                ray_end = rx + direction / dist * 5000
-                re_lat, re_lon, re_alt = ecef_to_lla(*ray_end)
+                direction = np.asarray(sat_ecef_ray[i], dtype=np.float64).reshape(3) - rx_phys
+                dist = float(np.linalg.norm(direction))
+                if dist < 1.0:
+                    continue
+                u = direction / dist
+                ray_end_disp = rx_disp + u * 5000.0
+                re_lat, re_lon, re_alt = ecef_to_lla(
+                    float(ray_end_disp[0]),
+                    float(ray_end_disp[1]),
+                    float(ray_end_disp[2]),
+                )
                 epoch["rays"].append({
                     "prn": prn_str,
                     "los": bool(is_los[i]),
@@ -1181,9 +1192,9 @@ def compute_all_epochs(
                     f"(batch PRNs={n_sat_chunk if sat_rows is not None else 'fallback'})"
                 )
 
-    # Trajectory line
+    # Trajectory polyline in HTML uses display positions when offset is non-zero.
     traj = []
-    for p in positions:
+    for p in positions_disp:
         lat, lon, alt = ecef_to_lla(*p)
         traj.append([math.degrees(lat), math.degrees(lon), alt])
 

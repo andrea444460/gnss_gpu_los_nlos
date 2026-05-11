@@ -1,0 +1,9 @@
+{
+  "tileset_dir": "C:\\Users\\Andrea\\Desktop\\luigiFerrarisGeoLoc",
+  "tileset_json": "C:\\Users\\Andrea\\Desktop\\luigiFerrarisGeoLoc\\tileset.json",
+  "include_cmpt": false,
+  "b3dm_tiles_read": 5,
+  "tiles_decoded_ok": 5,
+  "triangle_count": 41245,
+  "output_triangles_npy": "C:\\Users\\Andrea\\Desktop\\luigiFerrarisGeoLoc\\luigi_ferraris_triangles.npy"
+}

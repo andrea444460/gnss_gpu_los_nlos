@@ -33,6 +33,10 @@ Example (Genoa, after you have ``ferraris_triangles.npy`` and ``BRDC*.rnx``)::
       --cesium-ion-token \"$CESIUM_ION_TOKEN\"
 
 Use ``--dry-run`` to only write the reference CSV and print the suggested command.
+
+If the yellow path / RX sit below Cesium World Terrain even with correct survey ellipsoid heights,
+pass ``--ellipsoid-height-offset-m 10`` (tune 5–25 m) so RX, rays, and trajectory shift together
+along the ellipsoid normal (LOS geometry follows the shifted trajectory).
 """
 
 from __future__ import annotations
@@ -211,6 +215,12 @@ def _parse_args() -> argparse.Namespace:
     viz.add_argument("--export-mesh-glb", action="store_true")
     viz.add_argument("--plateau-glb-radius-m", type=float, default=800.0)
     viz.add_argument("--plateau-glb-max-tris", type=int, default=800_000)
+    viz.add_argument(
+        "--ellipsoid-height-offset-m",
+        type=float,
+        default=0.0,
+        help="Forwarded to build_3d_visualization (positive lifts RX/traj/rays vs WGS84 h when Ion terrain looks high).",
+    )
 
     return p.parse_args()
 
@@ -295,6 +305,11 @@ def main() -> None:
         "--plateau-glb-max-tris",
         str(int(args.plateau_glb_max_tris)),
     ]
+    if float(getattr(args, "ellipsoid_height_offset_m", 0.0)) != 0.0:
+        cmd += [
+            "--ellipsoid-height-offset-m",
+            str(float(args.ellipsoid_height_offset_m)),
+        ]
     if args.cesium_ion_token.strip():
         cmd += ["--cesium-ion-token", args.cesium_ion_token.strip()]
     if args.viz_multipath:

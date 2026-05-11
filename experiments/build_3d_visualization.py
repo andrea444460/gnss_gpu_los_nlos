@@ -250,6 +250,22 @@ def load_trajectory(csv_path, step=200):
     return np.array(positions), np.array(times), int(n_csv)
 
 
+def apply_ellipsoid_height_shift_ecef(positions: np.ndarray, dh_m: float) -> np.ndarray:
+    """Move each ECEF point by ``dh_m`` along the local ellipsoid outward normal (add to ellipsoidal h)."""
+    dh = float(dh_m)
+    if dh == 0.0:
+        return positions
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.ndim != 2 or pos.shape[1] != 3:
+        raise ValueError(f"expected positions shaped (N, 3), got {pos.shape}")
+    out = np.empty_like(pos)
+    for i in range(pos.shape[0]):
+        lat, lon, h = ecef_to_lla(float(pos[i, 0]), float(pos[i, 1]), float(pos[i, 2]))
+        ecef = _lla_deg_to_ecef(math.degrees(lat), math.degrees(lon), float(h) + dh)
+        out[i, :] = ecef
+    return out
+
+
 def trajectory_row_stride(step_arg: float) -> int:
     """Convert ``--traj-step`` to an integer CSV row stride (minimum every row).
 
@@ -751,6 +767,7 @@ def compute_all_epochs(
     atmo_pressure_hpa: float = 1010.0,
     atmo_temp_c: float = 10.0,
     triangles_npy: Optional[str] = None,
+    ellipsoid_height_offset_m: float = 0.0,
 ):
     """Compute LOS/NLOS for all epochs and return visualization data.
 
@@ -799,6 +816,12 @@ def compute_all_epochs(
     multipath_batch_warned = False
 
     positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
+    if float(ellipsoid_height_offset_m) != 0.0:
+        positions = apply_ellipsoid_height_shift_ecef(positions, float(ellipsoid_height_offset_m))
+        print(
+            f"  Ellipsoid height offset {float(ellipsoid_height_offset_m):+.3f} m applied "
+            "(trajectory + rays + RX; use when Cesium terrain skin sits above survey ellipsoid h)."
+        )
     n_loaded = len(times)
     print(
         f"  Trajectory CSV: {n_csv_rows} rows; --traj-step={step} → {n_loaded} positions loaded "
@@ -2662,6 +2685,13 @@ def main(argv=None):
         default=2500,
         help="Max OBS samples per satellite for embedded C/N₀ series (downsampled; default 2500)",
     )
+    parser.add_argument(
+        "--ellipsoid-height-offset-m",
+        type=float,
+        default=0.0,
+        help="Add this delta [m] to WGS84 ellipsoidal height for every trajectory point after load "
+        "(shifts RX + rays + yellow path consistently; try +5…+20 when Cesium terrain looks high vs survey).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -2684,6 +2714,7 @@ def main(argv=None):
     atmo_bending_lite = bool(getattr(args, "atmo_bending_lite", False))
     atmo_pressure_hpa = float(getattr(args, "atmo_pressure_hpa", 1010.0))
     atmo_temp_c = float(getattr(args, "atmo_temp_c", 10.0))
+    ellipsoid_h_off = float(getattr(args, "ellipsoid_height_offset_m", 0.0))
 
     def _obs_path_for_ref(ref_csv: str) -> Optional[str]:
         if not filter_obs:
@@ -2718,6 +2749,7 @@ def main(argv=None):
             atmo_bending_lite=atmo_bending_lite,
             atmo_pressure_hpa=atmo_pressure_hpa,
             atmo_temp_c=atmo_temp_c,
+            ellipsoid_height_offset_m=0.0,
         )
         odaiba = compute_all_epochs(
             "Odaiba",
@@ -2738,6 +2770,7 @@ def main(argv=None):
             atmo_bending_lite=atmo_bending_lite,
             atmo_pressure_hpa=atmo_pressure_hpa,
             atmo_temp_c=atmo_temp_c,
+            ellipsoid_height_offset_m=0.0,
         )
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
@@ -2781,6 +2814,7 @@ def main(argv=None):
         atmo_pressure_hpa=atmo_pressure_hpa,
         atmo_temp_c=atmo_temp_c,
         triangles_npy=(args.triangles_npy.strip() or None),
+        ellipsoid_height_offset_m=ellipsoid_h_off,
     )
     out_html = os.path.abspath(args.out_html)
     _out_dir = os.path.dirname(out_html)

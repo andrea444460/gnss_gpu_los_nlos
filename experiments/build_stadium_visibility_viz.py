@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Prepare a trajectory CSV for ``build_3d_visualization.py`` and run the LOS viewer.
 
-Your planner CSV (e.g. ``luigiFerrarisTrajectory.csv``) has only lat/lon (degrees WGS84).
+Your planner CSV has lat/lon (degrees WGS84). Optionally each row may include an **ellipsoidal**
+height column (WGS84 ``h`` in metres); if absent, ``--alt-m`` applies to every row.
+
 This script:
 
-  1. Converts each point to ECEF using a fixed ellipsoidal height ``--alt-m``.
+  1. Converts each point to ECEF using per-row or default ellipsoidal height.
   2. Assigns synthetic GPS times: ``GPS TOW`` advances by ``--dt-s`` per row (wrapped in-week).
   3. Writes an UrbanNav-compatible reference CSV (``GPS Week`` + ``GPS TOW`` + ECEF).
   4. Optionally runs ``build_3d_visualization.py`` with ``--triangles-npy`` (your stadium mesh in ECEF).
@@ -23,7 +25,7 @@ Example (Genoa, after you have ``ferraris_triangles.npy`` and ``BRDC*.rnx``)::
       --triangles-npy \"C:/Users/Me/Desktop/ferraris_triangles.npy\" ^
       --nav \"C:/Users/Me/Desktop/BRDC00IGS_R_20240890000_01D_MN.rnx\" ^
       --out-html \"C:/Users/Me/Desktop/luigi_ferraris_viz.html\" ^
-      --alt-m 12 ^
+      --alt-m 58 ^
       --gps-week 2318 ^
       --tow-start-s 43200 ^
       --dt-s 1 ^
@@ -50,7 +52,7 @@ def _normalize_row(row: dict) -> dict:
 
 
 def _detect_lat_lon(keys: set[str]) -> tuple[str, str]:
-    kl = {k.lower(): k for k in keys}
+    kl = {k.strip().lower(): k for k in keys}
     lat_candidates = ("latitude", "lat", "latitudine", "lat_deg", "phi")
     lon_candidates = ("longitude", "lon", "lng", "longitudine", "lon_deg", "lambda")
     lat_k = next((kl[c] for c in lat_candidates if c in kl), None)
@@ -60,6 +62,26 @@ def _detect_lat_lon(keys: set[str]) -> tuple[str, str]:
             f"Could not find latitude/longitude columns in CSV header: {sorted(keys)}"
         )
     return lat_k, lon_k
+
+
+def _detect_optional_alt_key(keys: set[str]) -> str | None:
+    """Return CSV header key for WGS84 ellipsoidal height [m] if present."""
+    kl = {k.strip().lower(): k for k in keys}
+    candidates = (
+        "altitudine ellissoidale (m)",
+        "alt ellipsoidale (m)",
+        "quota ellissoidica (m)",
+        "altitudine (m)",
+        "ellipsoidal height (m)",
+        "height (m)",
+        "altitude (m)",
+        "altitude",
+        "alt_m",
+        "alt",
+        "h_ellipsoid",
+        "ellipsoidal_height",
+    )
+    return next((kl[c] for c in candidates if c in kl), None)
 
 
 def _lla_to_ecef(lat_deg: float, lon_deg: float, alt_m: float) -> tuple[float, float, float]:
@@ -95,23 +117,32 @@ def _gps_week_tow_from_utc(dt_utc: datetime) -> tuple[int, float]:
     return int(secs // 604800), secs % 604800.0
 
 
-def read_lat_lon_csv(path: Path) -> list[tuple[float, float]]:
+def read_lat_lon_alt_csv(path: Path, *, default_alt_m: float) -> tuple[list[tuple[float, float, float]], bool]:
+    """Return ``[(lat, lon, alt_m), ...]`` and whether altitudes came from the CSV."""
     with open(path, newline="", encoding="utf-8") as f:
         rows = [_normalize_row(r) for r in csv.DictReader(f)]
     if not rows:
         raise RuntimeError(f"No data rows in {path}")
-    lat_k, lon_k = _detect_lat_lon(set(rows[0].keys()))
-    out: list[tuple[float, float]] = []
+    hdr = set(rows[0].keys())
+    lat_k, lon_k = _detect_lat_lon(hdr)
+    alt_k = _detect_optional_alt_key(hdr)
+    out: list[tuple[float, float, float]] = []
     for r in rows:
-        out.append((float(r[lat_k]), float(r[lon_k])))
-    return out
+        lat = float(r[lat_k])
+        lon = float(r[lon_k])
+        if alt_k is not None and str(r.get(alt_k, "")).strip() != "":
+            h_m = float(r[alt_k])
+        else:
+            h_m = float(default_alt_m)
+        out.append((lat, lon, h_m))
+    per_row = alt_k is not None
+    return out, per_row
 
 
 def write_urbannav_reference_csv(
     *,
     out_path: Path,
-    lat_lon: list[tuple[float, float]],
-    alt_m: float,
+    lat_lon_alt: list[tuple[float, float, float]],
     gps_week: int,
     tow_start_s: float,
     dt_s: float,
@@ -129,7 +160,7 @@ def write_urbannav_reference_csv(
                 "ECEF Z (m)",
             ]
         )
-        for i, (lat, lon) in enumerate(lat_lon):
+        for i, (lat, lon, alt_m) in enumerate(lat_lon_alt):
             tow = _unwrap_tow(tow0 + i * float(dt_s))
             x, y, z = _lla_to_ecef(lat, lon, alt_m)
             w.writerow([int(gps_week), f"{tow:.6f}", f"{x:.6f}", f"{y:.6f}", f"{z:.6f}"])
@@ -144,7 +175,13 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Where to write UrbanNav-style reference CSV (default: beside --out-html)",
     )
-    p.add_argument("--alt-m", type=float, default=10.0, help="Ellipsoidal height [m] for all trajectory points")
+    p.add_argument(
+        "--alt-m",
+        type=float,
+        default=58.0,
+        help="Default WGS84 ellipsoidal height h [m] when the CSV has no altitude column "
+        "(Italy NW coast / Genoa ground-level is often ~50–65 m; tune vs terrain).",
+    )
     p.add_argument("--gps-week", type=int, default=0, help="GPS week number (default: use --start-utc)")
     p.add_argument("--tow-start-s", type=float, default=0.0, help="GPS TOW for row 0 [s] (default: use --start-utc)")
     p.add_argument("--dt-s", type=float, default=1.0, help="Synthetic time step between CSV rows [s]")
@@ -180,12 +217,16 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    lat_lon = read_lat_lon_csv(args.latlon_csv.resolve())
-    lats = [p[0] for p in lat_lon]
-    lons = [p[1] for p in lat_lon]
+    lat_lon_alt, alt_from_csv = read_lat_lon_alt_csv(
+        args.latlon_csv.resolve(), default_alt_m=float(args.alt_m)
+    )
+    lats = [p[0] for p in lat_lon_alt]
+    lons = [p[1] for p in lat_lon_alt]
+    hs = [p[2] for p in lat_lon_alt]
     print(
         f"[stadium] loaded trajectory CSV: {args.latlon_csv.resolve()} "
-        f"(points={len(lat_lon)}, lat=[{min(lats):.6f},{max(lats):.6f}], lon=[{min(lons):.6f},{max(lons):.6f}])",
+        f"(points={len(lat_lon_alt)}, lat=[{min(lats):.6f},{max(lats):.6f}], lon=[{min(lons):.6f},{max(lons):.6f}], "
+        f"ellipsoid_h=[{min(hs):.2f},{max(hs):.2f}] m, alt={'CSV column' if alt_from_csv else 'default --alt-m'})",
         flush=True,
     )
 
@@ -212,13 +253,12 @@ def main() -> None:
 
     write_urbannav_reference_csv(
         out_path=ref_out.resolve(),
-        lat_lon=lat_lon,
-        alt_m=float(args.alt_m),
+        lat_lon_alt=lat_lon_alt,
         gps_week=gps_week,
         tow_start_s=tow_start,
         dt_s=float(args.dt_s),
     )
-    tow_end = _unwrap_tow(tow_start + (len(lat_lon) - 1) * float(args.dt_s))
+    tow_end = _unwrap_tow(tow_start + (len(lat_lon_alt) - 1) * float(args.dt_s))
     print(
         f"[stadium] wrote reference trajectory: {ref_out.resolve()} "
         f"(points={len(lat_lon)}, dt={float(args.dt_s):g}s, tow=[{_unwrap_tow(tow_start):.3f},{tow_end:.3f}])",
@@ -274,10 +314,28 @@ def main() -> None:
         print("[stadium] dry-run enabled: skipping viewer execution.", flush=True)
         return
 
-    env_full = {**os.environ, "PYTHONPATH": py_path, "PYTHONUNBUFFERED": "1"}
+    # Force a non-interactive backend in subprocesses (important in notebooks/headless runs).
+    env_full = {
+        **os.environ,
+        "PYTHONPATH": py_path,
+        "PYTHONUNBUFFERED": "1",
+        "MPLBACKEND": "Agg",
+    }
     print("[stadium] starting build_3d_visualization.py ...", flush=True)
     r = subprocess.run(cmd, env=env_full, cwd=str(args.repo_root))
     print(f"[stadium] viewer process exit code: {r.returncode}", flush=True)
+    if r.returncode in (-11, 139):
+        print(
+            "[stadium] hint: segfault detected (-11/139). Try a lighter run: "
+            "decimate triangles, reduce --n-epochs, and keep --viz-multipath/--export-mesh-glb disabled.",
+            flush=True,
+        )
+    elif r.returncode in (-9, 137):
+        print(
+            "[stadium] hint: process killed (-9/137), often OOM. "
+            "Use fewer triangles and lower --n-epochs.",
+            flush=True,
+        )
     raise SystemExit(r.returncode)
 
 

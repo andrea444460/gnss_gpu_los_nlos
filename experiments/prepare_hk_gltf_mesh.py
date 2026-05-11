@@ -92,6 +92,11 @@ def _parse_args() -> argparse.Namespace:
         help="Retry count for failed HKAPI requests (default 2)",
     )
     p.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print detailed progress logs (useful to diagnose apparent stalls)",
+    )
+    p.add_argument(
         "--min-triangle-area-m2",
         type=float,
         default=1e-8,
@@ -183,6 +188,7 @@ def _hkapi_undulation_on_hkgrid(
     cache_json: Path,
     timeout_s: float,
     retries: int,
+    debug: bool = False,
 ) -> np.ndarray:
     """Return geoid undulation N(e,n) [m] sampled from LandsD API then bilinearly interpolated."""
     e = np.asarray(e, dtype=np.float64).reshape(-1)
@@ -207,6 +213,8 @@ def _hkapi_undulation_on_hkgrid(
             cache = {k: float(v) for k, v in json.loads(cache_json.read_text(encoding="utf-8")).items()}
         except Exception:
             cache = {}
+    if debug:
+        print(f"HKAPI cache file: {cache_json} (entries={len(cache)})", flush=True)
 
     def _key(ee: float, nn: float) -> str:
         return f"{ee:.3f},{nn:.3f}"
@@ -226,7 +234,7 @@ def _hkapi_undulation_on_hkgrid(
         )
         url = api_url.rstrip("?") + ("&" if "?" in api_url else "?") + params
         last_err: Exception | None = None
-        for _ in range(max(1, int(retries) + 1)):
+        for attempt in range(max(1, int(retries) + 1)):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "gnss_gpu/hkapi-geoid"})
                 with urllib.request.urlopen(req, timeout=float(timeout_s)) as resp:
@@ -240,21 +248,39 @@ def _hkapi_undulation_on_hkgrid(
                 return v
             except Exception as exc:
                 last_err = exc
+                if debug:
+                    print(
+                        f"  HKAPI node retry {attempt + 1}/{max(1, int(retries) + 1)} for e={ee:.3f}, n={nn:.3f}: {exc}",
+                        flush=True,
+                    )
         raise RuntimeError(f"HKAPI failed for ({ee},{nn}) after retries: {last_err}")
 
     total = int(e_nodes.size * n_nodes.size)
-    print(f"HKAPI geoid sampling grid: {n_nodes.size}x{e_nodes.size} ({total} nodes, step={step:g}m)")
+    print(f"HKAPI geoid sampling grid: {n_nodes.size}x{e_nodes.size} ({total} nodes, step={step:g}m)", flush=True)
     grid = np.zeros((n_nodes.size, e_nodes.size), dtype=np.float64)
     done = 0
+    cache_hits = 0
+    cache_miss = 0
     for i, nn in enumerate(n_nodes):
         for j, ee in enumerate(e_nodes):
-            grid[i, j] = _fetch_node(float(ee), float(nn))
+            k = _key(float(ee), float(nn))
+            if k in cache:
+                cache_hits += 1
+                grid[i, j] = cache[k]
+            else:
+                cache_miss += 1
+                grid[i, j] = _fetch_node(float(ee), float(nn))
             done += 1
         if i % 10 == 0 or i == n_nodes.size - 1:
-            print(f"  HKAPI rows {i + 1}/{n_nodes.size} (nodes {done}/{total})")
+            print(
+                f"  HKAPI rows {i + 1}/{n_nodes.size} (nodes {done}/{total}, cache_hit={cache_hits}, cache_miss={cache_miss})",
+                flush=True,
+            )
 
     cache_json.parent.mkdir(parents=True, exist_ok=True)
     cache_json.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    if debug:
+        print(f"HKAPI cache saved: {cache_json} (entries={len(cache)})", flush=True)
 
     ie = np.searchsorted(e_nodes, e, side="right") - 1
     in_ = np.searchsorted(n_nodes, n, side="right") - 1
@@ -286,6 +312,7 @@ def _to_ecef(
     hkapi_cache_json: Path | None = None,
     hkapi_timeout_s: float = 20.0,
     hkapi_retries: int = 2,
+    debug: bool = False,
 ) -> np.ndarray:
     crs = input_crs.strip().lower()
     if hk_local_axis:
@@ -305,6 +332,11 @@ def _to_ecef(
     x = tri[..., 0].reshape(-1)
     y = tri[..., 1].reshape(-1)
     z = tri[..., 2].reshape(-1)
+    if debug:
+        print(
+            f"CRS transform start: input_crs={crs}, vertices={x.size}, geoid={geoid_label}, hk_local_axis={hk_local_axis}",
+            flush=True,
+        )
     if crs in ("epsg:4979", "4979", "epsg:4326", "4326"):
         if latlon_order:
             lat = x
@@ -326,6 +358,7 @@ def _to_ecef(
                 cache_json=hkapi_cache_json or Path("experiments/data/hkapi_geoid_cache.json"),
                 timeout_s=hkapi_timeout_s,
                 retries=hkapi_retries,
+                debug=debug,
             )
         t = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
         xx, yy, zz = t.transform(lon, lat, h)
@@ -350,6 +383,7 @@ def _to_ecef(
                     cache_json=hkapi_cache_json or Path("experiments/data/hkapi_geoid_cache.json"),
                     timeout_s=hkapi_timeout_s,
                     retries=hkapi_retries,
+                    debug=debug,
                 )
                 t = Transformer.from_crs(crs, "epsg:4978", always_xy=True)
                 xx, yy, zz = t.transform(x, y, z + und)
@@ -360,6 +394,8 @@ def _to_ecef(
             t_to_ecef = Transformer.from_crs("epsg:4979", "epsg:4978", always_xy=True)
             xx, yy, zz = t_to_ecef.transform(lon, lat, h)
     out = np.stack([xx, yy, zz], axis=1).reshape(tri.shape)
+    if debug:
+        print("CRS transform done.", flush=True)
     return np.asarray(out, dtype=np.float64)
 
 
@@ -389,14 +425,16 @@ def main() -> None:
     if not gltfs:
         raise RuntimeError(f"No .gltf/.glb files found under {root}")
 
-    print(f"Scanning meshes: {root}")
-    print(f"Found glTF/GLB files: {len(gltfs)}")
+    print(f"Scanning meshes: {root}", flush=True)
+    print(f"Found glTF/GLB files: {len(gltfs)}", flush=True)
 
     all_tri = []
     loaded = 0
     skipped = 0
     for i, p in enumerate(gltfs, start=1):
         try:
+            if args.debug:
+                print(f"  loading [{i}/{len(gltfs)}] {p.name}", flush=True)
             tri = _load_one_mesh(p)
             if tri is None:
                 skipped += 1
@@ -404,15 +442,18 @@ def main() -> None:
             all_tri.append(tri)
             loaded += 1
             if i % 25 == 0 or i == len(gltfs):
-                print(f"  loaded {i}/{len(gltfs)} files (usable={loaded}, skipped={skipped})")
+                print(f"  loaded {i}/{len(gltfs)} files (usable={loaded}, skipped={skipped})", flush=True)
         except Exception as exc:
             skipped += 1
-            print(f"  skip {p.name}: {exc}")
+            print(f"  skip {p.name}: {exc}", flush=True)
 
     if not all_tri:
         raise RuntimeError("No usable triangles loaded from glTF/GLB files")
 
+    print("Concatenating triangle arrays...", flush=True)
     tri = np.concatenate(all_tri, axis=0).astype(np.float64, copy=False)
+    print(f"Triangle count before CRS conversion: {tri.shape[0]}", flush=True)
+    print("Starting CRS/ECEF conversion...", flush=True)
     tri = _to_ecef(
         tri,
         args.input_crs,
@@ -425,8 +466,10 @@ def main() -> None:
         hkapi_cache_json=args.hkapi_cache_json.resolve(),
         hkapi_timeout_s=float(args.hkapi_timeout_s),
         hkapi_retries=int(args.hkapi_retries),
+        debug=bool(args.debug),
     )
 
+    print("Filtering invalid/degenerate triangles...", flush=True)
     finite_mask = np.isfinite(tri).all(axis=(1, 2))
     tri = tri[finite_mask]
     area = _triangle_area(tri)
@@ -436,6 +479,7 @@ def main() -> None:
 
     out_npy = args.output_triangles_npy.resolve()
     out_npy.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Saving triangles to {out_npy} ...", flush=True)
     np.save(out_npy, tri)
 
     mins = tri.reshape(-1, 3).min(axis=0).tolist()
@@ -457,8 +501,8 @@ def main() -> None:
     args.summary_json.parent.mkdir(parents=True, exist_ok=True)
     args.summary_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    print(f"Triangles saved: {out_npy} shape={tri.shape}")
-    print(f"Summary JSON: {args.summary_json.resolve()}")
+    print(f"Triangles saved: {out_npy} shape={tri.shape}", flush=True)
+    print(f"Summary JSON: {args.summary_json.resolve()}", flush=True)
 
     tri_arg = str(out_npy)
     if str(args.obs_path):

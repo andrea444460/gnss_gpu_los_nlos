@@ -21,8 +21,8 @@ is omitted). With ephemeris batching + BVH, multipath uses ``compute_multipath_b
 (one launch per chunk); otherwise per-epoch ``compute_multipath`` / CPU mesh fallback.
 
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
-(``*_plateau.glb``). Vertices are ECEF offsets from the trajectory centroid; Cesium uses
-``Matrix4.fromTranslation(pivotEcef)`` only (no ENU frame), matching the ray geometry.
+(``*_plateau.glb``). Vertices are **East/North/Up** offsets at the trajectory centroid; Cesium
+loads with ``Transforms.eastNorthUpToFixedFrame(pivotCart)`` so the mesh matches ECEF geometry.
 Use ``--plateau-glb-radius-m`` / ``--plateau-glb-max-tris`` to control size, or
 ``--plateau-glb-full-mesh`` for all triangles (still capped by ``max-tris``). Serve over HTTP.
 
@@ -137,6 +137,42 @@ def _unix_to_gps_tow_seconds(unix_s: float, leap_seconds: float = 18.0) -> float
     return gps_seconds % 604800.0
 
 
+def _detect_lat_lon_alt_keys(keys: set[str]) -> tuple[str, str, str | None]:
+    """Map CSV header keys to (lat_key, lon_key, alt_key_or_none). Keys must be stripped."""
+    kl = {k.lower(): k for k in keys}
+    lat_candidates = (
+        "latitude",
+        "lat",
+        "latitudine",
+        "lat_deg",
+        "phi",
+    )
+    lon_candidates = (
+        "longitude",
+        "lon",
+        "lng",
+        "longitudine",
+        "lon_deg",
+        "lambda",
+    )
+    alt_candidates = (
+        "altitude",
+        "alt",
+        "alt_m",
+        "h",
+        "height",
+        "height_m",
+        "altitudine",
+        "ellipsoidal_height",
+    )
+    lat_k = next((kl[c] for c in lat_candidates if c in kl), None)
+    lon_k = next((kl[c] for c in lon_candidates if c in kl), None)
+    if lat_k is None or lon_k is None:
+        raise ValueError("Could not detect latitude/longitude columns in CSV header.")
+    alt_k = next((kl[c] for c in alt_candidates if c in kl), None)
+    return lat_k, lon_k, alt_k
+
+
 def load_trajectory(csv_path, step=200):
     """Return positions, GPS TOW times, and raw CSV row count.
 
@@ -162,6 +198,32 @@ def load_trajectory(csv_path, step=200):
             )
             times.append(_to_gps_tow_seconds(float(r["GPS TOW (s)"])))
         return np.array(positions), np.array(times), int(n_csv)
+
+    # WGS84 lat/lon degrees + GPS TOW + optional altitude (e.g. stadium loop planners).
+    if rows_dict:
+        keys0 = set(rows_dict[0].keys())
+        try:
+            if "GPS TOW (s)" in keys0 and "ECEF X (m)" not in keys0:
+                lat_k, lon_k, alt_k = _detect_lat_lon_alt_keys(keys0)
+                n_csv = len(rows_dict)
+                for i in range(0, n_csv, step):
+                    r = rows_dict[i]
+                    lat = float(r[lat_k])
+                    lon = float(r[lon_k])
+                    if alt_k is not None and str(r.get(alt_k, "")).strip() != "":
+                        alt_m = float(r[alt_k])
+                    else:
+                        alt_m = 0.0
+                    ecef = _lla_deg_to_ecef(lat, lon, alt_m)
+                    positions.append([float(ecef[0]), float(ecef[1]), float(ecef[2])])
+                    times.append(_to_gps_tow_seconds(float(r["GPS TOW (s)"])))
+                if positions:
+                    print(
+                        "  Trajectory parser: detected lat/lon + GPS TOW header CSV, converted to ECEF."
+                    )
+                    return np.array(positions), np.array(times), int(n_csv)
+        except ValueError:
+            pass
 
     # KLT gt.csv mode: headerless rows [timestamp, lat, lon, alt].
     with open(csv_path, encoding="utf-8") as f:
@@ -1721,12 +1783,12 @@ if (plateauSpec && plateauSpec.url) {{
     vs.innerHTML += '<br/><strong>PLATEAU GLB:</strong> Same mesh family as LOS/NLOS — hide OSM buildings to compare.';
   }}
   const pivotCart = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
-  const modelMatrix = Cesium.Matrix4.fromTranslation(pivotCart);
+  const modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(pivotCart);
   const glbUrl = new URL(plateauSpec.url, window.location.href).href;
   Cesium.Model.fromGltfAsync({{
     url: glbUrl,
     modelMatrix,
-    // POSITION holds raw ECEF offsets (parallel to world axes); default glTF Y-up correction would rotate them.
+    // POSITION = East/North/Up metres at pivot (see gnss_gpu.viz.plateau_glb).
     upAxis: Cesium.Axis.Z,
     forwardAxis: Cesium.Axis.X,
   }})

@@ -261,7 +261,7 @@ def main() -> None:
     tow_end = _unwrap_tow(tow_start + (len(lat_lon_alt) - 1) * float(args.dt_s))
     print(
         f"[stadium] wrote reference trajectory: {ref_out.resolve()} "
-        f"(points={len(lat_lon)}, dt={float(args.dt_s):g}s, tow=[{_unwrap_tow(tow_start):.3f},{tow_end:.3f}])",
+        f"(points={len(lat_lon_alt)}, dt={float(args.dt_s):g}s, tow=[{_unwrap_tow(tow_start):.3f},{tow_end:.3f}])",
         flush=True,
     )
 

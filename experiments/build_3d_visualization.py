@@ -21,8 +21,8 @@ is omitted). With ephemeris batching + BVH, multipath uses ``compute_multipath_b
 (one launch per chunk); otherwise per-epoch ``compute_multipath`` / CPU mesh fallback.
 
 Optional ``--export-plateau-glb`` writes a **ROI-filtered** PLATEAU mesh next to the HTML
-(``*_plateau.glb``). Vertices are **East/North/Up** offsets at the trajectory centroid; Cesium
-loads with ``Transforms.eastNorthUpToFixedFrame(pivotCart)`` so the mesh matches ECEF geometry.
+(``*_plateau.glb``). Vertices are **ECEF offsets** from the trajectory centroid; Cesium loads with
+``Matrix4.fromTranslation(pivotCart)`` and axis hints so offsets match ray geometry.
 Use ``--plateau-glb-radius-m`` / ``--plateau-glb-max-tris`` to control size, or
 ``--plateau-glb-full-mesh`` for all triangles (still capped by ``max-tris``). Serve over HTTP.
 
@@ -56,7 +56,9 @@ Or pass ``--cesium-ion-token ...`` (injected into the HTML).
 
 Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
 
-Receiver markers and LOS/NLOS rays use **trajectory ellipsoid heights** embedded in the JSON so polylines match Python ray geometry relative to the PLATEAU GLB; they are **not** snapped to Ion terrain (terrain vs survey heights would skew intersections visually).
+Receiver markers and LOS/NLOS rays use **WGS84 ellipsoid heights** from the embedded JSON.
+The yellow trajectory polyline uses the same heights (**not** ``clampToGround``) so it lines up
+with the RX marker and rays; Ion terrain is for imagery context only.
 
 Satellite rays use a **reused pool of polyline ``Entity`` objects**: each epoch only updates positions/materials instead of destroying and rebuilding geometry.
 """
@@ -1783,12 +1785,12 @@ if (plateauSpec && plateauSpec.url) {{
     vs.innerHTML += '<br/><strong>PLATEAU GLB:</strong> Same mesh family as LOS/NLOS — hide OSM buildings to compare.';
   }}
   const pivotCart = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
-  const modelMatrix = Cesium.Transforms.eastNorthUpToFixedFrame(pivotCart);
+  const modelMatrix = Cesium.Matrix4.fromTranslation(pivotCart);
   const glbUrl = new URL(plateauSpec.url, window.location.href).href;
   Cesium.Model.fromGltfAsync({{
     url: glbUrl,
     modelMatrix,
-    // POSITION = East/North/Up metres at pivot (see gnss_gpu.viz.plateau_glb).
+    // POSITION = ECEF Cartesian offsets (m), parallel to world axes (see gnss_gpu.viz.plateau_glb).
     upAxis: Cesium.Axis.Z,
     forwardAxis: Cesium.Axis.X,
   }})
@@ -2143,14 +2145,19 @@ function showEpoch(ds, epochIdx) {{
 }}
 
 function drawTrajectory(ds) {{
-  const flat = [];
-  ds.trajectory.forEach(p => {{ flat.push(p[1], p[0]); }});
+  const positions = [];
+  ds.trajectory.forEach(p => {{
+    const lat = p[0];
+    const lon = p[1];
+    const h = p.length >= 3 ? p[2] : 0.0;
+    positions.push(Cesium.Cartesian3.fromDegrees(lon, lat, h));
+  }});
   viewer.entities.add({{
     polyline: {{
-      positions: Cesium.Cartesian3.fromDegreesArray(flat),
+      positions,
       width: 4,
       material: Cesium.Color.YELLOW.withAlpha(1.0),
-      clampToGround: true,
+      clampToGround: false,
     }},
   }});
 }}

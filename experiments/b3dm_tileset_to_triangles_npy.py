@@ -171,6 +171,21 @@ def _decode_draco_triangles_from_glb(glb_bytes: bytes) -> np.ndarray | None:
     return np.concatenate(parts, axis=0)
 
 
+def _gltf_yup_to_tile_local_zup(v_xyz: np.ndarray) -> np.ndarray:
+    """Map Draco/glTF **Y-up** vertex coords into **Z-up** local metres before ``tile.transform``.
+
+    Cesium 3D Tiles often concatenate rotations assuming glTF-style upright meshes; decoded Draco
+    POSITION accessors stay in glTF space (+Y up). Applying the tile root 4×4 directly otherwise
+    shears / twists footprints (~90°) vs imagery."""
+    v = np.asarray(v_xyz, dtype=np.float64).reshape(-1, 3)
+    out = np.empty_like(v)
+    # Right-handed +90° about +X: (x,y,z) → (x, -z, y); maps glTF +Y into tile-local +Z.
+    out[:, 0] = v[:, 0]
+    out[:, 1] = -v[:, 2]
+    out[:, 2] = v[:, 1]
+    return out
+
+
 def mesh_triangles_from_glb(glb_bytes: bytes, m_ecef: np.ndarray) -> np.ndarray | None:
     """Return triangles [T,3,3] ECEF or None if empty."""
     try:
@@ -201,7 +216,8 @@ def mesh_triangles_from_glb(glb_bytes: bytes, m_ecef: np.ndarray) -> np.ndarray 
     if (v.shape[0] > 0) and (np.max(np.ptp(v, axis=0)) < 1e-12):
         tri_local = _decode_draco_triangles_from_glb(glb_bytes)
         if tri_local is not None:
-            v_ecef = apply_transform_xyz(tri_local.reshape(-1, 3), m_ecef).reshape(-1, 3, 3)
+            tri_flat = _gltf_yup_to_tile_local_zup(tri_local.reshape(-1, 3)).reshape(-1, 3, 3)
+            v_ecef = apply_transform_xyz(tri_flat.reshape(-1, 3), m_ecef).reshape(-1, 3, 3)
             tri = np.asarray(v_ecef, dtype=np.float64)
         else:
             v_ecef = apply_transform_xyz(v, m_ecef)

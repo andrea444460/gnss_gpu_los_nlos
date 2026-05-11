@@ -1,55 +1,21 @@
 """Export PLATEAU building triangles to minimal binary GLB for CesiumJS.
 
-Vertices are **East / North / Up** offsets (metres) relative to the pivot, derived by
-projecting ECEF deltas onto the local tangent basis at ``pivot_ecef`` (same convention as
-``Transforms.eastNorthUpToFixedFrame``). Load in CesiumJS with:
+Vertices are **ECEF Cartesian offsets** from a pivot (metres), parallel to ECEF axes — same
+vectors as ``corner_ecef - pivot_ecef`` used for ray tracing.
 
-``modelMatrix = Transforms.eastNorthUpToFixedFrame(pivotCart)``,
-``upAxis: Axis.Z``, ``forwardAxis: Axis.X`` so glTF ``POSITION`` is interpreted as
-(x=east, y=north, z=up). Then ``world ≈ pivot + delta_ecef`` matches the ray-traced mesh.
+In CesiumJS load with ``modelMatrix = Matrix4.fromTranslation(pivotCart)`` and
+``upAxis: Axis.Z``, ``forwardAxis: Axis.X`` so glTF axis correction does not rotate those
+offsets; world corners match ``pivotCart + offset`` in the WGS84 ellipsoid frame.
 """
 
 from __future__ import annotations
 
 import json
-import math
 import struct
 from pathlib import Path
 from typing import Tuple
 
 import numpy as np
-
-
-def _ecef_to_lla_rad(x: float, y: float, z: float) -> tuple[float, float, float]:
-    """WGS-84 ECEF → (lat, lon, alt) radians / metres (compact duplicate of urban helpers)."""
-    a = 6378137.0
-    f = 1.0 / 298.257223563
-    e2 = 2.0 * f - f * f
-    lon = math.atan2(y, x)
-    p = math.hypot(x, y)
-    lat = math.atan2(z, p * (1.0 - e2))
-    for _ in range(10):
-        sin_lat = math.sin(lat)
-        n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-        lat = math.atan2(z + e2 * n * sin_lat, p)
-    sin_lat = math.sin(lat)
-    n = a / math.sqrt(1.0 - e2 * sin_lat * sin_lat)
-    alt = p / math.cos(lat) - n if abs(math.cos(lat)) > 1e-10 else abs(z) - n * (1.0 - e2)
-    return lat, lon, alt
-
-
-def _ecef_offsets_to_enu(offset_xyz: np.ndarray, pivot_ecef: np.ndarray) -> np.ndarray:
-    """Map ECEF Cartesian deltas (corners - pivot) to local East/North/Up [m] at pivot."""
-    pivot = np.asarray(pivot_ecef, dtype=np.float64).reshape(3)
-    lat, lon, _ = _ecef_to_lla_rad(float(pivot[0]), float(pivot[1]), float(pivot[2]))
-    sin_lat, cos_lat = math.sin(lat), math.cos(lat)
-    sin_lon, cos_lon = math.sin(lon), math.cos(lon)
-    east = np.array([-sin_lon, cos_lon, 0.0], dtype=np.float64)
-    north = np.array([-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat], dtype=np.float64)
-    up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat], dtype=np.float64)
-    r = np.column_stack([east, north, up])
-    d = np.asarray(offset_xyz, dtype=np.float64).reshape(-1, 3)
-    return d @ r
 
 
 def export_plateau_roi_glb(
@@ -112,7 +78,7 @@ def export_plateau_roi_glb(
     corners = tri[sel].reshape(-1, 3)
     n_corner = corners.shape[0]
 
-    pos = _ecef_offsets_to_enu(corners - pivot, pivot).astype(np.float32).reshape(-1)
+    pos = (corners - pivot).astype(np.float32).reshape(-1)
 
     xyz_min = pos.reshape(-1, 3).min(axis=0).tolist()
     xyz_max = pos.reshape(-1, 3).max(axis=0).tolist()

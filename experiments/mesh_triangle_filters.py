@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_REPO_PYTHON = Path(__file__).resolve().parents[1] / "python"
+if _REPO_PYTHON.is_dir() and str(_REPO_PYTHON) not in sys.path:
+    sys.path.insert(0, str(_REPO_PYTHON))
+
 import numpy as np
 
 from gnss_gpu.urban_signal_sim import ecef_to_lla

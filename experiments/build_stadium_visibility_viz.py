@@ -25,12 +25,17 @@ Example (Genoa, after you have ``ferraris_triangles.npy`` and ``BRDC*.rnx``)::
       --triangles-npy \"C:/Users/Me/Desktop/ferraris_triangles.npy\" ^
       --nav \"C:/Users/Me/Desktop/BRDC00IGS_R_20240890000_01D_MN.rnx\" ^
       --out-html \"C:/Users/Me/Desktop/luigi_ferraris_viz.html\" ^
+      --cesium-tileset-dir \"C:/Users/Me/Desktop/luigiFerrarisGeoLoc\" ^
       --alt-m 58 ^
       --gps-week 2318 ^
       --tow-start-s 43200 ^
       --dt-s 1 ^
       --area-name LuigiFerraris ^
       --cesium-ion-token \"$CESIUM_ION_TOKEN\"
+
+Serve the HTML folder over HTTP (``python -m http.server``). The tileset folder must stay next to
+the HTML (or use ``--cesium-tileset-url`` with a relative path). Textured tileset is visual only;
+LOS/NLOS still uses ``triangles.npy``.
 
 Use ``--dry-run`` to only write the reference CSV and print the suggested command.
 
@@ -221,6 +226,18 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="Forwarded to build_3d_visualization (positive lifts RX/traj/rays vs WGS84 h when Ion terrain looks high).",
     )
+    viz.add_argument(
+        "--cesium-tileset-dir",
+        type=Path,
+        default=None,
+        help="Folder with tileset.json (textured 3D Tiles overlay in viewer; visual only).",
+    )
+    viz.add_argument(
+        "--cesium-tileset-url",
+        type=str,
+        default="",
+        help="Explicit tileset.json path/URL relative to HTML (overrides --cesium-tileset-dir).",
+    )
 
     return p.parse_args()
 
@@ -318,6 +335,10 @@ def main() -> None:
         cmd.append("--atmo-bending-lite")
     if args.export_mesh_glb:
         cmd.append("--export-mesh-glb")
+    if args.cesium_tileset_dir is not None:
+        cmd += ["--cesium-tileset-dir", str(args.cesium_tileset_dir.resolve())]
+    if args.cesium_tileset_url.strip():
+        cmd += ["--cesium-tileset-url", args.cesium_tileset_url.strip()]
 
     print(f"[stadium] repo-root={args.repo_root.resolve()}", flush=True)
     print(f"[stadium] triangles-npy={args.triangles_npy.resolve()}", flush=True)

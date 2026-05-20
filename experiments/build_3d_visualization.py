@@ -3,7 +3,7 @@
 
 Creates a standalone HTML file using CesiumJS (free tier) that shows:
   - 3D globe with terrain + buildings (Cesium OSM Buildings)
-  - Receiver trajectory (yellow line)
+  - Receiver position per epoch (yellow trajectory polyline optional via ``--show-trajectory-polyline``)
   - Per-epoch satellite rays (green=LOS, red=NLOS)
   - Animated flythrough
 
@@ -55,6 +55,11 @@ https://cesium.com/ion/signup — then either:
 Or pass ``--cesium-ion-token ...`` (injected into the HTML).
 
 Without a token the viewer still runs with the default ellipsoid (no world terrain / OSM buildings).
+
+Optional ``--cesium-tileset-dir`` / ``--cesium-tileset-url`` loads a **local 3D Tiles** folder (e.g. the
+original ``b3dm`` tileset with textures) in CesiumJS. Python LOS/NLOS still uses ``triangles.npy``;
+the textured tileset is visual context only. When a tileset is configured, the gray LOS debug GLB
+(if exported) is hidden by default — toggle **Show LOS debug mesh** in the viewer.
 
 Receiver markers and LOS/NLOS rays use **WGS84 ellipsoid heights** from the embedded JSON.
 The yellow trajectory polyline uses the same heights (**not** ``clampToGround``) so it lines up
@@ -1500,7 +1505,13 @@ _ION_IAT_CHECK_JS = """<script>
 """
 
 
-def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None):
+def generate_html(
+    datasets,
+    output_path,
+    cesium_ion_token: Optional[str] = None,
+    *,
+    show_trajectory_polyline: bool = False,
+):
     """Generate standalone HTML with CesiumJS visualization."""
     export_sets = []
     for ds in datasets:
@@ -1687,6 +1698,14 @@ def generate_html(datasets, output_path, cesium_ion_token: Optional[str] = None)
         <input type="checkbox" id="chkHideOsm"/> Hide Ion OSM buildings
       </label>
     </div>
+    <div class="row" id="stadiumTilesetToggleRow" style="display:none;">
+      <label title="Original local 3D Tiles with textures (visual only; LOS uses triangles.npy)">
+        <input type="checkbox" id="chkHideStadiumTileset"/> Hide textured tileset
+      </label>
+      <label title="Semi-transparent gray mesh exported from triangles.npy (debug overlay)">
+        <input type="checkbox" id="chkShowLosMesh"/> Show LOS debug mesh
+      </label>
+    </div>
     <div class="row">
       <label for="epochSlider">Epoch</label>
       <input type="range" id="epochSlider" min="0" max="0" value="0" />
@@ -1812,10 +1831,34 @@ if (ionToken) {{
 }}
 
 const datasets = {data_json};
+const SHOW_TRAJECTORY_POLYLINE = {json.dumps(bool(show_trajectory_polyline))};
+const tilesetSpec = datasets[0] && datasets[0].cesiumTileset;
+const hasTexturedTileset = !!(tilesetSpec && tilesetSpec.url);
+let localStadiumTileset = null;
+let losMeshModel = null;
+
+if (hasTexturedTileset) {{
+  const tsRow = document.getElementById('stadiumTilesetToggleRow');
+  if (tsRow) tsRow.style.display = 'flex';
+  const tilesetUrl = new URL(tilesetSpec.url, window.location.href).href;
+  Cesium.Cesium3DTileset.fromUrl(tilesetUrl)
+    .then(tileset => {{
+      localStadiumTileset = tileset;
+      viewer.scene.primitives.add(tileset);
+      const chkHide = document.getElementById('chkHideStadiumTileset');
+      if (chkHide && chkHide.checked) tileset.show = false;
+    }})
+    .catch(e => console.warn('Stadium tileset load failed (serve tileset over http://):', e));
+  const vs = document.getElementById('vizSources');
+  if (vs) {{
+    vs.innerHTML += '<br/><strong>Textured tileset:</strong> local 3D Tiles (visual). LOS/NLOS rays still use triangles.npy in Python.';
+  }}
+}}
+
 const plateauSpec = datasets[0] && datasets[0].plateauModel;
 if (plateauSpec && plateauSpec.url) {{
   const vs = document.getElementById('vizSources');
-  if (vs) {{
+  if (vs && !hasTexturedTileset) {{
     vs.innerHTML += '<br/><strong>PLATEAU GLB:</strong> Same mesh family as LOS/NLOS — hide OSM buildings to compare.';
   }}
   const pivotCart = Cesium.Cartesian3.fromDegrees(plateauSpec.lon, plateauSpec.lat, plateauSpec.height);
@@ -1829,7 +1872,12 @@ if (plateauSpec && plateauSpec.url) {{
     forwardAxis: Cesium.Axis.X,
   }})
     .then(model => {{
+      losMeshModel = model;
       viewer.scene.primitives.add(model);
+      const chkShow = document.getElementById('chkShowLosMesh');
+      if (hasTexturedTileset) {{
+        model.show = !!(chkShow && chkShow.checked);
+      }}
     }})
     .catch(e => console.warn('PLATEAU GLB load failed (use http://localhost; GLB next to HTML):', e));
 }}
@@ -1839,6 +1887,18 @@ if (plateauSpec && plateauSpec.url) {{
   if (chkHideOsm) {{
     chkHideOsm.addEventListener('change', (e) => {{
       if (osmBuildingsTileset) osmBuildingsTileset.show = !e.target.checked;
+    }});
+  }}
+  const chkHideStadiumTileset = document.getElementById('chkHideStadiumTileset');
+  if (chkHideStadiumTileset) {{
+    chkHideStadiumTileset.addEventListener('change', (e) => {{
+      if (localStadiumTileset) localStadiumTileset.show = !e.target.checked;
+    }});
+  }}
+  const chkShowLosMesh = document.getElementById('chkShowLosMesh');
+  if (chkShowLosMesh) {{
+    chkShowLosMesh.addEventListener('change', (e) => {{
+      if (losMeshModel) losMeshModel.show = !!e.target.checked;
     }});
   }}
   const chkMp = document.getElementById('chkShowMultipath');
@@ -2179,6 +2239,7 @@ function showEpoch(ds, epochIdx) {{
 }}
 
 function drawTrajectory(ds) {{
+  if (!SHOW_TRAJECTORY_POLYLINE) return;
   const positions = [];
   ds.trajectory.forEach(p => {{
     const lat = p[0];
@@ -2462,6 +2523,34 @@ const {{ chromium }} = require('playwright');
         print("Video recording failed — HTML file can still be opened in a browser")
 
 
+def _resolve_cesium_tileset_url(out_html: str, *, tileset_dir: str = "", tileset_url: str = "") -> str:
+    """Return a URL/path for ``tileset.json``, relative to the HTML file when possible."""
+    explicit = (tileset_url or "").strip()
+    if explicit:
+        return explicit.replace("\\", "/")
+    td = (tileset_dir or "").strip()
+    if not td:
+        return ""
+    p = Path(td).resolve()
+    if p.is_dir():
+        p = p / "tileset.json"
+    if not p.is_file():
+        raise FileNotFoundError(f"tileset.json not found: {p}")
+    out_dir = Path(out_html).resolve().parent
+    try:
+        rel = os.path.relpath(p, out_dir).replace("\\", "/")
+    except ValueError:
+        rel = p.as_posix()
+    return rel
+
+
+def _attach_cesium_tileset_spec(ds: dict, out_html: str, *, tileset_dir: str = "", tileset_url: str = "") -> None:
+    url = _resolve_cesium_tileset_url(out_html, tileset_dir=tileset_dir, tileset_url=tileset_url)
+    if url:
+        ds["cesiumTileset"] = {"url": url}
+        print(f"Cesium tileset overlay: {url}", flush=True)
+
+
 def _export_plateau_glb_sidecar(
     ds: dict,
     plateau_dir: str,
@@ -2634,6 +2723,18 @@ def main(argv=None):
         default=os.environ.get("CESIUM_ION_TOKEN", ""),
         help="Cesium ion token for terrain + OSM buildings (or set CESIUM_ION_TOKEN)",
     )
+    parser.add_argument(
+        "--cesium-tileset-dir",
+        type=str,
+        default="",
+        help="Folder containing tileset.json (local 3D Tiles with textures, visual overlay only)",
+    )
+    parser.add_argument(
+        "--cesium-tileset-url",
+        type=str,
+        default="",
+        help="Explicit tileset.json URL/path (relative to HTML). Overrides --cesium-tileset-dir when set.",
+    )
     parser.add_argument("--record-video", action="store_true", help="Try Playwright screen recording (needs Node)")
     parser.add_argument(
         "--viz-multipath",
@@ -2701,7 +2802,12 @@ def main(argv=None):
         type=float,
         default=0.0,
         help="Add this delta [m] to WGS84 ellipsoidal height for every trajectory point after load "
-        "(shifts RX + rays + yellow path consistently; try +5…+20 when Cesium terrain looks high vs survey).",
+        "(shifts RX + rays + optional yellow path consistently; try +5…+20 when Cesium terrain looks high vs survey).",
+    )
+    parser.add_argument(
+        "--show-trajectory-polyline",
+        action="store_true",
+        help="Draw the full receiver path as a yellow polyline in the Cesium viewer (off by default).",
     )
     args = parser.parse_args(argv)
 
@@ -2786,7 +2892,12 @@ def main(argv=None):
         html_path = os.path.join(p["out_dir"], "los_nlos_3d.html")
         if getattr(args, "export_plateau_glb", False):
             print("Note: --export-plateau-glb is ignored with --legacy (two areas); run without --legacy per scene.")
-        generate_html([shinjuku, odaiba], html_path, cesium_ion_token=tok or None)
+        generate_html(
+            [shinjuku, odaiba],
+            html_path,
+            cesium_ion_token=tok or None,
+            show_trajectory_polyline=bool(getattr(args, "show_trajectory_polyline", False)),
+        )
         print(f"HTML: {html_path}")
         if args.record_video:
             video_path = os.path.join(p["out_dir"], "los_nlos_3d.webm")
@@ -2831,6 +2942,15 @@ def main(argv=None):
     _out_dir = os.path.dirname(out_html)
     if _out_dir:
         os.makedirs(_out_dir, exist_ok=True)
+    try:
+        _attach_cesium_tileset_spec(
+            ds,
+            out_html,
+            tileset_dir=str(getattr(args, "cesium_tileset_dir", "") or ""),
+            tileset_url=str(getattr(args, "cesium_tileset_url", "") or ""),
+        )
+    except FileNotFoundError as e:
+        parser.error(str(e))
     export_glb = bool(getattr(args, "export_plateau_glb", False) or getattr(args, "export_mesh_glb", False))
     if export_glb:
         try:
@@ -2858,7 +2978,12 @@ def main(argv=None):
         except Exception as e:
             print(f"PLATEAU GLB export failed: {e}")
             ds["plateauModel"] = None
-    generate_html([ds], out_html, cesium_ion_token=tok or None)
+    generate_html(
+        [ds],
+        out_html,
+        cesium_ion_token=tok or None,
+        show_trajectory_polyline=bool(getattr(args, "show_trajectory_polyline", False)),
+    )
     print(f"HTML: {out_html}")
     if not tok:
         print("Tip: set CESIUM_ION_TOKEN or pass --cesium-ion-token for world terrain + OSM buildings.")

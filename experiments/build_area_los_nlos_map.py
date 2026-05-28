@@ -6,7 +6,7 @@ Pipeline:
 - sample road points every N meters
 - evaluate LOS/NLOS counts over time using NAV ephemeris + building mesh
 - optional DEM horizon prefilter for terrain blocking
-- output CSV and HTML map
+- output CSV (HTML rendering moved to dedicated script)
 """
 
 from __future__ import annotations
@@ -23,8 +23,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "python") not in sys.path:
     sys.path.insert(0, str(_ROOT / "python"))
 
-import branca.colormap as bcm
-import folium
 import numpy as np
 import rasterio
 from rasterio.warp import Resampling, calculate_default_transform, reproject
@@ -105,6 +103,52 @@ def _load_dem_wgs84_grid(dem_path: Path) -> tuple[np.ndarray, float, float, floa
     return dem, lat0, lon0, lat_step, lon_step
 
 
+def _sample_dem_wgs84_bilinear(
+    dem_h: np.ndarray,
+    lat0_deg: float,
+    lon0_deg: float,
+    lat_step_deg: float,
+    lon_step_deg: float,
+    lats_deg: np.ndarray,
+    lons_deg: np.ndarray,
+) -> np.ndarray:
+    h = np.asarray(dem_h, dtype=np.float64)
+    lats = np.asarray(lats_deg, dtype=np.float64).ravel()
+    lons = np.asarray(lons_deg, dtype=np.float64).ravel()
+    out = np.full(lats.shape, np.nan, dtype=np.float64)
+    if h.ndim != 2 or h.shape[0] < 2 or h.shape[1] < 2:
+        return out
+
+    rows, cols = h.shape
+    rr = (lats - float(lat0_deg)) / float(lat_step_deg)
+    cc = (lons - float(lon0_deg)) / float(lon_step_deg)
+    valid = np.isfinite(rr) & np.isfinite(cc) & (rr >= 0.0) & (cc >= 0.0) & (rr < (rows - 1)) & (cc < (cols - 1))
+    if not np.any(valid):
+        return out
+
+    rv = rr[valid]
+    cv = cc[valid]
+    r0 = np.floor(rv).astype(np.int64)
+    c0 = np.floor(cv).astype(np.int64)
+    r1 = r0 + 1
+    c1 = c0 + 1
+    fr = rv - r0
+    fc = cv - c0
+
+    z00 = h[r0, c0]
+    z01 = h[r0, c1]
+    z10 = h[r1, c0]
+    z11 = h[r1, c1]
+    finite = np.isfinite(z00) & np.isfinite(z01) & np.isfinite(z10) & np.isfinite(z11)
+    if np.any(finite):
+        z0 = (1.0 - fc[finite]) * z00[finite] + fc[finite] * z01[finite]
+        z1 = (1.0 - fc[finite]) * z10[finite] + fc[finite] * z11[finite]
+        zv = (1.0 - fr[finite]) * z0 + fr[finite] * z1
+        idx_valid = np.flatnonzero(valid)
+        out[idx_valid[finite]] = zv
+    return out
+
+
 def _cpu_preprocess_chunk(
     rx_chunk: np.ndarray,
     sat_b: np.ndarray,
@@ -137,43 +181,6 @@ def _cpu_preprocess_chunk(
     return visible, terrain_blocked, terrain_blocked_visible, sat_work
 
 
-def _build_html_map(rows: list[dict], out_html: Path, *, metric_key: str = "mean_n_los") -> None:
-    if not rows:
-        raise ValueError("No rows for HTML map.")
-    lat0 = float(np.mean([r["lat_deg"] for r in rows]))
-    lon0 = float(np.mean([r["lon_deg"] for r in rows]))
-    m = folium.Map(location=[lat0, lon0], zoom_start=14, tiles="OpenStreetMap")
-    vals = np.asarray([float(r[metric_key]) for r in rows], dtype=np.float64)
-    vmin = float(np.nanpercentile(vals, 5))
-    vmax = float(np.nanpercentile(vals, 95))
-    if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
-        vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals) + 1.0)
-    cmap = bcm.LinearColormap(["#d73027", "#fee08b", "#1a9850"], vmin=vmin, vmax=vmax)
-    cmap.caption = metric_key
-    cmap.add_to(m)
-    for r in rows:
-        metric = float(r[metric_key])
-        popup = (
-            f"LOS mean: {r['mean_n_los']:.2f}<br>"
-            f"NLOS mean: {r['mean_n_nlos']:.2f}<br>"
-            f"Visible mean: {r['mean_n_visible']:.2f}<br>"
-            f"Terrain blocked mean: {r['mean_n_terrain_blocked']:.2f}<br>"
-            f"Terrain blocked visible mean: {r.get('mean_n_terrain_blocked_visible', 0.0):.2f}<br>"
-            f"Highway: {r.get('highway','')}"
-        )
-        folium.CircleMarker(
-            location=[float(r["lat_deg"]), float(r["lon_deg"])],
-            radius=3,
-            weight=0,
-            fill=True,
-            fill_color=cmap(metric),
-            fill_opacity=0.8,
-            popup=popup,
-        ).add_to(m)
-    out_html.parent.mkdir(parents=True, exist_ok=True)
-    m.save(str(out_html))
-
-
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--south", type=float, required=True)
@@ -183,9 +190,21 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--triangles-npy", type=Path, required=True)
     p.add_argument("--nav", type=Path, required=True)
     p.add_argument("--out-csv", type=Path, required=True)
-    p.add_argument("--out-html", type=Path, required=True)
     p.add_argument("--step-m", type=float, default=25.0, help="Road sampling step in meters.")
-    p.add_argument("--rx-alt-m", type=float, default=1.5, help="Receiver altitude above ellipsoid [m].")
+    p.add_argument("--rx-alt-m", type=float, default=1.5, help="Receiver altitude above ellipsoid [m] in fixed mode.")
+    p.add_argument(
+        "--rx-alt-mode",
+        type=str,
+        choices=["fixed", "dem"],
+        default="fixed",
+        help="Receiver altitude mode: fixed ellipsoid altitude or DEM elevation + antenna height.",
+    )
+    p.add_argument(
+        "--rx-ant-height-m",
+        type=float,
+        default=1.5,
+        help="Antenna height above local DEM terrain [m] when --rx-alt-mode dem.",
+    )
     p.add_argument("--include-pedestrian", action="store_true")
     p.add_argument("--tile-size-m", type=float, default=0.0, help="Spatial tile size for scaling hooks.")
     p.add_argument("--dt-s", type=float, default=300.0, help="Time sampling step [s].")
@@ -238,7 +257,6 @@ def main() -> None:
         "compute_preprocess_cuda_s": 0.0,
         "compute_raytrace_s": 0.0,
         "write_csv_s": 0.0,
-        "write_html_s": 0.0,
     }
     bbox = BBox(args.south, args.west, args.north, args.east)
 
@@ -357,8 +375,37 @@ def main() -> None:
     tblk_vis_sum = np.zeros(n_points, dtype=np.float64)
     n_epochs_total = 0
 
+    point_lats = np.asarray([float(p["lat_deg"]) for p in points], dtype=np.float64)
+    point_lons = np.asarray([float(p["lon_deg"]) for p in points], dtype=np.float64)
+    if args.rx_alt_mode == "dem":
+        if dem_grid is None or dem_meta is None:
+            raise RuntimeError("--rx-alt-mode dem requires DEM (use --dem-path or --dem-auto-download).")
+        lat0, lon0, lat_step, lon_step = dem_meta
+        dem_z = _sample_dem_wgs84_bilinear(dem_grid, lat0, lon0, lat_step, lon_step, point_lats, point_lons)
+        n_valid = int(np.sum(np.isfinite(dem_z)))
+        n_total = int(dem_z.size)
+        if n_valid <= 0:
+            raise RuntimeError("DEM altitude sampling failed for all road points.")
+        if n_valid < n_total:
+            fallback_alt = float(np.nanmedian(dem_z[np.isfinite(dem_z)])) + float(args.rx_ant_height_m)
+            dem_z = np.where(np.isfinite(dem_z), dem_z, fallback_alt - float(args.rx_ant_height_m))
+            print(
+                f"[area] rx-alt dem coverage: {n_valid}/{n_total} points; "
+                f"fallback for {n_total - n_valid} points",
+                flush=True,
+            )
+        rx_alts = dem_z + float(args.rx_ant_height_m)
+        print(
+            f"[area] rx-alt mode=dem ant_height={args.rx_ant_height_m:.2f}m "
+            f"alt_range=[{float(np.nanmin(rx_alts)):.2f},{float(np.nanmax(rx_alts)):.2f}]",
+            flush=True,
+        )
+    else:
+        rx_alts = np.full((len(points),), float(args.rx_alt_m), dtype=np.float64)
+        print(f"[area] rx-alt mode=fixed alt={float(args.rx_alt_m):.2f}m", flush=True)
+
     point_ecef = np.asarray(
-        [_lla_deg_to_ecef(p["lat_deg"], p["lon_deg"], float(args.rx_alt_m)) for p in points],
+        [_lla_deg_to_ecef(point_lats[i], point_lons[i], float(rx_alts[i])) for i in range(len(points))],
         dtype=np.float64,
     )
     p_chunk = max(1, int(args.point_batch_chunk))
@@ -544,15 +591,12 @@ def main() -> None:
             )
     profile["write_csv_s"] = time.perf_counter() - t_csv
 
-    t_html = time.perf_counter()
-    _build_html_map(rows, args.out_html, metric_key="mean_n_los")
-    profile["write_html_s"] = time.perf_counter() - t_html
     dt_total = time.perf_counter() - t0
     point_epochs = float(n_points) * float(tow_samples.size)
     point_epochs_per_s = point_epochs / max(1e-9, profile["compute_total_s"])
     print(
         f"[area] done: points={n_points}, epochs={tow_samples.size}, "
-        f"csv={args.out_csv}, html={args.out_html}, runtime_s={dt_total:.1f}"
+        f"csv={args.out_csv}, runtime_s={dt_total:.1f}"
     )
     print(
         "[profile][summary] "
@@ -563,7 +607,7 @@ def main() -> None:
         f"compute={profile['compute_total_s']:.2f}s "
         f"(eph={profile['compute_ephemeris_s']:.2f}s preprocess={profile['compute_preprocess_s']:.2f}s "
         f"preprocess_cuda={profile['compute_preprocess_cuda_s']:.2f}s raytrace={profile['compute_raytrace_s']:.2f}s) "
-        f"write_csv={profile['write_csv_s']:.2f}s write_html={profile['write_html_s']:.2f}s "
+        f"write_csv={profile['write_csv_s']:.2f}s "
         f"throughput={point_epochs_per_s:,.0f} point-epochs/s",
         flush=True,
     )

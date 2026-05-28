@@ -10,6 +10,7 @@ Generates a visualization showing:
 Uses sample_plateau.gml or fetched PLATEAU data.
 """
 
+import argparse
 import math
 import os
 import sys
@@ -187,17 +188,34 @@ def render_verification(rx_ecef, sat_ecef, prn_list, building_model,
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Verify LOS/NLOS classification against city mesh.")
+    parser.add_argument("--plateau-gml", type=str, default="", help="Single PLATEAU GML path (default sample file).")
+    parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU zone for --plateau-gml.")
+    parser.add_argument(
+        "--triangles-npy",
+        type=str,
+        default="",
+        help="Alternative mesh input: triangles .npy with shape [N,3,3] in ECEF meters.",
+    )
+    args = parser.parse_args()
+
     out_dir = os.path.join(os.path.dirname(__file__), "results", "los_nlos_verification")
     os.makedirs(out_dir, exist_ok=True)
 
-    # --- Load sample PLATEAU data ---
-    data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    gml_path = os.path.join(data_dir, "sample_plateau.gml")
-
-    print(f"Loading PLATEAU model: {gml_path}")
-    loader = PlateauLoader(zone=9)
-    building = loader.load_citygml(gml_path)
-    print(f"  Loaded {len(building.triangles)} triangles")
+    if args.triangles_npy:
+        tri = np.asarray(np.load(args.triangles_npy), dtype=np.float64)
+        if tri.ndim != 3 or tri.shape[1:] != (3, 3):
+            raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri.shape}")
+        building = BuildingModel(tri)
+        print(f"Loading mesh from triangles npy: {args.triangles_npy}")
+        print(f"  Loaded {len(building.triangles)} triangles")
+    else:
+        data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        gml_path = args.plateau_gml.strip() or os.path.join(data_dir, "sample_plateau.gml")
+        print(f"Loading PLATEAU model: {gml_path}")
+        loader = PlateauLoader(zone=int(args.plateau_zone))
+        building = loader.load_citygml(gml_path)
+        print(f"  Loaded {len(building.triangles)} triangles")
 
     # Receiver position: center of the sample buildings (Tokyo Station area)
     # Compute centroid of all building vertices

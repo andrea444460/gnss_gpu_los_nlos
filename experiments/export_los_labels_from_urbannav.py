@@ -33,13 +33,16 @@ if str(_PROJECT_ROOT / "python") not in sys.path:
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.ephemeris import Ephemeris
 from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
+from gnss_gpu.io.dem_download import download_dem_for_bbox, trajectory_bbox_with_buffer
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.io.rinex import read_rinex_obs
 from gnss_gpu.raytrace import BuildingModel
+from gnss_gpu.terrain_horizon import HorizonConfig, TerrainHorizonMask
 from gnss_gpu.urban_signal_sim import (
     UrbanSignalSimulator,
     _sat_elevation_azimuth,
     apply_atmo_bending_lite,
+    ecef_to_lla,
     virtual_satellite_ecef_lite,
 )
 
@@ -402,6 +405,65 @@ def _parse_args() -> argparse.Namespace:
         default=10.0,
         help="Temperature [deg C] for the lite atmospheric-bending model.",
     )
+    parser.add_argument(
+        "--dem-path",
+        type=Path,
+        default=None,
+        help="Optional DEM raster for terrain horizon prefilter (quick mountain blocking).",
+    )
+    parser.add_argument(
+        "--terrain-max-distance-m",
+        type=float,
+        default=20000.0,
+        help="Max radial distance [m] for terrain horizon tracing (default: 20000).",
+    )
+    parser.add_argument(
+        "--terrain-step-m",
+        type=float,
+        default=60.0,
+        help="Radial sample step [m] for terrain horizon tracing (default: 60).",
+    )
+    parser.add_argument(
+        "--terrain-azimuth-step-deg",
+        type=float,
+        default=2.0,
+        help="Azimuth bin step [deg] for horizon profile (default: 2).",
+    )
+    parser.add_argument(
+        "--terrain-cache-resolution-m",
+        type=float,
+        default=50.0,
+        help="Receiver position quantization [m] for horizon cache (default: 50).",
+    )
+    parser.add_argument(
+        "--terrain-margin-deg",
+        type=float,
+        default=0.0,
+        help="Extra safety margin added to terrain horizon [deg].",
+    )
+    parser.add_argument(
+        "--dem-auto-download",
+        action="store_true",
+        help="Automatically download a DEM around the reference trajectory and use it as --dem-path.",
+    )
+    parser.add_argument(
+        "--dem-auto-out",
+        type=Path,
+        default=Path("experiments/results/auto_dem.tif"),
+        help="Output GeoTIFF path for auto-downloaded DEM.",
+    )
+    parser.add_argument(
+        "--dem-auto-zoom",
+        type=int,
+        default=12,
+        help="Slippy zoom level for DEM tile download (higher=more detail, default 12).",
+    )
+    parser.add_argument(
+        "--dem-auto-buffer-m",
+        type=float,
+        default=3000.0,
+        help="Extra bbox buffer [m] around trajectory for DEM auto-download.",
+    )
     return parser.parse_args()
 
 
@@ -453,6 +515,45 @@ def main() -> None:
         print("  atmo bending lite: disabled")
     has_bvh_batch = hasattr(bvh, "check_los_batch") and hasattr(bvh, "compute_multipath_batch")
     print(f"  BVH batch path: {'enabled' if has_bvh_batch else 'disabled (fallback per-epoch)'}")
+
+    terrain_mask: TerrainHorizonMask | None = None
+    dem_path = args.dem_path
+    if dem_path is None and args.dem_auto_download:
+        ll = []
+        for p in np.asarray(track.rx_ecef, dtype=np.float64):
+            lat_rad, lon_rad, _h = ecef_to_lla(float(p[0]), float(p[1]), float(p[2]))
+            ll.append([math.degrees(lat_rad), math.degrees(lon_rad)])
+        latlon = np.asarray(ll, dtype=np.float64)
+        south, west, north, east = trajectory_bbox_with_buffer(
+            latlon, buffer_m=float(args.dem_auto_buffer_m)
+        )
+        dem_out, n_tiles = download_dem_for_bbox(
+            south=south,
+            west=west,
+            north=north,
+            east=east,
+            output_tif=args.dem_auto_out,
+            zoom=int(args.dem_auto_zoom),
+        )
+        dem_path = dem_out
+        print(f"  DEM auto-download: {dem_out} ({n_tiles} tiles)")
+
+    if dem_path:
+        cfg = HorizonConfig(
+            max_distance_m=float(args.terrain_max_distance_m),
+            sample_step_m=float(args.terrain_step_m),
+            azimuth_step_deg=float(args.terrain_azimuth_step_deg),
+            cache_resolution_m=float(args.terrain_cache_resolution_m),
+            margin_deg=float(args.terrain_margin_deg),
+        )
+        terrain_mask = TerrainHorizonMask(dem_path, cfg)
+        print(
+            "  terrain horizon prefilter: enabled "
+            f"(dem={dem_path}, max_dist={cfg.max_distance_m:g}m, "
+            f"step={cfg.sample_step_m:g}m, az_step={cfg.azimuth_step_deg:g}deg)"
+        )
+    else:
+        print("  terrain horizon prefilter: disabled")
 
     print("[3/5] Preparing epoch jobs...")
     jobs: list[EpochJob] = []
@@ -540,6 +641,7 @@ def main() -> None:
                 "elevation_deg",
                 "azimuth_deg",
                 "excess_delay_m",
+                "terrain_blocked",
                 "rx_x_m",
                 "rx_y_m",
                 "rx_z_m",
@@ -618,8 +720,14 @@ def main() -> None:
                             temp_c=usim.atmo_temp_c,
                         )
                     visible = el_vis >= usim.elevation_mask_rad
+                    terrain_blocked = np.zeros(len(selected_ids), dtype=bool)
+                    if terrain_mask is not None:
+                        terrain_visible = terrain_mask.terrain_visible_mask(job.rx_xyz, sat_ecef)
+                        terrain_blocked = ~terrain_visible
+                        visible = np.logical_and(visible, terrain_visible)
                     is_los = np.ones(len(selected_ids), dtype=bool)
                     is_los[visible] = los_pad[bi, : len(selected_ids)][visible]
+                    is_los[~visible] = False
                     excess_delays = np.zeros(len(selected_ids), dtype=np.float64)
                     excess_delays[visible] = delay_pad[bi, : len(selected_ids)][visible]
 
@@ -646,6 +754,7 @@ def main() -> None:
                                 "elevation_deg": f"{elev_deg:.3f}",
                                 "azimuth_deg": f"{az_deg:.3f}",
                                 "excess_delay_m": f"{float(excess_delays[i]):.3f}",
+                                "terrain_blocked": int(bool(terrain_blocked[i])),
                                 "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
                                 "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
                                 "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
@@ -666,6 +775,12 @@ def main() -> None:
                         sat_clk=sat_clk,
                         prn_list=prn_ints,
                     )
+                    terrain_blocked = np.zeros(len(selected_ids), dtype=bool)
+                    if terrain_mask is not None:
+                        terrain_visible = terrain_mask.terrain_visible_mask(job.rx_xyz, sat_ecef)
+                        terrain_blocked = ~terrain_visible
+                        result["visible"] = np.logical_and(result["visible"], terrain_visible)
+                        result["is_los"] = np.logical_and(result["is_los"], terrain_visible)
 
                     for i, sat_id in enumerate(selected_ids):
                         parsed = _parse_sat_id(sat_id)
@@ -690,6 +805,7 @@ def main() -> None:
                                 "elevation_deg": f"{elev_deg:.3f}",
                                 "azimuth_deg": f"{az_deg:.3f}",
                                 "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
+                                "terrain_blocked": int(bool(terrain_blocked[i])),
                                 "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
                                 "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
                                 "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",

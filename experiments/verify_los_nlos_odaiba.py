@@ -7,6 +7,7 @@ geometry at sampled epochs to generate verification images.
 """
 
 import csv
+import argparse
 import math
 import os
 import time
@@ -19,6 +20,7 @@ import numpy as np
 
 from gnss_gpu.io.plateau import PlateauLoader
 from gnss_gpu.bvh import BVHAccelerator
+from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.urban_signal_sim import UrbanSignalSimulator, ecef_to_lla, _sat_elevation_azimuth
 
 
@@ -199,14 +201,27 @@ def render_epoch(rx_ecef, sat_ecef, prn_list, bvh, result, epoch_idx, traj_enu, 
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Verify LOS/NLOS geometry on Odaiba trajectory.")
+    parser.add_argument("--plateau-dir", type=str, default="experiments/data/plateau_odaiba", help="PLATEAU directory")
+    parser.add_argument("--plateau-zone", type=int, default=9, help="PLATEAU zone")
+    parser.add_argument("--triangles-npy", type=str, default="", help="Alternative ECEF mesh .npy [N,3,3]")
+    args = parser.parse_args()
+
     out_dir = os.path.join(os.path.dirname(__file__), "results", "los_nlos_verification")
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load PLATEAU
-    print("Loading PLATEAU Odaiba (249K triangles)...")
+    print("Loading mesh for Odaiba verification...")
     t0 = time.time()
-    loader = PlateauLoader(zone=9)
-    building = loader.load_directory("experiments/data/plateau_odaiba")
+    if args.triangles_npy:
+        tri = np.asarray(np.load(args.triangles_npy), dtype=np.float64)
+        if tri.ndim != 3 or tri.shape[1:] != (3, 3):
+            raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri.shape}")
+        building = BuildingModel(tri)
+        print(f"  source: triangles npy ({args.triangles_npy})")
+    else:
+        loader = PlateauLoader(zone=int(args.plateau_zone))
+        building = loader.load_directory(args.plateau_dir)
+        print(f"  source: PLATEAU directory ({args.plateau_dir})")
     print(f"  Loaded {len(building.triangles)} triangles in {time.time()-t0:.1f}s")
 
     # Build BVH

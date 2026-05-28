@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +29,12 @@ if _PYTHON_PKG.is_dir() and str(_PYTHON_PKG) not in sys.path:
 
 from gnss_gpu.io.osm_buildings import buildings_to_triangles_ecef  # noqa: E402
 from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb  # noqa: E402
+
+OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -58,18 +66,40 @@ def _build_query(south: float, west: float, north: float, east: float) -> str:
 def main() -> None:
     args = _parse_args()
     query = _build_query(args.south, args.west, args.north, args.east)
-    resp = requests.post(
-        "https://overpass-api.de/api/interpreter",
-        data=query,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "gnss_gpu_bbox_fetch/1.0",
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=int(args.overpass_timeout_s),
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+    payload = None
+    last_error: Exception | None = None
+    for endpoint in OVERPASS_ENDPOINTS:
+        for attempt in range(5):
+            try:
+                resp = requests.post(
+                    endpoint,
+                    data=query,
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "User-Agent": "gnss_gpu_bbox_fetch/1.0",
+                        "Accept": "application/json,text/plain,*/*",
+                    },
+                    timeout=int(args.overpass_timeout_s),
+                )
+                if resp.status_code == 429:
+                    wait_s = min(120.0, 2.0**attempt + random.uniform(0.0, 1.0))
+                    print(f"[429] {endpoint} retry in {wait_s:.1f}s")
+                    time.sleep(wait_s)
+                    continue
+                resp.raise_for_status()
+                payload = resp.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last_error = exc
+                wait_s = min(60.0, 2.0**attempt + random.uniform(0.0, 1.0))
+                time.sleep(wait_s)
+        if payload is not None:
+            break
+    if payload is None:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Overpass building fetch failed without a specific exception.")
+
     elements = payload.get("elements", [])
     print("OSM elements:", len(elements))
 

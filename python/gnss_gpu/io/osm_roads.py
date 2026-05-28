@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import random
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -11,6 +13,11 @@ import requests
 
 
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+)
 
 
 @dataclass(frozen=True)
@@ -68,21 +75,45 @@ def fetch_roads_overpass(
     include_pedestrian: bool = False,
     timeout_s: int = 120,
     user_agent: str = "gnss_gpu_osm_roads/1.0",
+    endpoints: tuple[str, ...] = OVERPASS_ENDPOINTS,
+    max_attempts_per_endpoint: int = 5,
 ) -> list[dict]:
     """Fetch road ways from Overpass for a bbox."""
     query = build_roads_overpass_query(bbox, include_pedestrian=include_pedestrian)
-    resp = requests.post(
-        OVERPASS_URL,
-        data=query,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": user_agent,
-            "Accept": "application/json,text/plain,*/*",
-        },
-        timeout=timeout_s,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": user_agent,
+        "Accept": "application/json,text/plain,*/*",
+    }
+    payload = None
+    last_error: Exception | None = None
+    for endpoint in endpoints:
+        for attempt in range(max(1, int(max_attempts_per_endpoint))):
+            try:
+                resp = requests.post(
+                    endpoint,
+                    data=query,
+                    headers=headers,
+                    timeout=timeout_s,
+                )
+                if resp.status_code == 429:
+                    wait_s = min(120.0, 2.0**attempt + random.uniform(0.0, 1.0))
+                    time.sleep(wait_s)
+                    continue
+                resp.raise_for_status()
+                payload = resp.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last_error = exc
+                wait_s = min(60.0, 2.0**attempt + random.uniform(0.0, 1.0))
+                time.sleep(wait_s)
+        if payload is not None:
+            break
+    if payload is None:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Overpass road fetch failed without a specific exception.")
+
     dedup: dict[int, dict] = {}
     for el in payload.get("elements", []):
         if el.get("type") != "way":

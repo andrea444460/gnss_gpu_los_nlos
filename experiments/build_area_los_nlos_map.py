@@ -151,14 +151,33 @@ def main() -> None:
     args = _parse_args()
     t0 = time.perf_counter()
     t_last_log = t0
+    profile: dict[str, float] = {
+        "roads_fetch_s": 0.0,
+        "roads_sample_s": 0.0,
+        "roads_dedup_s": 0.0,
+        "mesh_bvh_s": 0.0,
+        "ephemeris_setup_s": 0.0,
+        "dem_setup_s": 0.0,
+        "compute_total_s": 0.0,
+        "compute_ephemeris_s": 0.0,
+        "compute_preprocess_s": 0.0,
+        "compute_raytrace_s": 0.0,
+        "write_csv_s": 0.0,
+        "write_html_s": 0.0,
+    }
     bbox = BBox(args.south, args.west, args.north, args.east)
 
     # Roads sampling with tiling.
+    t_roads = time.perf_counter()
     tile_boxes = split_bbox_into_tiles(bbox, tile_size_m=float(args.tile_size_m))
     all_points: list[dict] = []
     for ti, tb in enumerate(tile_boxes, start=1):
+        t_rf = time.perf_counter()
         roads = fetch_roads_overpass(tb, include_pedestrian=bool(args.include_pedestrian))
+        profile["roads_fetch_s"] += time.perf_counter() - t_rf
+        t_rs = time.perf_counter()
         pts = sample_road_points(roads, step_m=float(args.step_m))
+        profile["roads_sample_s"] += time.perf_counter() - t_rs
         all_points.extend(pts)
         print(
             f"[area][roads] tile {ti}/{len(tile_boxes)}: "
@@ -167,15 +186,23 @@ def main() -> None:
         )
     # Dedup across tiles.
     uniq: dict[tuple[int, int], dict] = {}
+    t_rd = time.perf_counter()
     for p in all_points:
         k = (int(round(float(p["lat_deg"]) * 1e6)), int(round(float(p["lon_deg"]) * 1e6)))
         uniq[k] = p
+    profile["roads_dedup_s"] += time.perf_counter() - t_rd
     points = list(uniq.values())
+    print(
+        f"[profile][roads] total={time.perf_counter()-t_roads:.2f}s "
+        f"(fetch={profile['roads_fetch_s']:.2f}s sample={profile['roads_sample_s']:.2f}s dedup={profile['roads_dedup_s']:.2f}s)",
+        flush=True,
+    )
     if not points:
         raise RuntimeError("No road points sampled in the selected area.")
     print(f"[area] sampled road points: {len(points)} from {len(tile_boxes)} tile(s)")
 
     # Mesh + BVH.
+    t_mesh = time.perf_counter()
     tri = np.asarray(np.load(args.triangles_npy), dtype=np.float64)
     if tri.ndim != 3 or tri.shape[1:] != (3, 3):
         raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri.shape}")
@@ -184,8 +211,11 @@ def main() -> None:
     if not hasattr(bvh, "check_los_batch"):
         raise RuntimeError("BVH check_los_batch unavailable; rebuild gnss_gpu with CUDA BVH support.")
     print(f"[area] mesh triangles={len(tri)}, bvh_nodes={bvh.n_nodes}")
+    profile["mesh_bvh_s"] = time.perf_counter() - t_mesh
+    print(f"[profile][mesh] setup={profile['mesh_bvh_s']:.2f}s", flush=True)
 
     # Ephemeris.
+    t_eph_setup = time.perf_counter()
     systems = tuple(s.strip() for s in str(args.nav_systems).split(",") if s.strip())
     nav_messages = read_nav_rinex_multi(str(args.nav.resolve()), systems=systems)
     eph = Ephemeris(nav_messages)
@@ -198,9 +228,12 @@ def main() -> None:
     else:
         tow_start = float(args.tow_start_s)
     tow_samples = _time_samples(tow_start, float(args.duration_s), float(args.dt_s))
+    profile["ephemeris_setup_s"] = time.perf_counter() - t_eph_setup
+    print(f"[profile][ephemeris] setup={profile['ephemeris_setup_s']:.2f}s", flush=True)
     print(f"[area] time samples: {tow_samples.size} (dt={args.dt_s:g}s, duration={args.duration_s:g}s)")
 
     # Optional terrain prefilter.
+    t_dem = time.perf_counter()
     dem_path = args.dem_path
     if dem_path is None and args.dem_auto_download:
         dem_path, ntiles = download_dem_for_bbox(
@@ -228,6 +261,8 @@ def main() -> None:
         print(f"[area] terrain prefilter: enabled ({dem_path})")
     else:
         print("[area] terrain prefilter: disabled")
+    profile["dem_setup_s"] = time.perf_counter() - t_dem
+    print(f"[profile][terrain] setup={profile['dem_setup_s']:.2f}s", flush=True)
 
     n_points = len(points)
     los_sum = np.zeros(n_points, dtype=np.float64)
@@ -244,10 +279,13 @@ def main() -> None:
     e_chunk = max(1, int(args.eph_batch_chunk))
     mask_rad = math.radians(float(args.elevation_mask_deg))
 
+    t_compute = time.perf_counter()
     for es in range(0, tow_samples.size, e_chunk):
         ee = min(es + e_chunk, tow_samples.size)
         tow_blk = np.asarray(tow_samples[es:ee], dtype=np.float64)
+        t_ce = time.perf_counter()
         sat_b, _clk_b, _used = eph.compute_batch(tow_blk, prn_list=prn_catalog)
+        profile["compute_ephemeris_s"] += time.perf_counter() - t_ce
         if sat_b.shape[1] == 0:
             continue
         n_t, n_sat = sat_b.shape[0], sat_b.shape[1]
@@ -271,6 +309,7 @@ def main() -> None:
             visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
             terrain_blocked = np.zeros((n_p * n_t, n_sat), dtype=bool)
 
+            t_cp = time.perf_counter()
             for pi in range(n_p):
                 rx = rx_chunk[pi]
                 for ti in range(n_t):
@@ -284,8 +323,11 @@ def main() -> None:
                         vis = np.logical_and(vis, terr_vis)
                     visible[idx] = vis
                     sat_work[idx][~vis] = np.nan
+            profile["compute_preprocess_s"] += time.perf_counter() - t_cp
 
+            t_cr = time.perf_counter()
             los = np.asarray(bvh.check_los_batch(rx_flat, sat_work), dtype=bool)
+            profile["compute_raytrace_s"] += time.perf_counter() - t_cr
             los_vis = np.logical_and(los, visible)
             nlos_vis = np.logical_and(~los, visible)
 
@@ -316,6 +358,7 @@ def main() -> None:
                     flush=True,
                 )
                 t_last_log = now
+    profile["compute_total_s"] = time.perf_counter() - t_compute
 
     if n_epochs_total <= 0:
         raise RuntimeError("No valid epochs processed.")
@@ -342,6 +385,7 @@ def main() -> None:
             }
         )
 
+    t_csv = time.perf_counter()
     args.out_csv.parent.mkdir(parents=True, exist_ok=True)
     with open(args.out_csv, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(
@@ -373,12 +417,29 @@ def main() -> None:
                     "mean_n_terrain_blocked": f"{r['mean_n_terrain_blocked']:.4f}",
                 }
             )
+    profile["write_csv_s"] = time.perf_counter() - t_csv
 
+    t_html = time.perf_counter()
     _build_html_map(rows, args.out_html, metric_key="mean_n_los")
+    profile["write_html_s"] = time.perf_counter() - t_html
     dt_total = time.perf_counter() - t0
+    point_epochs = float(n_points) * float(tow_samples.size)
+    point_epochs_per_s = point_epochs / max(1e-9, profile["compute_total_s"])
     print(
         f"[area] done: points={n_points}, epochs={tow_samples.size}, "
         f"csv={args.out_csv}, html={args.out_html}, runtime_s={dt_total:.1f}"
+    )
+    print(
+        "[profile][summary] "
+        f"roads={profile['roads_fetch_s']+profile['roads_sample_s']+profile['roads_dedup_s']:.2f}s "
+        f"mesh={profile['mesh_bvh_s']:.2f}s "
+        f"ephemeris_setup={profile['ephemeris_setup_s']:.2f}s "
+        f"terrain_setup={profile['dem_setup_s']:.2f}s "
+        f"compute={profile['compute_total_s']:.2f}s "
+        f"(eph={profile['compute_ephemeris_s']:.2f}s preprocess={profile['compute_preprocess_s']:.2f}s raytrace={profile['compute_raytrace_s']:.2f}s) "
+        f"write_csv={profile['write_csv_s']:.2f}s write_html={profile['write_html_s']:.2f}s "
+        f"throughput={point_epochs_per_s:,.0f} point-epochs/s",
+        flush=True,
     )
 
 

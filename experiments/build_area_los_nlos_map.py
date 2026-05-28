@@ -98,6 +98,7 @@ def _build_html_map(rows: list[dict], out_html: Path, *, metric_key: str = "mean
             f"NLOS mean: {r['mean_n_nlos']:.2f}<br>"
             f"Visible mean: {r['mean_n_visible']:.2f}<br>"
             f"Terrain blocked mean: {r['mean_n_terrain_blocked']:.2f}<br>"
+            f"Terrain blocked visible mean: {r.get('mean_n_terrain_blocked_visible', 0.0):.2f}<br>"
             f"Highway: {r.get('highway','')}"
         )
         folium.CircleMarker(
@@ -269,6 +270,7 @@ def main() -> None:
     nlos_sum = np.zeros(n_points, dtype=np.float64)
     vis_sum = np.zeros(n_points, dtype=np.float64)
     tblk_sum = np.zeros(n_points, dtype=np.float64)
+    tblk_vis_sum = np.zeros(n_points, dtype=np.float64)
     n_epochs_total = 0
 
     point_ecef = np.asarray(
@@ -308,6 +310,7 @@ def main() -> None:
             sat_work = np.array(sat_flat, copy=True)
             visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
             terrain_blocked = np.zeros((n_p * n_t, n_sat), dtype=bool)
+            terrain_blocked_visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
 
             t_cp = time.perf_counter()
             for pi in range(n_p):
@@ -320,6 +323,7 @@ def main() -> None:
                     if terrain_mask is not None:
                         terr_vis = terrain_mask.terrain_visible_mask(rx, sats)
                         terrain_blocked[idx] = ~terr_vis
+                        terrain_blocked_visible[idx] = np.logical_and(el >= mask_rad, ~terr_vis)
                         vis = np.logical_and(vis, terr_vis)
                     visible[idx] = vis
                     sat_work[idx][~vis] = np.nan
@@ -335,10 +339,12 @@ def main() -> None:
             nlos_3d = nlos_vis.reshape(n_p, n_t, n_sat)
             vis_3d = visible.reshape(n_p, n_t, n_sat)
             tblk_3d = terrain_blocked.reshape(n_p, n_t, n_sat)
+            tblk_vis_3d = terrain_blocked_visible.reshape(n_p, n_t, n_sat)
             los_sum[ps:pe] += np.sum(los_3d, axis=(1, 2))
             nlos_sum[ps:pe] += np.sum(nlos_3d, axis=(1, 2))
             vis_sum[ps:pe] += np.sum(vis_3d, axis=(1, 2))
             tblk_sum[ps:pe] += np.sum(tblk_3d, axis=(1, 2))
+            tblk_vis_sum[ps:pe] += np.sum(tblk_vis_3d, axis=(1, 2))
 
             now = time.perf_counter()
             if (now - t_last_log) >= 5.0 or pe == n_points:
@@ -368,6 +374,7 @@ def main() -> None:
     nlos_mean = nlos_sum / float(n_epochs_total)
     vis_mean = vis_sum / float(n_epochs_total)
     tblk_mean = tblk_sum / float(n_epochs_total)
+    tblk_vis_mean = tblk_vis_sum / float(n_epochs_total)
 
     rows: list[dict] = []
     for i, p in enumerate(points):
@@ -382,6 +389,7 @@ def main() -> None:
                 "mean_n_nlos": float(nlos_mean[i]),
                 "mean_n_visible": float(vis_mean[i]),
                 "mean_n_terrain_blocked": float(tblk_mean[i]),
+                "mean_n_terrain_blocked_visible": float(tblk_vis_mean[i]),
             }
         )
 
@@ -400,6 +408,7 @@ def main() -> None:
                 "mean_n_nlos",
                 "mean_n_visible",
                 "mean_n_terrain_blocked",
+                "mean_n_terrain_blocked_visible",
             ],
         )
         w.writeheader()
@@ -415,6 +424,7 @@ def main() -> None:
                     "mean_n_nlos": f"{r['mean_n_nlos']:.4f}",
                     "mean_n_visible": f"{r['mean_n_visible']:.4f}",
                     "mean_n_terrain_blocked": f"{r['mean_n_terrain_blocked']:.4f}",
+                    "mean_n_terrain_blocked_visible": f"{r['mean_n_terrain_blocked_visible']:.4f}",
                 }
             )
     profile["write_csv_s"] = time.perf_counter() - t_csv

@@ -26,6 +26,8 @@ if str(_ROOT / "python") not in sys.path:
 import branca.colormap as bcm
 import folium
 import numpy as np
+import rasterio
+from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from gnss_gpu.bvh import BVHAccelerator
 from gnss_gpu.ephemeris import Ephemeris
@@ -34,6 +36,7 @@ from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.io.osm_roads import BBox, fetch_roads_overpass, sample_road_points, split_bbox_into_tiles
 from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.terrain_horizon import HorizonConfig, TerrainHorizonMask
+from gnss_gpu.terrain_cuda import has_terrain_cuda, terrain_prefilter_batch
 from gnss_gpu.urban_signal_sim import _sat_elevation_azimuth
 
 
@@ -75,6 +78,63 @@ def _time_samples(start_tow_s: float, duration_s: float, dt_s: float) -> np.ndar
     n = max(1, int(math.floor(float(duration_s) / float(dt_s))) + 1)
     tows = float(start_tow_s) + np.arange(n, dtype=np.float64) * float(dt_s)
     return np.mod(tows, 604800.0)
+
+
+def _load_dem_wgs84_grid(dem_path: Path) -> tuple[np.ndarray, float, float, float, float]:
+    with rasterio.open(str(dem_path)) as src:
+        dst_crs = "EPSG:4326"
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds
+        )
+        dem = np.full((height, width), np.nan, dtype=np.float32)
+        reproject(
+            source=rasterio.band(src, 1),
+            destination=dem,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            dst_transform=transform,
+            dst_crs=dst_crs,
+            resampling=Resampling.bilinear,
+            dst_nodata=np.nan,
+        )
+
+    lat0 = float(transform.f + transform.e * 0.5)
+    lon0 = float(transform.c + transform.a * 0.5)
+    lat_step = float(transform.e)
+    lon_step = float(transform.a)
+    return dem, lat0, lon0, lat_step, lon_step
+
+
+def _cpu_preprocess_chunk(
+    rx_chunk: np.ndarray,
+    sat_b: np.ndarray,
+    n_t: int,
+    n_sat: int,
+    mask_rad: float,
+    terrain_mask: TerrainHorizonMask | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    n_p = rx_chunk.shape[0]
+    sat_flat = np.tile(sat_b, (n_p, 1, 1))
+    sat_work = np.array(sat_flat, copy=True)
+    visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
+    terrain_blocked = np.zeros((n_p * n_t, n_sat), dtype=bool)
+    terrain_blocked_visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
+
+    for pi in range(n_p):
+        rx = rx_chunk[pi]
+        for ti in range(n_t):
+            idx = pi * n_t + ti
+            sats = sat_b[ti]
+            el, _az = _sat_elevation_azimuth(rx, sats)
+            vis = el >= mask_rad
+            if terrain_mask is not None:
+                terr_vis = terrain_mask.terrain_visible_mask(rx, sats)
+                terrain_blocked[idx] = ~terr_vis
+                terrain_blocked_visible[idx] = np.logical_and(el >= mask_rad, ~terr_vis)
+                vis = np.logical_and(vis, terr_vis)
+            visible[idx] = vis
+            sat_work[idx][~vis] = np.nan
+    return visible, terrain_blocked, terrain_blocked_visible, sat_work
 
 
 def _build_html_map(rows: list[dict], out_html: Path, *, metric_key: str = "mean_n_los") -> None:
@@ -145,6 +205,19 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--terrain-azimuth-step-deg", type=float, default=2.0)
     p.add_argument("--terrain-cache-resolution-m", type=float, default=50.0)
     p.add_argument("--terrain-margin-deg", type=float, default=0.0)
+    p.add_argument(
+        "--terrain-preprocess-mode",
+        type=str,
+        choices=["cuda", "cpu"],
+        default="cuda",
+        help="Terrain/elevation preprocess mode for area-map pipeline.",
+    )
+    p.add_argument(
+        "--validate-cpu-samples",
+        type=int,
+        default=0,
+        help="If >0, run CPU preprocess on first N point-chunks for CUDA/CPU mismatch logs.",
+    )
     return p.parse_args()
 
 
@@ -162,6 +235,7 @@ def main() -> None:
         "compute_total_s": 0.0,
         "compute_ephemeris_s": 0.0,
         "compute_preprocess_s": 0.0,
+        "compute_preprocess_cuda_s": 0.0,
         "compute_raytrace_s": 0.0,
         "write_csv_s": 0.0,
         "write_html_s": 0.0,
@@ -248,6 +322,8 @@ def main() -> None:
         print(f"[area] DEM auto-downloaded: {dem_path} ({ntiles} tiles)")
 
     terrain_mask: TerrainHorizonMask | None = None
+    dem_grid: np.ndarray | None = None
+    dem_meta: tuple[float, float, float, float] | None = None
     if dem_path is not None:
         terrain_mask = TerrainHorizonMask(
             dem_path,
@@ -260,6 +336,14 @@ def main() -> None:
             ),
         )
         print(f"[area] terrain prefilter: enabled ({dem_path})")
+        if args.terrain_preprocess_mode == "cuda":
+            dem_grid, lat0, lon0, lat_step, lon_step = _load_dem_wgs84_grid(dem_path)
+            dem_meta = (lat0, lon0, lat_step, lon_step)
+            print(
+                f"[area] terrain cuda dem grid: shape={dem_grid.shape} "
+                f"lat0={lat0:.8f} lon0={lon0:.8f} dlat={lat_step:.9f} dlon={lon_step:.9f}",
+                flush=True,
+            )
     else:
         print("[area] terrain prefilter: disabled")
     profile["dem_setup_s"] = time.perf_counter() - t_dem
@@ -280,6 +364,14 @@ def main() -> None:
     p_chunk = max(1, int(args.point_batch_chunk))
     e_chunk = max(1, int(args.eph_batch_chunk))
     mask_rad = math.radians(float(args.elevation_mask_deg))
+    margin_rad = math.radians(float(args.terrain_margin_deg))
+    use_cuda_preprocess = bool(args.terrain_preprocess_mode == "cuda")
+    if use_cuda_preprocess and not has_terrain_cuda():
+        raise RuntimeError(
+            "Requested --terrain-preprocess-mode cuda but gnss_gpu terrain CUDA module is unavailable."
+        )
+    if use_cuda_preprocess and dem_grid is None:
+        raise RuntimeError("CUDA terrain preprocess requires DEM grid; set --dem-path or --dem-auto-download.")
 
     t_compute = time.perf_counter()
     for es in range(0, tow_samples.size, e_chunk):
@@ -306,27 +398,50 @@ def main() -> None:
             n_p = rx_chunk.shape[0]
 
             rx_flat = np.repeat(rx_chunk, n_t, axis=0)  # point-major
-            sat_flat = np.tile(sat_b, (n_p, 1, 1))  # point-major [n_p*n_t, n_sat, 3]
-            sat_work = np.array(sat_flat, copy=True)
-            visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
-            terrain_blocked = np.zeros((n_p * n_t, n_sat), dtype=bool)
-            terrain_blocked_visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
-
             t_cp = time.perf_counter()
-            for pi in range(n_p):
-                rx = rx_chunk[pi]
-                for ti in range(n_t):
-                    idx = pi * n_t + ti
-                    sats = sat_b[ti]
-                    el, _az = _sat_elevation_azimuth(rx, sats)
-                    vis = el >= mask_rad
-                    if terrain_mask is not None:
-                        terr_vis = terrain_mask.terrain_visible_mask(rx, sats)
-                        terrain_blocked[idx] = ~terr_vis
-                        terrain_blocked_visible[idx] = np.logical_and(el >= mask_rad, ~terr_vis)
-                        vis = np.logical_and(vis, terr_vis)
-                    visible[idx] = vis
-                    sat_work[idx][~vis] = np.nan
+            if use_cuda_preprocess:
+                rx_flat = np.repeat(rx_chunk, n_t, axis=0)  # point-major
+                sat_flat = np.tile(sat_b, (n_p, 1, 1))  # point-major [n_p*n_t, n_sat, 3]
+                assert dem_grid is not None and dem_meta is not None
+                lat0, lon0, lat_step, lon_step = dem_meta
+                vis_cuda, tblk_cuda, tblk_vis_cuda, sat_work = terrain_prefilter_batch(
+                    rx_flat,
+                    sat_flat,
+                    dem_grid,
+                    dem_lat0_deg=lat0,
+                    dem_lon0_deg=lon0,
+                    dem_lat_step_deg=lat_step,
+                    dem_lon_step_deg=lon_step,
+                    max_distance_m=float(args.terrain_max_distance_m),
+                    sample_step_m=float(args.terrain_step_m),
+                    elevation_mask_rad=mask_rad,
+                    margin_rad=margin_rad,
+                )
+                visible = np.asarray(vis_cuda, dtype=bool)
+                terrain_blocked = np.asarray(tblk_cuda, dtype=bool)
+                terrain_blocked_visible = np.asarray(tblk_vis_cuda, dtype=bool)
+                profile["compute_preprocess_cuda_s"] += time.perf_counter() - t_cp
+
+                if int(args.validate_cpu_samples) > 0 and ps < int(args.validate_cpu_samples) * p_chunk:
+                    t_val = time.perf_counter()
+                    vis_cpu, tblk_cpu, tblk_vis_cpu, _sat_cpu = _cpu_preprocess_chunk(
+                        rx_chunk, sat_b, n_t, n_sat, mask_rad, terrain_mask
+                    )
+                    dt_val = time.perf_counter() - t_val
+                    mismatch_vis = float(np.mean(visible != vis_cpu))
+                    mismatch_tblk = float(np.mean(terrain_blocked != tblk_cpu))
+                    mismatch_tblk_vis = float(np.mean(terrain_blocked_visible != tblk_vis_cpu))
+                    print(
+                        f"[profile][validate] cpu_chunk={dt_val:.2f}s "
+                        f"mismatch_visible={mismatch_vis:.6f} "
+                        f"mismatch_tblk={mismatch_tblk:.6f} "
+                        f"mismatch_tblk_vis={mismatch_tblk_vis:.6f}",
+                        flush=True,
+                    )
+            else:
+                visible, terrain_blocked, terrain_blocked_visible, sat_work = _cpu_preprocess_chunk(
+                    rx_chunk, sat_b, n_t, n_sat, mask_rad, terrain_mask
+                )
             profile["compute_preprocess_s"] += time.perf_counter() - t_cp
 
             t_cr = time.perf_counter()
@@ -446,7 +561,8 @@ def main() -> None:
         f"ephemeris_setup={profile['ephemeris_setup_s']:.2f}s "
         f"terrain_setup={profile['dem_setup_s']:.2f}s "
         f"compute={profile['compute_total_s']:.2f}s "
-        f"(eph={profile['compute_ephemeris_s']:.2f}s preprocess={profile['compute_preprocess_s']:.2f}s raytrace={profile['compute_raytrace_s']:.2f}s) "
+        f"(eph={profile['compute_ephemeris_s']:.2f}s preprocess={profile['compute_preprocess_s']:.2f}s "
+        f"preprocess_cuda={profile['compute_preprocess_cuda_s']:.2f}s raytrace={profile['compute_raytrace_s']:.2f}s) "
         f"write_csv={profile['write_csv_s']:.2f}s write_html={profile['write_html_s']:.2f}s "
         f"throughput={point_epochs_per_s:,.0f} point-epochs/s",
         flush=True,

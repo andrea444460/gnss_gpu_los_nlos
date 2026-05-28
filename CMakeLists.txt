@@ -153,6 +153,13 @@ add_library(gnss_gpu_rtk
 target_include_directories(gnss_gpu_rtk PUBLIC include)
 target_link_libraries(gnss_gpu_rtk CUDA::cudart)
 
+# --- Terrain preprocess module ---
+add_library(gnss_gpu_terrain
+  src/terrain/terrain_cuda.cu
+)
+target_include_directories(gnss_gpu_terrain PUBLIC include)
+target_link_libraries(gnss_gpu_terrain CUDA::cudart)
+
 # --- Python bindings ---
 if(pybind11_FOUND)
   # Original bindings (positioning + coordinates)
@@ -239,6 +246,10 @@ if(pybind11_FOUND)
   pybind11_add_module(_gnss_gpu_signal_sim python/gnss_gpu/_signal_sim_bindings.cpp)
   target_link_libraries(_gnss_gpu_signal_sim PRIVATE gnss_gpu_signal_sim)
 
+  # Terrain preprocess bindings
+  pybind11_add_module(_gnss_gpu_terrain python/gnss_gpu/_terrain_bindings.cpp)
+  target_link_libraries(_gnss_gpu_terrain PRIVATE gnss_gpu_terrain)
+
   # --- RTKLIB SPP wrapper (pure C, no CUDA) ---
   # Requires RTKLIB demo5 sources at ../ref/RTKLIB-demo5/src/
   set(RTKLIB_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../ref/RTKLIB-demo5/src)
@@ -288,7 +299,7 @@ if(pybind11_FOUND)
     _gnss_gpu_tracking _gnss_gpu_pf _gnss_gpu_svgd _gnss_gpu_pf3d
     _gnss_gpu_atmosphere _gnss_gpu_ekf _gnss_gpu_raim _bvh
     _gnss_gpu_pf3d_bvh _gnss_gpu_pf_device _gnss_gpu_doppler
-    _gnss_gpu_rtk _gnss_gpu_ephemeris _gnss_gpu_signal_sim
+    _gnss_gpu_rtk _gnss_gpu_ephemeris _gnss_gpu_signal_sim _gnss_gpu_terrain
     DESTINATION gnss_gpu
   )
 endif()

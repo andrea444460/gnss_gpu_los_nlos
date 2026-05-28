@@ -79,6 +79,7 @@ from gnss_gpu.doppler import doppler_velocity, doppler_velocity_batch
 from gnss_gpu.fgo import fgo_gnss_lm, fgo_gnss_lm_vd
 from gnss_gpu.signal_sim import SignalSimulator
 from gnss_gpu.urban_signal_sim import UrbanSignalSimulator
+from gnss_gpu.terrain_cuda import terrain_prefilter_batch, has_terrain_cuda
 from gnss_gpu.e2e_helpers import (
     compute_e2e_wls_weights,
     acquisition_lag_to_code_phase_chips,
@@ -158,6 +159,8 @@ __all__ = [
     # Signal simulation
     "SignalSimulator",
     "UrbanSignalSimulator",
+    "terrain_prefilter_batch",
+    "has_terrain_cuda",
     # E2E helpers (acquisition to pseudorange)
     "compute_e2e_wls_weights",
     "acquisition_lag_to_code_phase_chips",

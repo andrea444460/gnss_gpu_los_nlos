@@ -150,15 +150,21 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     t0 = time.perf_counter()
+    t_last_log = t0
     bbox = BBox(args.south, args.west, args.north, args.east)
 
     # Roads sampling with tiling.
     tile_boxes = split_bbox_into_tiles(bbox, tile_size_m=float(args.tile_size_m))
     all_points: list[dict] = []
-    for tb in tile_boxes:
+    for ti, tb in enumerate(tile_boxes, start=1):
         roads = fetch_roads_overpass(tb, include_pedestrian=bool(args.include_pedestrian))
         pts = sample_road_points(roads, step_m=float(args.step_m))
         all_points.extend(pts)
+        print(
+            f"[area][roads] tile {ti}/{len(tile_boxes)}: "
+            f"roads={len(roads)} sampled_points={len(pts)} cumulative={len(all_points)}",
+            flush=True,
+        )
     # Dedup across tiles.
     uniq: dict[tuple[int, int], dict] = {}
     for p in all_points:
@@ -246,6 +252,13 @@ def main() -> None:
             continue
         n_t, n_sat = sat_b.shape[0], sat_b.shape[1]
         n_epochs_total += n_t
+        epoch_chunk_idx = es // e_chunk + 1
+        epoch_chunk_total = int(math.ceil(tow_samples.size / e_chunk))
+        print(
+            f"[area][epochs] chunk {epoch_chunk_idx}/{epoch_chunk_total}: "
+            f"epochs={n_t} sats={n_sat}",
+            flush=True,
+        )
 
         for ps in range(0, n_points, p_chunk):
             pe = min(ps + p_chunk, n_points)
@@ -284,6 +297,25 @@ def main() -> None:
             nlos_sum[ps:pe] += np.sum(nlos_3d, axis=(1, 2))
             vis_sum[ps:pe] += np.sum(vis_3d, axis=(1, 2))
             tblk_sum[ps:pe] += np.sum(tblk_3d, axis=(1, 2))
+
+            now = time.perf_counter()
+            if (now - t_last_log) >= 5.0 or pe == n_points:
+                frac_epochs = min(1.0, float(ee) / max(1.0, float(tow_samples.size)))
+                frac_points = float(pe) / max(1.0, float(n_points))
+                progress = min(1.0, (epoch_chunk_idx - 1 + frac_points) / max(1.0, float(epoch_chunk_total)))
+                elapsed = max(1e-9, now - t0)
+                rate_point_epoch = (progress * n_points * tow_samples.size) / elapsed
+                remain = max(0.0, (1.0 - progress))
+                eta_s = (remain * n_points * tow_samples.size) / max(1e-9, rate_point_epoch)
+                print(
+                    f"[area][progress] {progress*100:5.1f}% | "
+                    f"epoch_chunk={epoch_chunk_idx}/{epoch_chunk_total} "
+                    f"point_chunk_end={pe}/{n_points} ({frac_points*100:4.1f}% in chunk) | "
+                    f"elapsed={elapsed:7.1f}s eta={eta_s:7.1f}s "
+                    f"rate={rate_point_epoch:,.0f} point-epochs/s",
+                    flush=True,
+                )
+                t_last_log = now
 
     if n_epochs_total <= 0:
         raise RuntimeError("No valid epochs processed.")

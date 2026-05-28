@@ -31,6 +31,21 @@ from gnss_gpu.io.osm_buildings import (  # noqa: E402
 from gnss_gpu.viz.plateau_glb import export_plateau_roi_glb  # noqa: E402
 
 
+def _build_dem_alt_sampler(dem_path: Path):
+    import rasterio
+    from pyproj import Transformer
+
+    ds = rasterio.open(str(dem_path))
+    to_dem = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
+
+    def sample_alt_m(lat_deg: float, lon_deg: float) -> float:
+        x, y = to_dem.transform(float(lon_deg), float(lat_deg))
+        v = float(next(ds.sample([(x, y)]))[0])
+        return v
+
+    return sample_alt_m
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fetch OSM building mesh along trajectory corridor")
     p.add_argument("--reference-csv", type=Path, required=True, help="Trajectory CSV (UrbanNav or lat/lon format)")
@@ -39,6 +54,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--levels-height-m", type=float, default=3.0, help="Height per OSM level when height is missing")
     p.add_argument("--default-height-m", type=float, default=10.0, help="Default building height [m]")
     p.add_argument("--base-alt-m", type=float, default=0.0, help="Base altitude for footprints [m ellipsoidal]")
+    p.add_argument(
+        "--dem-path",
+        type=Path,
+        default=None,
+        help="Optional DEM GeoTIFF; when provided, building bases start at local DEM altitude + base-alt-m.",
+    )
     p.add_argument("--cache-json", type=Path, required=True, help="Output path for raw Overpass merged JSON")
     p.add_argument("--out-triangles", type=Path, required=True, help="Output path for triangles .npy [N,3,3]")
     p.add_argument("--export-glb", action="store_true", help="Also export GLB sidecar from output triangles")
@@ -68,11 +89,15 @@ def main() -> None:
     print(f"saved cache json: {args.cache_json}")
 
     height_stats: dict[str, int] = {}
+    terrain_alt_fn = _build_dem_alt_sampler(args.dem_path) if args.dem_path is not None else None
+    if terrain_alt_fn is not None:
+        print(f"using DEM-grounded building bases: {args.dem_path}")
     tri = buildings_to_triangles_ecef(
         elements,
         levels_height_m=float(args.levels_height_m),
         default_height_m=float(args.default_height_m),
         base_alt_m=float(args.base_alt_m),
+        terrain_alt_fn=terrain_alt_fn,
         stats=height_stats,
     )
     if tri.ndim != 3 or tri.shape[1:] != (3, 3):

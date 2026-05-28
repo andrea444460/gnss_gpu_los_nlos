@@ -11,7 +11,7 @@ import csv
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import requests
@@ -346,6 +346,7 @@ def buildings_to_triangles_ecef(
     levels_height_m: float = 3.0,
     default_height_m: float = 10.0,
     base_alt_m: float = 0.0,
+    terrain_alt_fn: Callable[[float, float], float] | None = None,
     stats: dict[str, int] | None = None,
 ) -> np.ndarray:
     """Convert OSM elements into extruded ECEF triangle mesh [N,3,3]."""
@@ -389,12 +390,24 @@ def buildings_to_triangles_ecef(
         tri_idx = _earclip_indices(ring_xy)
         if not tri_idx:
             return False
+        base_alts = np.full((ring_latlon.shape[0],), float(base_alt_m), dtype=np.float64)
+        if terrain_alt_fn is not None:
+            for i, (lat, lon) in enumerate(ring_latlon):
+                try:
+                    z = float(terrain_alt_fn(float(lat), float(lon)))
+                except Exception:
+                    z = float("nan")
+                if np.isfinite(z):
+                    base_alts[i] = z + float(base_alt_m)
         bottom = np.asarray(
-            [_lla_deg_to_ecef(float(lat), float(lon), base_alt_m) for lat, lon in ring_latlon],
+            [_lla_deg_to_ecef(float(lat), float(lon), float(base_alts[i])) for i, (lat, lon) in enumerate(ring_latlon)],
             dtype=np.float64,
         )
         top = np.asarray(
-            [_lla_deg_to_ecef(float(lat), float(lon), base_alt_m + height_m) for lat, lon in ring_latlon],
+            [
+                _lla_deg_to_ecef(float(lat), float(lon), float(base_alts[i]) + float(height_m))
+                for i, (lat, lon) in enumerate(ring_latlon)
+            ],
             dtype=np.float64,
         )
 

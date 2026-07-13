@@ -14,7 +14,7 @@ Quick start on Colab
 
     # Runtime → Change runtime type → GPU
     !nvidia-smi
-    !git clone https://github.com/YOUR_USER/gnss_gpu.git /content/gnss_gpu
+    !git clone -b feature/cuda-preprocess-area-map https://github.com/andrea444460/gnss_gpu_los_nlos.git /content/gnss_gpu
     %cd /content/gnss_gpu
     !pip install -q numpy matplotlib folium branca pyproj rasterio requests scipy
     !apt-get -qq install -y cmake
@@ -64,6 +64,7 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -166,29 +167,120 @@ def _station_bbox(ecef: tuple[float, float, float], buffer_deg: float) -> dict[s
     }
 
 
-def _brdc_url(year: int, doy: int) -> str:
+def _brdc_rnx_name(year: int, doy: int) -> str:
+    return f"BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx"
+
+
+def _brdc_gz_name(year: int, doy: int) -> str:
+    return f"{_brdc_rnx_name(year, doy)}.gz"
+
+
+def _brdc_urls(year: int, doy: int) -> list[str]:
     doy3 = f"{doy:03d}"
-    name = f"BRDC00IGS_R_{year}{doy3}0000_01D_MN.rnx.gz"
-    return f"https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy3}/{name}"
+    name = _brdc_gz_name(year, doy)
+    return [
+        f"https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy3}/{name}",
+        f"https://igs.bkg.bund.de/root_ftp/EUREF/BRDC/{year}/{doy3}/{name}",
+        f"https://cddis.nasa.gov/archive/gnss/data/daily/{year}/{doy3}/{year}p/{name}",
+    ]
 
 
 def _download_file(url: str, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists() and dest.stat().st_size > 0:
+    out_rnx = dest.with_suffix("") if dest.suffix == ".gz" else dest
+    if out_rnx.exists() and out_rnx.stat().st_size > 0:
+        print(f"  reuse {out_rnx}")
+        return
+    if dest.exists() and dest.stat().st_size > 0 and dest.suffix != ".gz":
         print(f"  reuse {dest}")
         return
     print(f"  download {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
-    urllib.request.urlretrieve(url, tmp)
+    try:
+        urllib.request.urlretrieve(url, tmp)
+    except urllib.error.HTTPError as exc:
+        tmp.unlink(missing_ok=True)
+        raise
     if dest.suffix == ".gz":
-        out = dest.with_suffix("")
-        with gzip.open(tmp, "rb") as fi, open(out, "wb") as fo:
+        with gzip.open(tmp, "rb") as fi, open(out_rnx, "wb") as fo:
             shutil.copyfileobj(fi, fo)
         tmp.unlink(missing_ok=True)
-        print(f"  wrote {out}")
+        print(f"  wrote {out_rnx}")
     else:
         tmp.rename(dest)
         print(f"  wrote {dest}")
+
+
+def _try_download_brdc(year: int, doy: int, data_dir: Path) -> Path | None:
+    gz_path = data_dir / _brdc_gz_name(year, doy)
+    rnx_path = data_dir / _brdc_rnx_name(year, doy)
+    if rnx_path.exists() and rnx_path.stat().st_size > 0:
+        return rnx_path
+    for url in _brdc_urls(year, doy):
+        try:
+            _download_file(url, gz_path)
+            if rnx_path.exists():
+                return rnx_path
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                print(f"  404 {url}")
+                continue
+            raise
+    return None
+
+
+def _resolve_nav_rnx(
+    data_dir: Path,
+    year: int,
+    doy: int,
+    *,
+    repo_data_dir: Path,
+    max_day_delta: int = 3,
+) -> Path:
+    """Resolve a BRDC RINEX file for the OBS day, with nearby-day fallback."""
+    exact = data_dir / _brdc_rnx_name(year, doy)
+    if exact.exists() and exact.stat().st_size > 0:
+        return exact
+
+    for src_dir in (repo_data_dir, _EXPERIMENTS / "data" / "TERF"):
+        repo_file = src_dir / _brdc_rnx_name(year, doy)
+        if repo_file.exists():
+            shutil.copy2(repo_file, exact)
+            print(f"  copy NAV from repo {repo_file}")
+            return exact
+
+    deltas = [0] + [d for k in range(1, max_day_delta + 1) for d in (-k, k)]
+    for delta in deltas:
+        alt_doy = int(doy) + int(delta)
+        if alt_doy < 1 or alt_doy > 366:
+            continue
+        nav = _try_download_brdc(year, alt_doy, data_dir)
+        if nav is None:
+            for src_dir in (repo_data_dir, _EXPERIMENTS / "data" / "TERF"):
+                repo_file = src_dir / _brdc_rnx_name(year, alt_doy)
+                if repo_file.exists():
+                    nav = data_dir / _brdc_rnx_name(year, alt_doy)
+                    if alt_doy != doy:
+                        shutil.copy2(repo_file, exact)
+                        print(
+                            f"  NAV fallback: repo DOY {alt_doy:03d} copied for OBS DOY {doy:03d}"
+                        )
+                        return exact
+                    shutil.copy2(repo_file, nav)
+                    nav = nav
+                    break
+        if nav is not None:
+            if alt_doy != doy:
+                shutil.copy2(nav, exact)
+                print(f"  NAV fallback: use DOY {alt_doy:03d} BRDC for OBS DOY {doy:03d}")
+                return exact
+            return nav
+
+    raise FileNotFoundError(
+        f"Could not download BRDC for {year} DOY {doy:03d} "
+        f"(tried ±{max_day_delta} days on IGS/EUREF/CDDIS). "
+        "Upload BRDC*.rnx to work-dir/data/ or experiments/data/TERF/."
+    )
 
 
 def phase_setup() -> None:
@@ -241,16 +333,12 @@ def phase_mesh(paths: dict[str, Path], obs_files: list[Path], *, buffer_deg: flo
     return bbox
 
 
-def phase_nav(paths: dict[str, Path], obs_files: list[Path]) -> list[dict]:
+def phase_nav(paths: dict[str, Path], obs_files: list[Path], *, repo_data_dir: Path) -> list[dict]:
     nav_info: list[dict] = []
     for obs_path in obs_files:
         meta = _parse_obs_meta(obs_path)
         year, doy = int(meta["year"]), int(meta["doy"])
-        gz_name = f"BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx.gz"
-        nav_rnx = paths["data"] / f"BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx"
-        _download_file(_brdc_url(year, doy), paths["data"] / gz_name)
-        if not nav_rnx.exists():
-            raise FileNotFoundError(f"NAV not found after download: {nav_rnx}")
+        nav_rnx = _resolve_nav_rnx(paths["data"], year, doy, repo_data_dir=repo_data_dir)
         nav_info.append({"obs": obs_path, "nav": nav_rnx, **meta})
     return nav_info
 
@@ -464,7 +552,7 @@ def _seed_data_from_repo(work_data: Path, repo_data: Path) -> None:
     if not repo_data.is_dir():
         return
     work_data.mkdir(parents=True, exist_ok=True)
-    for src in sorted(repo_data.glob("TERF*.rnx")):
+    for src in sorted(repo_data.glob("TERF*.rnx")) + sorted(repo_data.glob("BRDC*.rnx")):
         dst = work_data / src.name
         if not dst.exists():
             shutil.copy2(src, dst)
@@ -556,11 +644,11 @@ def main() -> None:
         bbox = phase_mesh(paths, obs_files, buffer_deg=float(args.bbox_buffer_deg))
 
     if args.phase in ("nav", "labels", "viz", "all"):
-        nav_info = phase_nav(paths, obs_files)
+        nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
 
     if args.phase in ("labels", "all"):
         if nav_info is None:
-            nav_info = phase_nav(paths, obs_files)
+            nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
         produced = phase_labels(
             paths,
             nav_info,
@@ -572,7 +660,7 @@ def main() -> None:
 
     if args.phase in ("viz",) or (args.phase == "all" and args.with_viz):
         if nav_info is None:
-            nav_info = phase_nav(paths, obs_files)
+            nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
         viz_outputs = phase_viz(
             paths,
             nav_info,

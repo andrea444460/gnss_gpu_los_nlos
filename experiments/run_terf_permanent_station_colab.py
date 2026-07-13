@@ -620,12 +620,12 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Only viz this day tag (e.g. 2026192). Empty = all OBS days.",
     )
-    p.add_argument("--n-epochs-viz", type=int, default=24, help="Viz epochs spread along the day")
+    p.add_argument("--n-epochs-viz", type=int, default=1440, help="Viz epochs spread along the day (1440 ≈ 1/min for 30 s OBS)")
     p.add_argument(
         "--epoch-min-interval-s",
         type=float,
-        default=600.0,
-        help="Min GPS spacing between consecutive viz epochs (default 600 s)",
+        default=60.0,
+        help="Min GPS spacing between consecutive viz epochs (30 = native OBS rate; default 60 s)",
     )
     p.add_argument("--traj-step-viz", type=float, default=1.0, help="Reference CSV row stride for viz")
     p.add_argument(

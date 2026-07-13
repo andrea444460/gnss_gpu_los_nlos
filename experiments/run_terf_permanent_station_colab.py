@@ -44,7 +44,7 @@ Phases
 Data layout under ``--work-dir``::
 
     data/TERF00CYP_R_20261920000_01D_30S_MO.rnx   # user OBS (upload)
-    data/BRDC00IGS_R_20261920000_01D_MN.rnx       # auto-downloaded NAV
+    data/BRDC00WRD_R_20261920000_01D_MN.rnx       # auto-downloaded NAV
     results/terf_osm_triangles.npy
     results/reference_2026192.csv
     results/terf_los_labels_2026192_gc.csv
@@ -136,7 +136,7 @@ def _paths(work: Path) -> dict[str, Path]:
 
 def _discover_obs(data_dir: Path) -> list[Path]:
     obs = sorted(data_dir.glob("TERF*.rnx")) + sorted(data_dir.glob("TERF*.obs"))
-    obs = [p for p in obs if "MN" not in p.name.upper() and "BRDC" not in p.name.upper()]
+    obs = [p for p in obs if "MN" not in p.name.upper() and "BRDC" not in p.name.upper() and "BRD4" not in p.name.upper()]
     if not obs:
         raise FileNotFoundError(
             f"No TERF OBS files in {data_dir}. Upload TERF00CYP_R_*_MO.rnx files first."
@@ -167,65 +167,95 @@ def _station_bbox(ecef: tuple[float, float, float], buffer_deg: float) -> dict[s
     }
 
 
-def _brdc_rnx_name(year: int, doy: int) -> str:
-    return f"BRDC00IGS_R_{year}{doy:03d}0000_01D_MN.rnx"
+# BKG IGS BRDC products tried in order (WRD is usually published before IGS merge).
+_BRDC_PRODUCTS = ("BRDC00WRD_R", "BRDC00IGS_R", "BRD400DLR_S")
 
 
-def _brdc_gz_name(year: int, doy: int) -> str:
-    return f"{_brdc_rnx_name(year, doy)}.gz"
+def _brdc_rnx_name(year: int, doy: int, product: str = _BRDC_PRODUCTS[0]) -> str:
+    return f"{product}_{year}{doy:03d}0000_01D_MN.rnx"
 
 
-def _brdc_urls(year: int, doy: int) -> list[str]:
+def _brdc_gz_name(year: int, doy: int, product: str = _BRDC_PRODUCTS[0]) -> str:
+    return f"{_brdc_rnx_name(year, doy, product)}.gz"
+
+
+def _brdc_urls(year: int, doy: int, product: str) -> list[str]:
     doy3 = f"{doy:03d}"
-    name = _brdc_gz_name(year, doy)
+    name = _brdc_gz_name(year, doy, product)
     return [
         f"https://igs.bkg.bund.de/root_ftp/IGS/BRDC/{year}/{doy3}/{name}",
         f"https://igs.bkg.bund.de/root_ftp/EUREF/BRDC/{year}/{doy3}/{name}",
-        f"https://cddis.nasa.gov/archive/gnss/data/daily/{year}/{doy3}/{year}p/{name}",
     ]
 
 
-def _download_file(url: str, dest: Path) -> None:
+def _find_repo_nav(src_dir: Path, year: int, doy: int) -> Path | None:
+    if not src_dir.is_dir():
+        return None
+    tag = f"{year}{doy:03d}"
+    for p in sorted(src_dir.glob(f"*{tag}*_MN.rnx")):
+        name = p.name.upper()
+        if name.startswith("TERF"):
+            continue
+        return p
+    return None
+
+
+def _download_file(url: str, dest: Path) -> bool:
+  """Download URL to dest (.gz decompressed to .rnx). Returns False on 404/HTML/bad gzip."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     out_rnx = dest.with_suffix("") if dest.suffix == ".gz" else dest
     if out_rnx.exists() and out_rnx.stat().st_size > 0:
         print(f"  reuse {out_rnx}")
-        return
+        return True
     if dest.exists() and dest.stat().st_size > 0 and dest.suffix != ".gz":
         print(f"  reuse {dest}")
-        return
+        return True
     print(f"  download {url}")
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        urllib.request.urlretrieve(url, tmp)
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            if getattr(resp, "status", 200) != 200:
+                print(f"  skip HTTP {resp.status} {url}")
+                return False
+            data = resp.read()
     except urllib.error.HTTPError as exc:
         tmp.unlink(missing_ok=True)
+        if exc.code == 404:
+            print(f"  404 {url}")
+            return False
         raise
-    if dest.suffix == ".gz":
-        with gzip.open(tmp, "rb") as fi, open(out_rnx, "wb") as fo:
-            shutil.copyfileobj(fi, fo)
+    if len(data) < 2:
+        return False
+    if dest.suffix == ".gz" and data[:2] != b"\x1f\x8b":
+        print(f"  skip non-gzip payload from {url}")
+        return False
+    tmp.write_bytes(data)
+    try:
+        if dest.suffix == ".gz":
+            with gzip.open(tmp, "rb") as fi, open(out_rnx, "wb") as fo:
+                shutil.copyfileobj(fi, fo)
+            tmp.unlink(missing_ok=True)
+            print(f"  wrote {out_rnx}")
+        else:
+            tmp.rename(dest)
+            print(f"  wrote {dest}")
+    except (gzip.BadGzipFile, OSError) as exc:
         tmp.unlink(missing_ok=True)
-        print(f"  wrote {out_rnx}")
-    else:
-        tmp.rename(dest)
-        print(f"  wrote {dest}")
+        out_rnx.unlink(missing_ok=True)
+        print(f"  skip corrupt gzip from {url}: {exc}")
+        return False
+    return out_rnx.exists() and out_rnx.stat().st_size > 0
 
 
 def _try_download_brdc(year: int, doy: int, data_dir: Path) -> Path | None:
-    gz_path = data_dir / _brdc_gz_name(year, doy)
-    rnx_path = data_dir / _brdc_rnx_name(year, doy)
-    if rnx_path.exists() and rnx_path.stat().st_size > 0:
-        return rnx_path
-    for url in _brdc_urls(year, doy):
-        try:
-            _download_file(url, gz_path)
-            if rnx_path.exists():
+    for product in _BRDC_PRODUCTS:
+        gz_path = data_dir / _brdc_gz_name(year, doy, product)
+        rnx_path = data_dir / _brdc_rnx_name(year, doy, product)
+        if rnx_path.exists() and rnx_path.stat().st_size > 0:
+            return rnx_path
+        for url in _brdc_urls(year, doy, product):
+            if _download_file(url, gz_path) and rnx_path.exists():
                 return rnx_path
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                print(f"  404 {url}")
-                continue
-            raise
     return None
 
 
@@ -239,15 +269,16 @@ def _resolve_nav_rnx(
 ) -> Path:
     """Resolve a BRDC RINEX file for the OBS day, with nearby-day fallback."""
     exact = data_dir / _brdc_rnx_name(year, doy)
-    if exact.exists() and exact.stat().st_size > 0:
-        return exact
 
     for src_dir in (repo_data_dir, _EXPERIMENTS / "data" / "TERF"):
-        repo_file = src_dir / _brdc_rnx_name(year, doy)
-        if repo_file.exists():
+        repo_file = _find_repo_nav(src_dir, year, doy)
+        if repo_file is not None:
             shutil.copy2(repo_file, exact)
             print(f"  copy NAV from repo {repo_file}")
             return exact
+
+    if exact.exists() and exact.stat().st_size > 0:
+        return exact
 
     deltas = [0] + [d for k in range(1, max_day_delta + 1) for d in (-k, k)]
     for delta in deltas:
@@ -257,18 +288,13 @@ def _resolve_nav_rnx(
         nav = _try_download_brdc(year, alt_doy, data_dir)
         if nav is None:
             for src_dir in (repo_data_dir, _EXPERIMENTS / "data" / "TERF"):
-                repo_file = src_dir / _brdc_rnx_name(year, alt_doy)
-                if repo_file.exists():
-                    nav = data_dir / _brdc_rnx_name(year, alt_doy)
-                    if alt_doy != doy:
-                        shutil.copy2(repo_file, exact)
-                        print(
-                            f"  NAV fallback: repo DOY {alt_doy:03d} copied for OBS DOY {doy:03d}"
-                        )
-                        return exact
-                    shutil.copy2(repo_file, nav)
-                    nav = nav
-                    break
+                repo_file = _find_repo_nav(src_dir, year, alt_doy)
+                if repo_file is not None:
+                    shutil.copy2(repo_file, exact)
+                    print(
+                        f"  NAV fallback: repo DOY {alt_doy:03d} copied for OBS DOY {doy:03d}"
+                    )
+                    return exact
         if nav is not None:
             if alt_doy != doy:
                 shutil.copy2(nav, exact)
@@ -278,8 +304,8 @@ def _resolve_nav_rnx(
 
     raise FileNotFoundError(
         f"Could not download BRDC for {year} DOY {doy:03d} "
-        f"(tried ±{max_day_delta} days on IGS/EUREF/CDDIS). "
-        "Upload BRDC*.rnx to work-dir/data/ or experiments/data/TERF/."
+        f"(tried products {_BRDC_PRODUCTS} on BKG IGS/EUREF, ±{max_day_delta} days). "
+        "Upload *YYYYDOY*_MN.rnx to work-dir/data/ or experiments/data/TERF/."
     )
 
 

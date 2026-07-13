@@ -201,7 +201,7 @@ def _find_repo_nav(src_dir: Path, year: int, doy: int) -> Path | None:
 
 
 def _download_file(url: str, dest: Path) -> bool:
-  """Download URL to dest (.gz decompressed to .rnx). Returns False on 404/HTML/bad gzip."""
+    """Download URL to dest (.gz decompressed to .rnx). Returns False on 404/HTML/bad gzip."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     out_rnx = dest.with_suffix("") if dest.suffix == ".gz" else dest
     if out_rnx.exists() and out_rnx.stat().st_size > 0:
@@ -578,7 +578,9 @@ def _seed_data_from_repo(work_data: Path, repo_data: Path) -> None:
     if not repo_data.is_dir():
         return
     work_data.mkdir(parents=True, exist_ok=True)
-    for src in sorted(repo_data.glob("TERF*.rnx")) + sorted(repo_data.glob("BRDC*.rnx")):
+    for src in sorted(repo_data.glob("TERF*.rnx")) + sorted(repo_data.glob("BRDC*.rnx")) + sorted(
+        repo_data.glob("BRD4*.rnx")
+    ):
         dst = work_data / src.name
         if not dst.exists():
             shutil.copy2(src, dst)

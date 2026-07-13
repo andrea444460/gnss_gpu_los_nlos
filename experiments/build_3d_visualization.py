@@ -255,6 +255,22 @@ def load_trajectory(csv_path, step=200):
     return np.array(positions), np.array(times), int(n_csv)
 
 
+def snap_fixed_trajectory(positions: np.ndarray, *, threshold_m: float = 0.05) -> np.ndarray:
+    """Collapse near-static ECEF tracks (permanent station) to their mean position."""
+    pos = np.asarray(positions, dtype=np.float64)
+    if pos.ndim != 2 or pos.shape[0] <= 1 or pos.shape[1] != 3:
+        return pos
+    span = float(np.max(np.linalg.norm(pos - pos[0], axis=1)))
+    if span > float(threshold_m):
+        return pos
+    mean = np.mean(pos, axis=0)
+    print(
+        f"  Fixed station detected (ECEF span {span * 1000:.1f} mm) — snapping trajectory to mean ECEF."
+    )
+    out = np.tile(mean, (pos.shape[0], 1))
+    return out
+
+
 def apply_ellipsoid_height_shift_ecef(positions: np.ndarray, dh_m: float) -> np.ndarray:
     """Move each ECEF point by ``dh_m`` along the local ellipsoid outward normal (add to ellipsoidal h)."""
     dh = float(dh_m)
@@ -821,6 +837,7 @@ def compute_all_epochs(
     multipath_batch_warned = False
 
     positions, times, n_csv_rows = load_trajectory(traj_csv, step=step)
+    positions = snap_fixed_trajectory(positions)
     dh_off = float(ellipsoid_height_offset_m)
     if dh_off != 0.0:
         positions_disp = apply_ellipsoid_height_shift_ecef(positions, dh_off)

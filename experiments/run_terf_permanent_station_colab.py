@@ -576,6 +576,50 @@ def phase_summary(paths: dict[str, Path], produced: list[dict], bbox: dict[str, 
     print(f"\nWrote summary -> {paths['summary']}")
 
 
+def phase_cnr_audit(
+    paths: dict[str, Path],
+    nav_info: list[dict],
+    *,
+    min_drop_db: float,
+    az_bin_deg: float,
+    audit_tags: set[str] | None,
+) -> list[dict]:
+    env = _python_env()
+    produced: list[dict] = []
+    for item in nav_info:
+        tag = str(item["tag"])
+        if audit_tags is not None and tag not in audit_tags:
+            continue
+        obs_path = Path(item["obs"])
+        labels_csv = paths["results"] / f"terf_los_labels_{tag}_gc.csv"
+        if not labels_csv.exists():
+            print(f"  skip {tag}: missing {labels_csv}")
+            continue
+        out_json = paths["results"] / f"terf_cnr_obstruction_{tag}.json"
+        _run(
+            [
+                sys.executable,
+                str(_EXPERIMENTS / "analyze_terf_cnr_obstruction.py"),
+                "--obs-path",
+                str(obs_path),
+                "--labels-csv",
+                str(labels_csv),
+                "--output-dir",
+                str(paths["results"]),
+                "--tag",
+                tag,
+                "--min-drop-db",
+                str(float(min_drop_db)),
+                "--az-bin-deg",
+                str(float(az_bin_deg)),
+            ],
+            env=env,
+        )
+        if out_json.exists():
+            produced.append(json.loads(out_json.read_text(encoding="utf-8")))
+    return produced
+
+
 def _seed_data_from_repo(work_data: Path, repo_data: Path) -> None:
     if not repo_data.is_dir():
         return
@@ -597,7 +641,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--phase",
-        choices=("setup", "mesh", "nav", "labels", "viz", "summary", "all"),
+        choices=("setup", "mesh", "nav", "labels", "viz", "cnr_audit", "summary", "all"),
         default="all",
     )
     p.add_argument("--work-dir", type=Path, default=Path("/content/terf_work"))
@@ -637,12 +681,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--elevation-mask-deg", type=float, default=10.0)
     p.add_argument("--viz-multipath", action="store_true", help="Draw reflection paths in viz HTML")
     p.add_argument("--no-export-mesh-glb", action="store_true", help="Skip OSM mesh GLB sidecar in viz")
-    p.add_argument(
-        "--cesium-ion-token",
-        type=str,
-        default=os.environ.get("CESIUM_ION_TOKEN", ""),
-        help="Cesium ion token for terrain (or set CESIUM_ION_TOKEN)",
-    )
+    p.add_argument("--cesium-ion-token", type=str, default=os.environ.get("CESIUM_ION_TOKEN", ""), help="Cesium ion token for terrain (or set CESIUM_ION_TOKEN)")
+    p.add_argument("--cnr-audit-day", type=str, default="", help="Only C/N0 audit this day tag (e.g. 2026192)")
+    p.add_argument("--min-drop-db", type=float, default=5.0, help="C/N0 audit: min drop per epoch [dB-Hz]")
+    p.add_argument("--cnr-az-bin-deg", type=float, default=10.0, help="C/N0 audit: azimuth histogram bin width [deg]")
     return p.parse_args()
 
 
@@ -667,13 +709,16 @@ def main() -> None:
     produced: list[dict] | None = None
     viz_outputs: list[dict] | None = None
     viz_tags: set[str] | None = None
+    audit_tags: set[str] | None = None
     if str(args.viz_day).strip():
         viz_tags = {str(args.viz_day).strip()}
+    if str(args.cnr_audit_day).strip():
+        audit_tags = {str(args.cnr_audit_day).strip()}
 
     if args.phase in ("mesh", "all"):
         bbox = phase_mesh(paths, obs_files, buffer_deg=float(args.bbox_buffer_deg))
 
-    if args.phase in ("nav", "labels", "viz", "all"):
+    if args.phase in ("nav", "labels", "viz", "cnr_audit", "all"):
         nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
 
     if args.phase in ("labels", "all"):
@@ -707,6 +752,24 @@ def main() -> None:
             cesium_ion_token=str(args.cesium_ion_token),
             viz_tags=viz_tags,
         )
+
+    if args.phase in ("cnr_audit",):
+        if nav_info is None:
+            nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
+        cnr_audits = phase_cnr_audit(
+            paths,
+            nav_info,
+            min_drop_db=float(args.min_drop_db),
+            az_bin_deg=float(args.cnr_az_bin_deg),
+            audit_tags=audit_tags,
+        )
+        for rep in cnr_audits:
+            sus = rep.get("suspected_obstruction_azimuth_deg")
+            if sus:
+                print(
+                    f"  {rep['tag']}: obstruction ~{sus['mid']:.0f}° "
+                    f"({sus['lo']:.0f}–{sus['hi']:.0f}°), {sus['n_drops']} drops"
+                )
 
     if args.phase in ("summary", "all"):
         if produced is None:

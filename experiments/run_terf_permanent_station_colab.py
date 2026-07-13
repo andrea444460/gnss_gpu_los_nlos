@@ -95,6 +95,8 @@ def _python_env() -> dict[str, str]:
     py_paths = [str(_ROOT / "python"), str(_ROOT / "build")]
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(py_paths + ([existing] if existing else []))
+    # Colab/Jupyter sets MPLBACKEND=matplotlib_inline; invalid in subprocess children.
+    env["MPLBACKEND"] = "Agg"
     return env
 
 

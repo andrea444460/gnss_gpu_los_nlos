@@ -9,8 +9,14 @@ Pass ``--no-filter-by-obs`` to behave like the main script (OBS filter off).
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+# Colab/Jupyter may set MPLBACKEND=matplotlib_inline before this script is spawned.
+_mpl_backend = os.environ.get("MPLBACKEND", "")
+if not _mpl_backend or _mpl_backend.startswith("module://") or "inline" in _mpl_backend:
+    os.environ["MPLBACKEND"] = "Agg"
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent

@@ -689,6 +689,9 @@ def main() -> None:
     if args.phase in ("viz",) or (args.phase == "all" and args.with_viz):
         if nav_info is None:
             nav_info = phase_nav(paths, obs_files, repo_data_dir=args.repo_data_dir.resolve())
+        if not paths["mesh_tri"].exists():
+            print(f"Mesh not found at {paths['mesh_tri']}; running mesh phase...")
+            bbox = phase_mesh(paths, obs_files, buffer_deg=float(args.bbox_buffer_deg))
         viz_outputs = phase_viz(
             paths,
             nav_info,

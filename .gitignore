@@ -42,7 +42,11 @@ experiments/results/paper_assets/*.mp4
 experiments/results/gsdc2023_bridge_diag_*.csv
 
 # Experiment data (downloaded, not committed)
-experiments/data/
+experiments/data/*
+!experiments/data/TERF/
+experiments/data/TERF/*
+!experiments/data/TERF/TERF*.rnx
+!experiments/data/TERF/BRDC*.rnx
 
 # Intermediate frame images (GIFs are committed instead)
 experiments/results/*/frame_*.png

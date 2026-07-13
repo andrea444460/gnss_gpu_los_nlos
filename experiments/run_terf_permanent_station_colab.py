@@ -37,8 +37,9 @@ Phases
 - ``mesh``    — fetch OSM buildings around station → ``terf_osm_triangles.npy``
 - ``nav``     — download matching daily BRDC (IGS) for each OBS day
 - ``labels``  — fixed-position reference + LOS/NLOS CSV per OBS file
+- ``viz``     — Cesium 3D viewer: per-epoch rays for OBS-tracked satellites only
 - ``summary`` — aggregate stats JSON across produced label files
-- ``all``     — mesh → nav → labels → summary
+- ``all``     — mesh → nav → labels → (optional viz) → summary
 
 Data layout under ``--work-dir``::
 
@@ -47,6 +48,7 @@ Data layout under ``--work-dir``::
     results/terf_osm_triangles.npy
     results/reference_2026192.csv
     results/terf_los_labels_2026192_gc.csv
+    results/terf_los_viz_2026192.html
     results/terf_pipeline_summary.json
 """
 
@@ -342,7 +344,99 @@ def phase_labels(
     return produced
 
 
-def phase_summary(paths: dict[str, Path], produced: list[dict], bbox: dict[str, float]) -> None:
+def phase_viz(
+    paths: dict[str, Path],
+    nav_info: list[dict],
+    *,
+    n_epochs: int,
+    epoch_min_interval_s: float,
+    traj_step: float,
+    obs_match_tol_s: float,
+    elevation_mask_deg: float,
+    viz_multipath: bool,
+    export_mesh_glb: bool,
+    cesium_ion_token: str,
+    viz_tags: set[str] | None,
+) -> list[dict]:
+    """Build Cesium HTML with OBS-filtered satellite rays (like Odaiba viewer)."""
+    env = _python_env()
+    if not paths["mesh_tri"].exists():
+        raise FileNotFoundError(f"Mesh missing: {paths['mesh_tri']}. Run --phase mesh first.")
+
+    produced: list[dict] = []
+    for item in nav_info:
+        tag = str(item["tag"])
+        if viz_tags is not None and tag not in viz_tags:
+            continue
+
+        obs_path: Path = Path(item["obs"])
+        nav_path: Path = Path(item["nav"])
+        ref_csv = paths["results"] / f"reference_{tag}.csv"
+        if not ref_csv.exists():
+            _run(
+                [
+                    sys.executable,
+                    str(_EXPERIMENTS / "make_permanent_station_reference.py"),
+                    "--obs-path",
+                    str(obs_path),
+                    "--output-csv",
+                    str(ref_csv),
+                ],
+                env=env,
+            )
+
+        out_html = paths["results"] / f"terf_los_viz_{tag}.html"
+        cmd = [
+            sys.executable,
+            str(_EXPERIMENTS / "build_3d_visualization_obs.py"),
+            "--area-name",
+            f"TERF {tag}",
+            "--reference-csv",
+            str(ref_csv),
+            "--triangles-npy",
+            str(paths["mesh_tri"]),
+            "--nav",
+            str(nav_path),
+            "--obs",
+            str(obs_path),
+            "--out-html",
+            str(out_html),
+            "--n-epochs",
+            str(int(n_epochs)),
+            "--traj-step",
+            str(float(traj_step)),
+            "--epoch-min-interval-s",
+            str(float(epoch_min_interval_s)),
+            "--obs-match-tol-s",
+            str(float(obs_match_tol_s)),
+            "--elevation-mask-deg",
+            str(float(elevation_mask_deg)),
+            "--plateau-glb-radius-m",
+            "1500",
+            "--plateau-glb-max-tris",
+            "50000",
+        ]
+        if export_mesh_glb:
+            cmd.append("--export-mesh-glb")
+        if viz_multipath:
+            cmd.append("--viz-multipath")
+        if cesium_ion_token.strip():
+            cmd += ["--cesium-ion-token", cesium_ion_token.strip()]
+        _run(cmd, env=env)
+        produced.append(
+            {
+                "tag": tag,
+                "html": str(out_html),
+                "reference_csv": str(ref_csv),
+                "obs": str(obs_path),
+            }
+        )
+    if not produced:
+        raise RuntimeError("No viz outputs produced (check --viz-day filter).")
+    return produced
+
+
+def phase_summary(paths: dict[str, Path], produced: list[dict], bbox: dict[str, float], viz_outputs: list[dict] | None = None) -> None:
     summary = {
         "station": "TERF00CYP",
         "marker": "TERF",
@@ -351,6 +445,8 @@ def phase_summary(paths: dict[str, Path], produced: list[dict], bbox: dict[str, 
         "mesh_triangles_npy": str(paths["mesh_tri"]),
         "days": produced,
     }
+    if viz_outputs:
+        summary["viz_html"] = viz_outputs
     if produced:
         total_rows = sum(d["rows"] for d in produced)
         total_nlos = sum(d["nlos"] for d in produced)
@@ -383,7 +479,7 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--phase",
-        choices=("setup", "mesh", "nav", "labels", "summary", "all"),
+        choices=("setup", "mesh", "nav", "labels", "viz", "summary", "all"),
         default="all",
     )
     p.add_argument("--work-dir", type=Path, default=Path("/content/terf_work"))
@@ -399,6 +495,36 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--bbox-buffer-deg", type=float, default=TERF_BBOX_BUFFER_DEG)
     p.add_argument("--skip-copy", action="store_true", help="Do not copy from --repo-data-dir")
+    p.add_argument("--with-viz", action="store_true", help="Include 3D OBS viewer when --phase all")
+    p.add_argument(
+        "--viz-day",
+        type=str,
+        default="",
+        help="Only viz this day tag (e.g. 2026192). Empty = all OBS days.",
+    )
+    p.add_argument("--n-epochs-viz", type=int, default=24, help="Viz epochs spread along the day")
+    p.add_argument(
+        "--epoch-min-interval-s",
+        type=float,
+        default=600.0,
+        help="Min GPS spacing between consecutive viz epochs (default 600 s)",
+    )
+    p.add_argument("--traj-step-viz", type=float, default=1.0, help="Reference CSV row stride for viz")
+    p.add_argument(
+        "--obs-match-tol-s",
+        type=float,
+        default=20.0,
+        help="Max |ΔGPS TOW| for matching OBS epoch (TERF sampling is 30 s)",
+    )
+    p.add_argument("--elevation-mask-deg", type=float, default=10.0)
+    p.add_argument("--viz-multipath", action="store_true", help="Draw reflection paths in viz HTML")
+    p.add_argument("--no-export-mesh-glb", action="store_true", help="Skip OSM mesh GLB sidecar in viz")
+    p.add_argument(
+        "--cesium-ion-token",
+        type=str,
+        default=os.environ.get("CESIUM_ION_TOKEN", ""),
+        help="Cesium ion token for terrain (or set CESIUM_ION_TOKEN)",
+    )
     return p.parse_args()
 
 
@@ -421,11 +547,15 @@ def main() -> None:
     bbox: dict[str, float] | None = None
     nav_info: list[dict] | None = None
     produced: list[dict] | None = None
+    viz_outputs: list[dict] | None = None
+    viz_tags: set[str] | None = None
+    if str(args.viz_day).strip():
+        viz_tags = {str(args.viz_day).strip()}
 
     if args.phase in ("mesh", "all"):
         bbox = phase_mesh(paths, obs_files, buffer_deg=float(args.bbox_buffer_deg))
 
-    if args.phase in ("nav", "labels", "all"):
+    if args.phase in ("nav", "labels", "viz", "all"):
         nav_info = phase_nav(paths, obs_files)
 
     if args.phase in ("labels", "all"):
@@ -440,6 +570,23 @@ def main() -> None:
             batch_size=int(args.batch_size),
         )
 
+    if args.phase in ("viz",) or (args.phase == "all" and args.with_viz):
+        if nav_info is None:
+            nav_info = phase_nav(paths, obs_files)
+        viz_outputs = phase_viz(
+            paths,
+            nav_info,
+            n_epochs=int(args.n_epochs_viz),
+            epoch_min_interval_s=float(args.epoch_min_interval_s),
+            traj_step=float(args.traj_step_viz),
+            obs_match_tol_s=float(args.obs_match_tol_s),
+            elevation_mask_deg=float(args.elevation_mask_deg),
+            viz_multipath=bool(args.viz_multipath),
+            export_mesh_glb=not bool(args.no_export_mesh_glb),
+            cesium_ion_token=str(args.cesium_ion_token),
+            viz_tags=viz_tags,
+        )
+
     if args.phase in ("summary", "all"):
         if produced is None:
             # Re-scan existing label CSVs
@@ -451,7 +598,7 @@ def main() -> None:
         if bbox is None:
             ecef = _read_ecef_from_obs(obs_files[0])
             bbox = _station_bbox(ecef, float(args.bbox_buffer_deg))
-        phase_summary(paths, produced or [], bbox)
+        phase_summary(paths, produced or [], bbox, viz_outputs=viz_outputs)
 
     print("\n=== Done ===")
     print("Work directory:", paths["work"])
@@ -459,6 +606,9 @@ def main() -> None:
         p = paths[key]
         if p.exists():
             print(f"  {key}: {p}")
+    if viz_outputs:
+        for v in viz_outputs:
+            print(f"  viz: {v['html']}")
 
 
 if __name__ == "__main__":

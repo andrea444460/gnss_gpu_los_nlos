@@ -1288,6 +1288,42 @@ function rebuildSatelliteSelectorOptions() {
   });
 }
 let cnrChartPrn = null;
+const RAY_COLOR_LOS = '#00d4aa';
+const RAY_COLOR_NLOS = '#ff6b6b';
+const RAY_COLOR_SELECTED = '#ffd700';
+const RAY_WIDTH_LOS = 4;
+const RAY_WIDTH_NLOS = 5;
+const RAY_WIDTH_SELECTED = 8;
+function isCnrSelectedPrn(prnRaw) {
+  if (!cnrChartPrn) return false;
+  return normalizeCnrPrnKey(prnRaw) === cnrChartPrn;
+}
+function styleForRay(ray) {
+  if (isCnrSelectedPrn(ray.prn)) {
+    return {
+      color: Cesium.Color.fromCssColorString(RAY_COLOR_SELECTED),
+      width: RAY_WIDTH_SELECTED,
+    };
+  }
+  return {
+    color: Cesium.Color.fromCssColorString(ray.los ? RAY_COLOR_LOS : RAY_COLOR_NLOS),
+    width: ray.los ? RAY_WIDTH_LOS : RAY_WIDTH_NLOS,
+  };
+}
+function styleForMultipath(mp) {
+  if (isCnrSelectedPrn(mp.prn)) {
+    return {
+      color: Cesium.Color.fromCssColorString(RAY_COLOR_SELECTED),
+      width: RAY_WIDTH_SELECTED,
+    };
+  }
+  return {
+    color: mp.nlosMp
+      ? Cesium.Color.fromCssColorString('#ff6b6b')
+      : Cesium.Color.fromCssColorString('#ff9f1c'),
+    width: 3,
+  };
+}
 function normalizeCnrPrnKey(raw) {
   return String(raw || '').trim().toUpperCase();
 }
@@ -1414,7 +1450,7 @@ function drawCnrChart(ds, prn, cursorTow) {
   ctx.fillText(maxY.toFixed(0), 6, padT + 10);
   ctx.fillText('GPS TOW ' + minX.toFixed(0) + '\u2013' + maxX.toFixed(0) + ' s', padL, hCss - 10);
   hintEl.textContent =
-    'Orange line: current epoch (GPS TOW). Scrub epoch here or on the main slider; click LOS/NLOS or multipath polyline for this PRN.';
+    'Selected PRN ray is highlighted gold in the 3D view. Orange line: current epoch (GPS TOW). Scrub epoch here or on the main slider; click LOS/NLOS or multipath polyline for this PRN.';
 }
 function openCnrPanel(prn) {
   cnrChartPrn = normalizeCnrPrnKey(prn);
@@ -1422,11 +1458,13 @@ function openCnrPanel(prn) {
   if (bd) bd.classList.add('show');
   if (typeof syncEpochSlider === 'function') syncEpochSlider();
   refreshCnrChart();
+  if (typeof paintFrame === 'function') paintFrame();
 }
 function closeCnrPanel() {
   const bd = document.getElementById('cnrBackdrop');
   if (bd) bd.classList.remove('show');
   cnrChartPrn = null;
+  if (typeof paintFrame === 'function') paintFrame();
 }
 function refreshCnrChart() {
   if (!cnrChartPrn) return;
@@ -2166,15 +2204,13 @@ function showEpoch(ds, epochIdx) {{
           lineEnt.show = false;
           continue;
         }}
-        const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
-                              : Cesium.Color.fromCssColorString('#ff6b6b');
-        const widthPx = ray.los ? 4 : 5;
+        const sty = styleForRay(ray);
         const p0 = Cesium.Cartesian3.fromDegrees(lon, lat, rxH);
         const p1 = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
         lineEnt.show = true;
         lineEnt.polyline.positions = new Cesium.ConstantProperty([p0, p1]);
-        lineEnt.polyline.material = new Cesium.ColorMaterialProperty(color);
-        lineEnt.polyline.width = new Cesium.ConstantProperty(widthPx);
+        lineEnt.polyline.material = new Cesium.ColorMaterialProperty(sty.color);
+        lineEnt.polyline.width = new Cesium.ConstantProperty(sty.width);
       }}
       for (let i = nr; i < pooledRayLines.length; i++) {{
         pooledRayLines[i].show = false;
@@ -2186,8 +2222,6 @@ function showEpoch(ds, epochIdx) {{
       const reflList = reflAll.filter(mp => prnPassesFilters(mp.prn));
       const nm = showMpGeom ? reflList.length : 0;
       ensureMultipathLinePool(nm);
-      const orange = Cesium.Color.fromCssColorString('#ff9f1c');
-      const mpNlosRed = Cesium.Color.fromCssColorString('#ff6b6b');
       for (let j = 0; j < nm; j++) {{
         const mp = reflList[j];
         const q0 = Cesium.Cartesian3.fromDegrees(mp.inc[1], mp.inc[0], mp.inc[2]);
@@ -2198,8 +2232,9 @@ function showEpoch(ds, epochIdx) {{
         ent.allowPicking = true;
         ent.show = true;
         ent.polyline.positions = new Cesium.ConstantProperty([q0, q1, q2]);
-        const mpCol = mp.nlosMp ? mpNlosRed : orange;
-        ent.polyline.material = new Cesium.ColorMaterialProperty(mpCol);
+        const mpSty = styleForMultipath(mp);
+        ent.polyline.material = new Cesium.ColorMaterialProperty(mpSty.color);
+        ent.polyline.width = new Cesium.ConstantProperty(mpSty.width);
       }}
       for (let j = nm; j < pooledMultipathLines.length; j++) {{
         const hid = pooledMultipathLines[j];
@@ -2211,12 +2246,11 @@ function showEpoch(ds, epochIdx) {{
         const le = pooledRayLabels[i];
         if (showSatLabels && i < nr) {{
           const ray = epoch.rays[i];
-          const color = ray.los ? Cesium.Color.fromCssColorString('#00d4aa')
-                                : Cesium.Color.fromCssColorString('#ff6b6b');
+          const sty = styleForRay(ray);
           le.show = true;
           le.position = Cesium.Cartesian3.fromDegrees(ray.end[1], ray.end[0], ray.end[2]);
           le.label.text = new Cesium.ConstantProperty('PRN' + ray.prn + (ray.los ? ' LOS' : ' NLOS'));
-          le.label.fillColor = new Cesium.ConstantProperty(color);
+          le.label.fillColor = new Cesium.ConstantProperty(sty.color);
         }} else {{
           le.show = false;
         }}

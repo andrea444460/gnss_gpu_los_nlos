@@ -7,6 +7,12 @@ Pipeline:
 - evaluate LOS/NLOS counts over time using NAV ephemeris + building mesh
 - optional DEM horizon prefilter for terrain blocking
 - output CSV (HTML rendering moved to dedicated script)
+
+Scalability metrics (opt-in ``--metrics-csv``)::
+
+  When set, write a one-row CSV with BVH LOS timings, ray counts, throughput,
+  and an *estimated* FLOP count (same model as export_los_labels_from_urbannav).
+  This area-map path does not run multipath. No extra CSV I/O when omitted.
 """
 
 from __future__ import annotations
@@ -237,7 +243,37 @@ def _parse_args() -> argparse.Namespace:
         default=0,
         help="If >0, run CPU preprocess on first N point-chunks for CUDA/CPU mismatch logs.",
     )
+    p.add_argument(
+        "--metrics-csv",
+        type=Path,
+        default=None,
+        help="If set, write a light scalability metrics CSV (raytrace LOS timings; low overhead).",
+    )
     return p.parse_args()
+
+
+# Order-of-magnitude FLOP costs for estimated BVH raytracing work (not CUPTI).
+_FLOPS_AABB_TEST = 30.0
+_FLOPS_TRI_INTERSECT = 80.0
+_AVG_TRI_TESTS_PER_RAY = 8.0
+
+
+def _estimate_bvh_flops(n_rays: int, n_bvh_nodes: int) -> float:
+    if n_rays <= 0 or n_bvh_nodes <= 0:
+        return 0.0
+    depth = max(1.0, math.log2(float(n_bvh_nodes)))
+    return float(n_rays) * (
+        depth * _FLOPS_AABB_TEST + _AVG_TRI_TESTS_PER_RAY * _FLOPS_TRI_INTERSECT
+    )
+
+
+def _write_metrics_csv(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(row.keys())
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerow(row)
 
 
 def main() -> None:
@@ -374,6 +410,10 @@ def main() -> None:
     tblk_sum = np.zeros(n_points, dtype=np.float64)
     tblk_vis_sum = np.zeros(n_points, dtype=np.float64)
     n_epochs_total = 0
+    do_metrics = args.metrics_csv is not None
+    m_rays = 0
+    n_triangles = int(len(tri))
+    n_bvh_nodes = int(bvh.n_nodes)
 
     point_lats = np.asarray([float(p["lat_deg"]) for p in points], dtype=np.float64)
     point_lons = np.asarray([float(p["lon_deg"]) for p in points], dtype=np.float64)
@@ -494,6 +534,9 @@ def main() -> None:
             t_cr = time.perf_counter()
             los = np.asarray(bvh.check_los_batch(rx_flat, sat_work), dtype=bool)
             profile["compute_raytrace_s"] += time.perf_counter() - t_cr
+            if do_metrics:
+                # Submitted BVH rays: point × epoch × sat in this chunk (cheap int count).
+                m_rays += int(n_p) * int(n_t) * int(n_sat)
             los_vis = np.logical_and(los, visible)
             nlos_vis = np.logical_and(~los, visible)
 
@@ -611,6 +654,44 @@ def main() -> None:
         f"throughput={point_epochs_per_s:,.0f} point-epochs/s",
         flush=True,
     )
+    if do_metrics:
+        los_s = float(profile["compute_raytrace_s"])
+        est = _estimate_bvh_flops(m_rays, n_bvh_nodes)
+        summary = {
+            "run_id": args.out_csv.stem,
+            "n_points": n_points,
+            "n_epochs": int(tow_samples.size),
+            "n_epochs_processed": int(n_epochs_total),
+            "n_triangles": n_triangles,
+            "n_bvh_nodes": n_bvh_nodes,
+            "point_batch_chunk": int(args.point_batch_chunk),
+            "eph_batch_chunk": int(args.eph_batch_chunk),
+            "cuda_bvh_batch": 1,
+            "n_rays": m_rays,
+            "time_wall_s": f"{dt_total:.6f}",
+            "time_raytrace_los_s": f"{los_s:.6f}",
+            "time_raytrace_multipath_s": f"{0.0:.6f}",
+            "time_raytrace_total_s": f"{los_s:.6f}",
+            "time_preprocess_s": f"{float(profile['compute_preprocess_s']):.6f}",
+            "time_compute_total_s": f"{float(profile['compute_total_s']):.6f}",
+            "throughput_rays_los_per_s": f"{(m_rays / max(los_s, 1e-12)):.3f}",
+            "throughput_point_epochs_per_s": f"{point_epochs_per_s:.3f}",
+            "est_flops_los": f"{est:.6e}",
+            "est_gflops_los": f"{(est / max(los_s, 1e-12) / 1e9):.4f}",
+            "est_flops_raytrace_total": f"{est:.6e}",
+            "est_gflops_raytrace_total": f"{(est / max(los_s, 1e-12) / 1e9):.4f}",
+            "triangles_npy": str(args.triangles_npy),
+            "nav": str(args.nav),
+        }
+        _write_metrics_csv(args.metrics_csv, summary)
+        print(f"[area] metrics: {args.metrics_csv}", flush=True)
+        print(
+            "[profile][raytrace] "
+            f"los={los_s:.3f}s rays={m_rays} "
+            f"rays/s={m_rays / max(los_s, 1e-12):,.0f} "
+            f"est_GFLOPs={est / max(los_s, 1e-12) / 1e9:.2f}",
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

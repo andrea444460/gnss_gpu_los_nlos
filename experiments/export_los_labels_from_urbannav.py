@@ -9,6 +9,15 @@ from ``reference.csv`` and computes per-satellite LOS/NLOS labels using:
   3) geometric ray-tracing in ``UrbanSignalSimulator``.
 
 Output is a flat CSV suitable for ML evaluation/benchmarking.
+
+Terrain columns (require ``--dem-path`` or ``--dem-auto-download``)::
+
+  - ``terrain_blocked``: 1 if sat is below the DEM horizon (any elevation)
+  - ``terrain_blocked_visible``: 1 if sat is above the elevation mask *and*
+    blocked by terrain (the metric for terrain impact on “visible” sats)
+  - ``is_los_buildings``: building ray-trace LOS with elevation mask only
+    (ignores terrain) — use with ``is_los`` for with/without-DEM ablation
+  - ``is_los``: final label = buildings ∧ elevation mask ∧ not terrain-blocked
 """
 
 from __future__ import annotations
@@ -554,6 +563,10 @@ def main() -> None:
         )
     else:
         print("  terrain horizon prefilter: disabled")
+        print(
+            "  WARNING: terrain_blocked / terrain_blocked_visible will be 0. "
+            "Re-run with --dem-path or --dem-auto-download to fill them."
+        )
 
     print("[3/5] Preparing epoch jobs...")
     jobs: list[EpochJob] = []
@@ -637,11 +650,13 @@ def main() -> None:
                 "obs_code",
                 "pseudorange_m",
                 "is_los",
+                "is_los_buildings",
                 "is_visible",
                 "elevation_deg",
                 "azimuth_deg",
                 "excess_delay_m",
                 "terrain_blocked",
+                "terrain_blocked_visible",
                 "rx_x_m",
                 "rx_y_m",
                 "rx_z_m",
@@ -719,15 +734,19 @@ def main() -> None:
                             pressure_hpa=usim.atmo_pressure_hpa,
                             temp_c=usim.atmo_temp_c,
                         )
-                    visible = el_vis >= usim.elevation_mask_rad
+                    above_mask = el_vis >= usim.elevation_mask_rad
                     terrain_blocked = np.zeros(len(selected_ids), dtype=bool)
                     if terrain_mask is not None:
                         terrain_visible = terrain_mask.terrain_visible_mask(job.rx_xyz, sat_ecef)
                         terrain_blocked = ~terrain_visible
-                        visible = np.logical_and(visible, terrain_visible)
-                    is_los = np.ones(len(selected_ids), dtype=bool)
+                    terrain_blocked_visible = np.logical_and(terrain_blocked, above_mask)
+                    # Building-only LOS (elevation mask, ignore terrain).
+                    is_los_buildings = np.zeros(len(selected_ids), dtype=bool)
+                    is_los_buildings[above_mask] = los_pad[bi, : len(selected_ids)][above_mask]
+                    # Final visibility / LOS: also require clear terrain horizon.
+                    visible = np.logical_and(above_mask, ~terrain_blocked)
+                    is_los = np.zeros(len(selected_ids), dtype=bool)
                     is_los[visible] = los_pad[bi, : len(selected_ids)][visible]
-                    is_los[~visible] = False
                     excess_delays = np.zeros(len(selected_ids), dtype=np.float64)
                     excess_delays[visible] = delay_pad[bi, : len(selected_ids)][visible]
 
@@ -750,11 +769,13 @@ def main() -> None:
                                 "obs_code": obs_code_by_sat.get(sat_id, args.obs_code),
                                 "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
                                 "is_los": int(bool(is_los[i])),
+                                "is_los_buildings": int(bool(is_los_buildings[i])),
                                 "is_visible": int(bool(visible[i])),
                                 "elevation_deg": f"{elev_deg:.3f}",
                                 "azimuth_deg": f"{az_deg:.3f}",
                                 "excess_delay_m": f"{float(excess_delays[i]):.3f}",
                                 "terrain_blocked": int(bool(terrain_blocked[i])),
+                                "terrain_blocked_visible": int(bool(terrain_blocked_visible[i])),
                                 "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
                                 "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
                                 "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",
@@ -775,12 +796,16 @@ def main() -> None:
                         sat_clk=sat_clk,
                         prn_list=prn_ints,
                     )
+                    above_mask = np.asarray(result["visible"], dtype=bool).copy()
                     terrain_blocked = np.zeros(len(selected_ids), dtype=bool)
                     if terrain_mask is not None:
                         terrain_visible = terrain_mask.terrain_visible_mask(job.rx_xyz, sat_ecef)
                         terrain_blocked = ~terrain_visible
-                        result["visible"] = np.logical_and(result["visible"], terrain_visible)
-                        result["is_los"] = np.logical_and(result["is_los"], terrain_visible)
+                    terrain_blocked_visible = np.logical_and(terrain_blocked, above_mask)
+                    is_los_buildings = np.asarray(result["is_los"], dtype=bool).copy()
+                    is_los_buildings = np.logical_and(is_los_buildings, above_mask)
+                    result["visible"] = np.logical_and(above_mask, ~terrain_blocked)
+                    result["is_los"] = np.logical_and(is_los_buildings, ~terrain_blocked)
 
                     for i, sat_id in enumerate(selected_ids):
                         parsed = _parse_sat_id(sat_id)
@@ -801,11 +826,13 @@ def main() -> None:
                                 "obs_code": obs_code_by_sat.get(sat_id, args.obs_code),
                                 "pseudorange_m": f"{pr_by_sat.get(sat_id, float('nan')):.3f}",
                                 "is_los": int(bool(result["is_los"][i])),
+                                "is_los_buildings": int(bool(is_los_buildings[i])),
                                 "is_visible": int(bool(result["visible"][i])),
                                 "elevation_deg": f"{elev_deg:.3f}",
                                 "azimuth_deg": f"{az_deg:.3f}",
                                 "excess_delay_m": f"{float(result['excess_delays'][i]):.3f}",
                                 "terrain_blocked": int(bool(terrain_blocked[i])),
+                                "terrain_blocked_visible": int(bool(terrain_blocked_visible[i])),
                                 "rx_x_m": f"{float(job.rx_xyz[0]):.3f}",
                                 "rx_y_m": f"{float(job.rx_xyz[1]):.3f}",
                                 "rx_z_m": f"{float(job.rx_xyz[2]):.3f}",

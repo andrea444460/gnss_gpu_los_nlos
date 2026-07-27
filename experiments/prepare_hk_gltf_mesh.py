@@ -516,7 +516,8 @@ def main() -> None:
             f"{nav_arg}"
             f"{ref_arg}"
             f"--triangles-npy \"{tri_arg}\" "
-            "--output-csv \"experiments/results/hk_los_labels.csv\" --systems G,R,E,C,J,I,S --batch-size 512"
+            "--output-csv \"experiments/results/hk_los_labels.csv\" --systems G,R,E,C,J,I,S --batch-size 512 "
+            "--dem-auto-download --dem-auto-out experiments/results/hk_klt_dem.tif"
         )
         print("\nSuggested 3D visualization command:")
         print(

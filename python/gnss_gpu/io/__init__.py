@@ -6,6 +6,15 @@ from gnss_gpu.io.plateau import PlateauLoader, load_plateau
 from gnss_gpu.io.nmea_writer import NMEAWriter, positions_to_nmea, ecef_to_nmea
 from gnss_gpu.io.urbannav import UrbanNavLoader
 from gnss_gpu.io.ppc import PPCDatasetLoader
+from gnss_gpu.io.osm_roads import (
+    BBox,
+    RoadEdge,
+    RoadGraph,
+    RoadNode,
+    build_directed_road_graph,
+    fetch_roads_overpass,
+    sample_road_points,
+)
 
 __all__ = [
     "read_rinex_obs",
@@ -21,4 +30,11 @@ __all__ = [
     "ecef_to_nmea",
     "UrbanNavLoader",
     "PPCDatasetLoader",
+    "BBox",
+    "RoadEdge",
+    "RoadGraph",
+    "RoadNode",
+    "build_directed_road_graph",
+    "fetch_roads_overpass",
+    "sample_road_points",
 ]

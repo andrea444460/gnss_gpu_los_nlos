@@ -1,177 +1,1312 @@
 {
-  "note": "Offline OSM-like Genova centro ways with shared intersection coordinates.",
+  "note": "Real OSM ways for Genova centro (Overpass export). Coordinates match the basemap.",
+  "bbox": [
+    44.4055,
+    8.9305,
+    44.4088,
+    8.9358
+  ],
+  "source": "overpass-api.de",
   "elements": [
     {
       "type": "way",
-      "id": 1001,
-      "tags": {"highway": "primary", "name": "Via XX Settembre", "oneway": "yes"},
+      "id": 5832499,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Roma",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40610, "lon": 8.93080},
-        {"lat": 44.40625, "lon": 8.93150},
-        {"lat": 44.40640, "lon": 8.93220},
-        {"lat": 44.40655, "lon": 8.93300},
-        {"lat": 44.40670, "lon": 8.93380},
-        {"lat": 44.40685, "lon": 8.93460},
-        {"lat": 44.40700, "lon": 8.93530}
+        {
+          "lat": 44.4085887,
+          "lon": 8.9348019
+        },
+        {
+          "lat": 44.4086294,
+          "lon": 8.9348961
+        },
+        {
+          "lat": 44.4087841,
+          "lon": 8.9352543
+        },
+        {
+          "lat": 44.4089788,
+          "lon": 8.9357051
+        },
+        {
+          "lat": 44.4091801,
+          "lon": 8.9361711
+        },
+        {
+          "lat": 44.4093854,
+          "lon": 8.9366465
+        },
+        {
+          "lat": 44.4095771,
+          "lon": 8.9370904
+        },
+        {
+          "lat": 44.4096987,
+          "lon": 8.9373719
+        },
+        {
+          "lat": 44.4097148,
+          "lon": 8.9374092
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1002,
-      "tags": {"highway": "secondary", "name": "Via Roma"},
+      "id": 15041148,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Venticinque Aprile",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40790, "lon": 8.93220},
-        {"lat": 44.40740, "lon": 8.93220},
-        {"lat": 44.40690, "lon": 8.93220},
-        {"lat": 44.40640, "lon": 8.93220},
-        {"lat": 44.40580, "lon": 8.93220}
+        {
+          "lat": 44.4087338,
+          "lon": 8.9345469
+        },
+        {
+          "lat": 44.4086055,
+          "lon": 8.9344965
+        },
+        {
+          "lat": 44.4084614,
+          "lon": 8.9344429
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1003,
-      "tags": {"highway": "residential", "name": "Via San Lorenzo"},
+      "id": 16767458,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Giosu\u00e8 Carducci",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40770, "lon": 8.93100},
-        {"lat": 44.40720, "lon": 8.93160},
-        {"lat": 44.40680, "lon": 8.93200},
-        {"lat": 44.40640, "lon": 8.93220},
-        {"lat": 44.40600, "lon": 8.93300}
+        {
+          "lat": 44.4060083,
+          "lon": 8.9361203
+        },
+        {
+          "lat": 44.4060544,
+          "lon": 8.9359712
+        },
+        {
+          "lat": 44.4061132,
+          "lon": 8.9357889
+        },
+        {
+          "lat": 44.406144,
+          "lon": 8.9357209
+        },
+        {
+          "lat": 44.4061652,
+          "lon": 8.9356759
+        },
+        {
+          "lat": 44.4061822,
+          "lon": 8.9356469
+        },
+        {
+          "lat": 44.4062021,
+          "lon": 8.9356223
+        },
+        {
+          "lat": 44.4062679,
+          "lon": 8.935545
+        },
+        {
+          "lat": 44.4063281,
+          "lon": 8.9354822
+        },
+        {
+          "lat": 44.4063965,
+          "lon": 8.9354259
+        },
+        {
+          "lat": 44.4064209,
+          "lon": 8.9354107
+        },
+        {
+          "lat": 44.4064419,
+          "lon": 8.9354064
+        },
+        {
+          "lat": 44.4064615,
+          "lon": 8.9354112
+        },
+        {
+          "lat": 44.4064794,
+          "lon": 8.9354201
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1004,
-      "tags": {"highway": "residential", "name": "Via Canneto il Lungo"},
+      "id": 20676491,
+      "tags": {
+        "highway": "residential",
+        "name": "Via dei Ceb\u00e0",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40790, "lon": 8.93360},
-        {"lat": 44.40740, "lon": 8.93340},
-        {"lat": 44.40695, "lon": 8.93320},
-        {"lat": 44.40655, "lon": 8.93300},
-        {"lat": 44.40610, "lon": 8.93280}
+        {
+          "lat": 44.4087835,
+          "lon": 8.9366047
+        },
+        {
+          "lat": 44.4085441,
+          "lon": 8.9360784
+        },
+        {
+          "lat": 44.4083195,
+          "lon": 8.9355843
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1005,
-      "tags": {"highway": "tertiary", "name": "Via Dante", "oneway": "yes"},
+      "id": 21381234,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Morcento",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40570, "lon": 8.93120},
-        {"lat": 44.40590, "lon": 8.93180},
-        {"lat": 44.40615, "lon": 8.93250},
-        {"lat": 44.40640, "lon": 8.93320},
-        {"lat": 44.40670, "lon": 8.93380}
+        {
+          "lat": 44.4064794,
+          "lon": 8.9354201
+        },
+        {
+          "lat": 44.4064973,
+          "lon": 8.9354386
+        },
+        {
+          "lat": 44.4065083,
+          "lon": 8.9354668
+        },
+        {
+          "lat": 44.4065148,
+          "lon": 8.9355146
+        },
+        {
+          "lat": 44.4065202,
+          "lon": 8.935567
+        },
+        {
+          "lat": 44.4065246,
+          "lon": 8.9356226
+        },
+        {
+          "lat": 44.4065281,
+          "lon": 8.9356801
+        },
+        {
+          "lat": 44.40653,
+          "lon": 8.9357444
+        },
+        {
+          "lat": 44.4065261,
+          "lon": 8.9358112
+        },
+        {
+          "lat": 44.4065152,
+          "lon": 8.9358811
+        },
+        {
+          "lat": 44.4064924,
+          "lon": 8.935984
+        },
+        {
+          "lat": 44.4064705,
+          "lon": 8.9360783
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1006,
-      "tags": {"highway": "residential", "name": "Vico dietro il Coro"},
+      "id": 21559740,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Venticinque Aprile"
+      },
       "geometry": [
-        {"lat": 44.40730, "lon": 8.93080},
-        {"lat": 44.40710, "lon": 8.93140},
-        {"lat": 44.40690, "lon": 8.93200},
-        {"lat": 44.40680, "lon": 8.93220}
+        {
+          "lat": 44.4084614,
+          "lon": 8.9344429
+        },
+        {
+          "lat": 44.4083852,
+          "lon": 8.9343933
+        },
+        {
+          "lat": 44.4083162,
+          "lon": 8.9343444
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1007,
-      "tags": {"highway": "residential", "name": "Via Luccoli"},
+      "id": 21560300,
+      "tags": {
+        "highway": "service",
+        "name": "Largo delle Fucine",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40820, "lon": 8.93180},
-        {"lat": 44.40790, "lon": 8.93220},
-        {"lat": 44.40750, "lon": 8.93260},
-        {"lat": 44.40710, "lon": 8.93300},
-        {"lat": 44.40670, "lon": 8.93340}
+        {
+          "lat": 44.4074178,
+          "lon": 8.9356154
+        },
+        {
+          "lat": 44.4074953,
+          "lon": 8.9356542
+        },
+        {
+          "lat": 44.4077905,
+          "lon": 8.9357905
+        },
+        {
+          "lat": 44.4079204,
+          "lon": 8.9358334
+        },
+        {
+          "lat": 44.4079606,
+          "lon": 8.9358492
+        },
+        {
+          "lat": 44.4079758,
+          "lon": 8.9358778
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1008,
-      "tags": {"highway": "secondary", "name": "Via Ettore Vernazza"},
+      "id": 23004703,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Antonio Meucci",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40685, "lon": 8.93460},
-        {"lat": 44.40725, "lon": 8.93480},
-        {"lat": 44.40765, "lon": 8.93500},
-        {"lat": 44.40810, "lon": 8.93520}
+        {
+          "lat": 44.4059364,
+          "lon": 8.9339887
+        },
+        {
+          "lat": 44.4059553,
+          "lon": 8.9340152
+        },
+        {
+          "lat": 44.4063187,
+          "lon": 8.9345263
+        },
+        {
+          "lat": 44.4063315,
+          "lon": 8.9345519
+        },
+        {
+          "lat": 44.4063648,
+          "lon": 8.9346372
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1009,
-      "tags": {"highway": "residential", "name": "Salita Pollaiuoli"},
+      "id": 23569964,
+      "tags": {
+        "highway": "residential",
+        "name": "Via di Porta Soprana",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40600, "lon": 8.93300},
-        {"lat": 44.40580, "lon": 8.93350},
-        {"lat": 44.40570, "lon": 8.93410},
-        {"lat": 44.40570, "lon": 8.93470}
+        {
+          "lat": 44.4062175,
+          "lon": 8.93356
+        },
+        {
+          "lat": 44.4061877,
+          "lon": 8.9336026
+        },
+        {
+          "lat": 44.4059364,
+          "lon": 8.9339887
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1010,
-      "tags": {"highway": "residential", "name": "Via di Porta Soprana"},
+      "id": 23795694,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Petrarca",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40580, "lon": 8.93220},
-        {"lat": 44.40575, "lon": 8.93300},
-        {"lat": 44.40570, "lon": 8.93410},
-        {"lat": 44.40580, "lon": 8.93490},
-        {"lat": 44.40600, "lon": 8.93530}
+        {
+          "lat": 44.406683,
+          "lon": 8.9341293
+        },
+        {
+          "lat": 44.4066018,
+          "lon": 8.934009
+        },
+        {
+          "lat": 44.4063093,
+          "lon": 8.9335804
+        },
+        {
+          "lat": 44.4062864,
+          "lon": 8.9335468
+        },
+        {
+          "lat": 44.406257,
+          "lon": 8.9335036
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1011,
-      "tags": {"highway": "tertiary", "name": "Via Cascione"},
+      "id": 76701708,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Venticinque Aprile",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40800, "lon": 8.93370},
-        {"lat": 44.40755, "lon": 8.93400},
-        {"lat": 44.40720, "lon": 8.93430},
-        {"lat": 44.40685, "lon": 8.93460}
+        {
+          "lat": 44.4084614,
+          "lon": 8.9344429
+        },
+        {
+          "lat": 44.4085084,
+          "lon": 8.934581
+        },
+        {
+          "lat": 44.4085887,
+          "lon": 8.9348019
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1012,
-      "tags": {"highway": "residential", "name": "Via al Ponte Reale"},
+      "id": 76701714,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Venticinque Aprile",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40830, "lon": 8.93090},
-        {"lat": 44.40800, "lon": 8.93140},
-        {"lat": 44.40770, "lon": 8.93180},
-        {"lat": 44.40740, "lon": 8.93220}
+        {
+          "lat": 44.4087338,
+          "lon": 8.9345469
+        },
+        {
+          "lat": 44.408684,
+          "lon": 8.9345753
+        },
+        {
+          "lat": 44.4086414,
+          "lon": 8.9346255
+        },
+        {
+          "lat": 44.4086055,
+          "lon": 8.9346966
+        },
+        {
+          "lat": 44.4085887,
+          "lon": 8.9348019
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1013,
-      "tags": {"highway": "residential", "name": "Vico della Casana"},
+      "id": 80765480,
+      "tags": {
+        "highway": "residential",
+        "name": "Largo delle Fucine",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40690, "lon": 8.93200},
-        {"lat": 44.40665, "lon": 8.93210},
-        {"lat": 44.40640, "lon": 8.93220},
-        {"lat": 44.40620, "lon": 8.93240}
+        {
+          "lat": 44.4079784,
+          "lon": 8.9357789
+        },
+        {
+          "lat": 44.4078798,
+          "lon": 8.9357456
+        },
+        {
+          "lat": 44.4078337,
+          "lon": 8.9356952
+        },
+        {
+          "lat": 44.4075695,
+          "lon": 8.9354062
+        },
+        {
+          "lat": 44.4074906,
+          "lon": 8.935318
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1014,
-      "tags": {"highway": "primary_link", "name": "Largo Eros Lanfranco", "oneway": "yes"},
+      "id": 126272373,
+      "tags": {
+        "highway": "residential",
+        "name": "Largo delle Fucine"
+      },
       "geometry": [
-        {"lat": 44.40670, "lon": 8.93380},
-        {"lat": 44.40680, "lon": 8.93420},
-        {"lat": 44.40685, "lon": 8.93460}
+        {
+          "lat": 44.4080386,
+          "lon": 8.9357268
+        },
+        {
+          "lat": 44.4079996,
+          "lon": 8.9357609
+        },
+        {
+          "lat": 44.4079784,
+          "lon": 8.9357789
+        }
       ]
     },
     {
       "type": "way",
-      "id": 1015,
-      "tags": {"highway": "residential", "name": "Via Giustiniani"},
+      "id": 139550803,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
       "geometry": [
-        {"lat": 44.40790, "lon": 8.93360},
-        {"lat": 44.40765, "lon": 8.93420},
-        {"lat": 44.40740, "lon": 8.93470},
-        {"lat": 44.40725, "lon": 8.93480}
+        {
+          "lat": 44.4051981,
+          "lon": 8.9354528
+        },
+        {
+          "lat": 44.4052824,
+          "lon": 8.9355072
+        },
+        {
+          "lat": 44.4053264,
+          "lon": 8.9355105
+        },
+        {
+          "lat": 44.4053476,
+          "lon": 8.935482
+        },
+        {
+          "lat": 44.4053906,
+          "lon": 8.9354242
+        },
+        {
+          "lat": 44.4054391,
+          "lon": 8.9353592
+        },
+        {
+          "lat": 44.4054905,
+          "lon": 8.9352903
+        },
+        {
+          "lat": 44.4055001,
+          "lon": 8.9352774
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 139550806,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4053042,
+          "lon": 8.9348505
+        },
+        {
+          "lat": 44.4054128,
+          "lon": 8.9348739
+        },
+        {
+          "lat": 44.4054224,
+          "lon": 8.9349357
+        },
+        {
+          "lat": 44.4054346,
+          "lon": 8.9350135
+        },
+        {
+          "lat": 44.405444,
+          "lon": 8.9350802
+        },
+        {
+          "lat": 44.4054484,
+          "lon": 8.935102
+        },
+        {
+          "lat": 44.4054684,
+          "lon": 8.9352009
+        },
+        {
+          "lat": 44.40547,
+          "lon": 8.9352092
+        },
+        {
+          "lat": 44.4055001,
+          "lon": 8.9352774
+        },
+        {
+          "lat": 44.4055291,
+          "lon": 8.9353108
+        },
+        {
+          "lat": 44.4055934,
+          "lon": 8.9354361
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 148885502,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Piazza Raffaele De Ferrari"
+      },
+      "geometry": [
+        {
+          "lat": 44.4071732,
+          "lon": 8.9347553
+        },
+        {
+          "lat": 44.4070328,
+          "lon": 8.9345903
+        },
+        {
+          "lat": 44.4069418,
+          "lon": 8.934487
+        },
+        {
+          "lat": 44.4068816,
+          "lon": 8.9344219
+        },
+        {
+          "lat": 44.4068123,
+          "lon": 8.9343653
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 148885509,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Venti Settembre",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4071732,
+          "lon": 8.9347553
+        },
+        {
+          "lat": 44.4070348,
+          "lon": 8.9349556
+        },
+        {
+          "lat": 44.4069196,
+          "lon": 8.9353921
+        },
+        {
+          "lat": 44.406896,
+          "lon": 8.9354839
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 148885510,
+      "tags": {
+        "highway": "residential",
+        "name": "Piazza Raffaele De Ferrari",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4068123,
+          "lon": 8.9343653
+        },
+        {
+          "lat": 44.4067851,
+          "lon": 8.9343145
+        },
+        {
+          "lat": 44.406683,
+          "lon": 8.9341293
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 157144977,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Ettore Vernazza",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4071453,
+          "lon": 8.9367303
+        },
+        {
+          "lat": 44.4071682,
+          "lon": 8.9366353
+        },
+        {
+          "lat": 44.407286,
+          "lon": 8.936154
+        },
+        {
+          "lat": 44.4074178,
+          "lon": 8.9356154
+        },
+        {
+          "lat": 44.4074257,
+          "lon": 8.935583
+        },
+        {
+          "lat": 44.4074375,
+          "lon": 8.9355349
+        },
+        {
+          "lat": 44.4074906,
+          "lon": 8.935318
+        },
+        {
+          "lat": 44.40753,
+          "lon": 8.935157
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 162228276,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Venticinque Aprile",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4099402,
+          "lon": 8.9352062
+        },
+        {
+          "lat": 44.4089238,
+          "lon": 8.9346507
+        },
+        {
+          "lat": 44.4088012,
+          "lon": 8.9345837
+        },
+        {
+          "lat": 44.4087338,
+          "lon": 8.9345469
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 173567374,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.406679,
+          "lon": 8.9343648
+        },
+        {
+          "lat": 44.4066437,
+          "lon": 8.9343765
+        },
+        {
+          "lat": 44.4065705,
+          "lon": 8.9344374
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 173567376,
+      "tags": {
+        "highway": "residential",
+        "name": "Via Giosu\u00e8 Carducci",
+        "oneway": "no"
+      },
+      "geometry": [
+        {
+          "lat": 44.4064794,
+          "lon": 8.9354201
+        },
+        {
+          "lat": 44.4064981,
+          "lon": 8.9353438
+        },
+        {
+          "lat": 44.4065318,
+          "lon": 8.9352762
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 190431861,
+      "tags": {
+        "highway": "residential",
+        "name": "Largo delle Fucine"
+      },
+      "geometry": [
+        {
+          "lat": 44.4083195,
+          "lon": 8.9355843
+        },
+        {
+          "lat": 44.4082779,
+          "lon": 8.9355636
+        },
+        {
+          "lat": 44.4082309,
+          "lon": 8.9355761
+        },
+        {
+          "lat": 44.4080386,
+          "lon": 8.9357268
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 260662325,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Ettore Vernazza",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4073557,
+          "lon": 8.9349608
+        },
+        {
+          "lat": 44.4073112,
+          "lon": 8.9349106
+        },
+        {
+          "lat": 44.4072956,
+          "lon": 8.9348931
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 260662326,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Ettore Vernazza",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4072956,
+          "lon": 8.9348931
+        },
+        {
+          "lat": 44.4072198,
+          "lon": 8.9348078
+        },
+        {
+          "lat": 44.4071732,
+          "lon": 8.9347553
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 355359390,
+      "tags": {
+        "highway": "service"
+      },
+      "geometry": [
+        {
+          "lat": 44.4080386,
+          "lon": 8.9357268
+        },
+        {
+          "lat": 44.408202,
+          "lon": 8.9354452
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 375861611,
+      "tags": {
+        "highway": "residential",
+        "name": "Piazza Raffaele De Ferrari"
+      },
+      "geometry": [
+        {
+          "lat": 44.4083162,
+          "lon": 8.9343444
+        },
+        {
+          "lat": 44.4081752,
+          "lon": 8.934235
+        },
+        {
+          "lat": 44.4080417,
+          "lon": 8.9341293
+        },
+        {
+          "lat": 44.4078979,
+          "lon": 8.9340509
+        },
+        {
+          "lat": 44.4078067,
+          "lon": 8.9340428
+        },
+        {
+          "lat": 44.4077227,
+          "lon": 8.9340451
+        },
+        {
+          "lat": 44.4076593,
+          "lon": 8.9340573
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 377770334,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Piazza Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.4056804,
+          "lon": 8.9353327
+        },
+        {
+          "lat": 44.4055934,
+          "lon": 8.9354361
+        },
+        {
+          "lat": 44.4055291,
+          "lon": 8.9355219
+        },
+        {
+          "lat": 44.4054539,
+          "lon": 8.9356508
+        },
+        {
+          "lat": 44.4053952,
+          "lon": 8.9357598
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 390892872,
+      "tags": {
+        "highway": "residential",
+        "name": "Via San Sebastiano"
+      },
+      "geometry": [
+        {
+          "lat": 44.4087841,
+          "lon": 8.9352543
+        },
+        {
+          "lat": 44.4088355,
+          "lon": 8.9352203
+        },
+        {
+          "lat": 44.4088678,
+          "lon": 8.9351999
+        },
+        {
+          "lat": 44.4088827,
+          "lon": 8.9352003
+        },
+        {
+          "lat": 44.4089911,
+          "lon": 8.9352886
+        },
+        {
+          "lat": 44.4091229,
+          "lon": 8.9354052
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 520480896,
+      "tags": {
+        "highway": "residential",
+        "name": "Piazza Raffaele De Ferrari"
+      },
+      "geometry": [
+        {
+          "lat": 44.4076593,
+          "lon": 8.9340573
+        },
+        {
+          "lat": 44.4075945,
+          "lon": 8.934101
+        },
+        {
+          "lat": 44.4075229,
+          "lon": 8.9341995
+        },
+        {
+          "lat": 44.4072754,
+          "lon": 8.9346361
+        },
+        {
+          "lat": 44.4072498,
+          "lon": 8.9346717
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 520480899,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Piazza Raffaele De Ferrari"
+      },
+      "geometry": [
+        {
+          "lat": 44.4068123,
+          "lon": 8.9343653
+        },
+        {
+          "lat": 44.4067246,
+          "lon": 8.9343601
+        },
+        {
+          "lat": 44.406679,
+          "lon": 8.9343648
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 524739366,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.4064495,
+          "lon": 8.9345525
+        },
+        {
+          "lat": 44.4063648,
+          "lon": 8.9346372
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 550257937,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.4065705,
+          "lon": 8.9344374
+        },
+        {
+          "lat": 44.4064495,
+          "lon": 8.9345525
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 550286502,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Venti Settembre",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.406896,
+          "lon": 8.9354839
+        },
+        {
+          "lat": 44.4067894,
+          "lon": 8.9359291
+        },
+        {
+          "lat": 44.4066911,
+          "lon": 8.9363479
+        },
+        {
+          "lat": 44.4066627,
+          "lon": 8.9364707
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 551037903,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.4063648,
+          "lon": 8.9346372
+        },
+        {
+          "lat": 44.4059832,
+          "lon": 8.9349975
+        },
+        {
+          "lat": 44.4058643,
+          "lon": 8.9351256
+        },
+        {
+          "lat": 44.4057359,
+          "lon": 8.9352684
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 599289558,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Dante"
+      },
+      "geometry": [
+        {
+          "lat": 44.4057359,
+          "lon": 8.9352684
+        },
+        {
+          "lat": 44.4056804,
+          "lon": 8.9353327
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 614766177,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4080291,
+          "lon": 8.9358284
+        },
+        {
+          "lat": 44.4080133,
+          "lon": 8.9358
+        },
+        {
+          "lat": 44.4079784,
+          "lon": 8.9357789
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 643854963,
+      "tags": {
+        "highway": "service",
+        "name": "Via Cassa di Risparmio"
+      },
+      "geometry": [
+        {
+          "lat": 44.4084614,
+          "lon": 8.9344429
+        },
+        {
+          "lat": 44.4084981,
+          "lon": 8.9343812
+        },
+        {
+          "lat": 44.4085919,
+          "lon": 8.934201
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 758375672,
+      "tags": {
+        "highway": "service",
+        "name": "Piazza Veneroso"
+      },
+      "geometry": [
+        {
+          "lat": 44.406945,
+          "lon": 8.930853
+        },
+        {
+          "lat": 44.4069543,
+          "lon": 8.9308278
+        },
+        {
+          "lat": 44.4069919,
+          "lon": 8.930726
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 872276106,
+      "tags": {
+        "highway": "residential",
+        "name": "Via di Porta Soprana",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.406257,
+          "lon": 8.9335036
+        },
+        {
+          "lat": 44.4062175,
+          "lon": 8.93356
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1076736190,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4076954,
+          "lon": 8.9356636
+        },
+        {
+          "lat": 44.4075189,
+          "lon": 8.9355755
+        },
+        {
+          "lat": 44.4074375,
+          "lon": 8.9355349
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1076736191,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4074257,
+          "lon": 8.935583
+        },
+        {
+          "lat": 44.4075055,
+          "lon": 8.9356203
+        },
+        {
+          "lat": 44.4076877,
+          "lon": 8.9357054
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1076736192,
+      "tags": {
+        "highway": "service",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.4079204,
+          "lon": 8.9358334
+        },
+        {
+          "lat": 44.4079583,
+          "lon": 8.9358116
+        },
+        {
+          "lat": 44.4079784,
+          "lon": 8.9357789
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1210150436,
+      "tags": {
+        "highway": "residential",
+        "name": "Piazza Raffaele De Ferrari"
+      },
+      "geometry": [
+        {
+          "lat": 44.4072498,
+          "lon": 8.9346717
+        },
+        {
+          "lat": 44.4072297,
+          "lon": 8.9346994
+        },
+        {
+          "lat": 44.4071732,
+          "lon": 8.9347553
+        }
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1411790770,
+      "tags": {
+        "highway": "tertiary",
+        "name": "Via Ettore Vernazza",
+        "oneway": "yes"
+      },
+      "geometry": [
+        {
+          "lat": 44.40753,
+          "lon": 8.935157
+        },
+        {
+          "lat": 44.4073557,
+          "lon": 8.9349608
+        }
       ]
     }
   ]

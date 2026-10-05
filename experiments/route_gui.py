@@ -49,7 +49,7 @@ from gnss_gpu.routing_graph import (  # noqa: E402
 )
 
 # Genova centro storico — small enough for Overpass, real street geometry
-DEFAULT_BBOX = BBox(south=44.4055, west=8.9305, north=44.4085, east=8.9355)
+DEFAULT_BBOX = BBox(south=44.4055, west=8.9305, north=44.4088, east=8.9358)
 FIXTURE_ROADS = (
     Path(__file__).resolve().parents[1] / "python" / "gnss_gpu" / "fixtures" / "genova_centro_roads.json"
 )
@@ -69,26 +69,40 @@ def _graph_from_roads(roads: list[dict], source: str):
     if not graph.edges:
         raise RuntimeError("no road edges built")
     samples = synthesize_quality_timeseries(graph)
-    return graph, samples, source
+    return graph, samples, source, roads
 
 
-def _load_fixture_graph() -> tuple[RoadGraph, dict[int, list[tuple[float, float, float]]], str]:
+def _load_fixture_graph():
     payload = json.loads(FIXTURE_ROADS.read_text(encoding="utf-8"))
     roads = [el for el in payload.get("elements", []) if el.get("type") == "way"]
     return _graph_from_roads(roads, f"fixture:{FIXTURE_ROADS.name} ({len(roads)} ways)")
 
 
-def _load_overpass_graph(bbox: BBox) -> tuple[RoadGraph, dict[int, list[tuple[float, float, float]]], str]:
+def _load_overpass_graph(bbox: BBox):
     roads = fetch_roads_overpass(
         bbox,
         include_pedestrian=False,
-        timeout_s=25,
-        max_attempts_per_endpoint=1,
+        timeout_s=45,
+        max_attempts_per_endpoint=2,
     )
     return _graph_from_roads(
         roads,
         f"overpass:{bbox.south},{bbox.west},{bbox.north},{bbox.east} ({len(roads)} ways)",
     )
+
+
+def _way_quality(samples: dict, way_id: int, t_s: float = 0.0) -> tuple[float, float]:
+    seq = samples.get(way_id) or []
+    if not seq:
+        return float("nan"), float("nan")
+    # pick nearest sample at/before t_s
+    best = seq[0]
+    for row in seq:
+        if row[0] <= t_s:
+            best = row
+        else:
+            break
+    return float(best[1]), float(best[2])
 
 
 class DemoState:
@@ -97,18 +111,20 @@ class DemoState:
         self.n_los_step = 1.0
         self.source = ""
         self.bbox = bbox
+        self.roads: list[dict] = []
         if demo == "synthetic":
             self.spatial, self.samples = make_demo_spatial_graph()
             self.source = "synthetic rectangular block (unit-test only)"
+            self.roads = []
         elif demo == "overpass":
             try:
-                self.spatial, self.samples, self.source = _load_overpass_graph(bbox)
+                self.spatial, self.samples, self.source, self.roads = _load_overpass_graph(bbox)
             except Exception as exc:  # noqa: BLE001
                 print(f"WARNING: Overpass failed ({exc}); using offline fixture", flush=True)
-                self.spatial, self.samples, self.source = _load_fixture_graph()
+                self.spatial, self.samples, self.source, self.roads = _load_fixture_graph()
                 self.source += f" [overpass fallback: {exc}]"
         else:
-            self.spatial, self.samples, self.source = _load_fixture_graph()
+            self.spatial, self.samples, self.source, self.roads = _load_fixture_graph()
 
         # Stamp initial quality onto edges for contraction helpers
         for e in self.spatial.edges:
@@ -180,53 +196,52 @@ class DemoState:
         return feats
 
     def graph_geojson(self, *, mode: str, layer: int, show_contracted_overlay: bool = False) -> dict:
-        """Always emit fine (uncontracted) street geometry for the map.
+        """Map layer: full OSM way polylines (match basemap), not chord stubs.
 
-        Routing still uses the contracted graph; the map must stay recognizable.
-        Optional overlay draws contracted edges as dashed lines.
+        Routing still uses the contracted graph; display uses original way
+        geometry so streets sit on the OpenStreetMap tiles.
         """
-        feats: list[dict] = []
-        if mode == "te":
-            # Draw fine spatial streets colored by this layer's quality
-            t_s = 0.0
-            if self.te.layers:
-                layer = max(0, min(layer, len(self.te.layers) - 1))
-                t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
-            fine = self._snapshot(t_s)
-            feats.extend(self._edges_to_features(fine.edges, style="fine"))
-            if show_contracted_overlay:
-                # contracted travel edges for this TE layer
-                te_travel = [
-                    e for e in self.te.edges if e.kind == "travel" and e.layer == layer
-                ]
-                # Build fake RoadEdge-like objects for overlay
-                overlay = []
-                from gnss_gpu.io.osm_roads import RoadEdge as RE
-
-                for e in te_travel:
-                    overlay.append(
-                        RE(
-                            u=e.u,
-                            v=e.v,
-                            length_m=e.length_m,
-                            way_id=e.way_id,
-                            highway=e.highway,
-                            name=e.name,
-                            geometry=list(e.geometry),
-                            mean_hdop=e.mean_hdop,
-                            mean_n_los=e.mean_n_los,
-                        )
-                    )
-                feats.extend(self._edges_to_features(overlay, style="contracted"))
-            return {"type": "FeatureCollection", "features": feats}
-
         t_s = 0.0
         if self.te.layers:
             layer = max(0, min(layer, len(self.te.layers) - 1))
             t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
-        fine = self._snapshot(t_s)
-        feats.extend(self._edges_to_features(fine.edges, style="fine"))
+
+        feats: list[dict] = []
+        if self.roads:
+            for way in self.roads:
+                geom = way.get("geometry") or []
+                if len(geom) < 2:
+                    continue
+                tags = way.get("tags") or {}
+                wid = int(way.get("id", -1))
+                hdop, n_los = _way_quality(self.samples, wid, t_s)
+                feats.append(
+                    {
+                        "type": "Feature",
+                        "properties": {
+                            "way_id": wid,
+                            "length_m": None,
+                            "mean_hdop": hdop,
+                            "mean_n_los": n_los,
+                            "color": _hdop_color(hdop),
+                            "name": str(tags.get("name", "")),
+                            "highway": str(tags.get("highway", "")),
+                            "style": "fine",
+                        },
+                        "geometry": {
+                            "type": "LineString",
+                            "coordinates": [
+                                [float(p["lon"]), float(p["lat"])] for p in geom
+                            ],
+                        },
+                    }
+                )
+        else:
+            fine = self._snapshot(t_s)
+            feats.extend(self._edges_to_features(fine.edges, style="fine"))
+
         if show_contracted_overlay:
+            fine = self._snapshot(t_s)
             cg = prepare_contracted_graph(
                 fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
             )
@@ -284,7 +299,7 @@ HTML = r"""<!doctype html>
 <div id="wrap">
   <aside>
     <h1>GNSS route lab</h1>
-    <p class="note">Map = fine streets (always). Routing = contracted graph, then path expanded back. Click A then B.</p>
+    <p class="note">Green lines = real OSM centerlines (same coords as the basemap). Routing contracts; path expands back. Click A then B.</p>
     <label>Mode</label>
     <select id="mode">
       <option value="spatial">Spatial routing</option>

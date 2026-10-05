@@ -260,10 +260,9 @@ class DemoState:
                 {"index": ly.index, "t0_s": ly.t0_s, "t1_s": ly.t1_s} for ly in self.te.layers
             ],
             "note": (
-                "Map always shows fine (uncontracted) street geometry. "
-                "Routing runs on the contracted graph; the path is expanded back "
-                "via the member map so the yellow route follows recognizable streets. "
-                "Optional overlay draws contracted edges dashed."
+                "Map draws full OSM way centerlines (same coords as the basemap). "
+                "Routing uses the contracted graph; the yellow path is expanded "
+                "via the member map. Optional dashed overlay = contracted edges."
             ),
         }
 

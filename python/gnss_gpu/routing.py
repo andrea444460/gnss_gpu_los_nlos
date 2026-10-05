@@ -6,11 +6,20 @@ import csv
 import heapq
 import json
 import math
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 from gnss_gpu.io.osm_roads import RoadEdge, RoadGraph, haversine_m
+from gnss_gpu.routing_graph import (
+    QualityInterval,
+    TimeExtendedEdge,
+    TimeExtendedGraph,
+    attach_timelines_by_way,
+    build_time_extended_graph,
+    contract_same_quality_edges,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +39,8 @@ class RouteResult:
     length_m: float
     mean_hdop: float
     mean_n_los: float
+    layers: list[int] = field(default_factory=list)
+    spatial_node_ids: list[int] = field(default_factory=list)
 
 
 def clip(x: float, lo: float, hi: float) -> float:
@@ -51,6 +62,22 @@ def edge_gnss_penalty(edge: RoadEdge, params: CostParams) -> float:
 def edge_cost(edge: RoadEdge, params: CostParams) -> float:
     """c(e) = L(e) * (1 + GNSS penalty). Always >= length_m >= 0."""
     return float(edge.length_m) * (1.0 + edge_gnss_penalty(edge, params))
+
+
+def te_edge_cost(edge: TimeExtendedEdge, params: CostParams) -> float:
+    """Cost for a time-extended edge (wait uses length_m as wait penalty)."""
+    if edge.kind == "wait":
+        return max(0.0, float(edge.length_m))
+    # reuse RoadEdge penalty fields
+    tmp = RoadEdge(
+        u=edge.u,
+        v=edge.v,
+        length_m=edge.length_m,
+        way_id=edge.way_id,
+        mean_hdop=edge.mean_hdop,
+        mean_n_los=edge.mean_n_los,
+    )
+    return edge_cost(tmp, params)
 
 
 def aggregate_quality_onto_edges(
@@ -109,6 +136,58 @@ def load_quality_points_csv(path: Path | str) -> list[dict]:
         for row in reader:
             rows.append(dict(row))
     return rows
+
+
+def load_quality_timeseries_csv(path: Path | str) -> dict[int, list[tuple[float, float, float]]]:
+    """Load per-way time series: columns way_id,t_s,mean_hdop,mean_n_los."""
+    by_way: dict[int, list[tuple[float, float, float]]] = defaultdict(list)
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                wid = int(row["way_id"])
+                t_s = float(row.get("t_s", row.get("time_s", 0.0)))
+                hdop = float(row["mean_hdop"])
+                n_los = float(row["mean_n_los"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            by_way[wid].append((t_s, hdop, n_los))
+    for wid in by_way:
+        by_way[wid].sort(key=lambda x: x[0])
+    return dict(by_way)
+
+
+def prepare_contracted_graph(
+    graph: RoadGraph,
+    *,
+    hdop_step: float = 0.5,
+    n_los_step: float = 1.0,
+) -> RoadGraph:
+    """Contract consecutive same-direction same-quality degree-2 chains."""
+    return contract_same_quality_edges(graph, hdop_step=hdop_step, n_los_step=n_los_step)
+
+
+def build_te_from_timeseries(
+    graph: RoadGraph,
+    samples_by_way: dict[int, list[tuple[float, float, float]]],
+    *,
+    hdop_step: float = 0.5,
+    n_los_step: float = 1.0,
+    wait_cost: float = 0.0,
+    contract_per_layer: bool = True,
+) -> tuple[TimeExtendedGraph, list[list[QualityInterval]]]:
+    timelines = attach_timelines_by_way(
+        graph, samples_by_way, hdop_step=hdop_step, n_los_step=n_los_step
+    )
+    te = build_time_extended_graph(
+        graph,
+        timelines,
+        wait_cost=wait_cost,
+        hdop_step=hdop_step,
+        n_los_step=n_los_step,
+        contract_per_layer=contract_per_layer,
+    )
+    return te, timelines
 
 
 def snap_nearest_node(graph: RoadGraph, lat_deg: float, lon_deg: float) -> int:
@@ -281,6 +360,163 @@ def route_latlon(
     if algorithm == "astar":
         return astar_route(graph, start, goal, params)
     raise ValueError(f"unknown algorithm: {algorithm}")
+
+
+def dijkstra_te_route(
+    te: TimeExtendedGraph,
+    start_spatial: int,
+    goal_spatial: int,
+    params: CostParams | None = None,
+    *,
+    start_layer: int | None = None,
+) -> RouteResult | None:
+    """Dijkstra on a time-extended graph.
+
+    Start: (start_spatial, start_layer) or any layer if start_layer is None
+    (super-source via zero-cost injection). Goal: any layer at goal_spatial.
+    """
+    params = params or CostParams()
+    starts: list[int] = []
+    if start_layer is not None:
+        key = (start_spatial, start_layer)
+        if key not in te.index:
+            return None
+        starts = [te.index[key]]
+    else:
+        starts = [
+            te.index[(start_spatial, layer.index)]
+            for layer in te.layers
+            if (start_spatial, layer.index) in te.index
+        ]
+    goals = {
+        te.index[(goal_spatial, layer.index)]
+        for layer in te.layers
+        if (goal_spatial, layer.index) in te.index
+    }
+    if not starts or not goals:
+        return None
+
+    adj = te.adjacency()
+    dist: dict[int, float] = {s: 0.0 for s in starts}
+    came_from: dict[int, tuple[int, int]] = {}
+    heap: list[tuple[float, int]] = [(0.0, s) for s in starts]
+    heapq.heapify(heap)
+    visited: set[int] = set()
+    best_goal: int | None = None
+    best_cost = float("inf")
+
+    while heap:
+        d_u, u = heapq.heappop(heap)
+        if u in visited:
+            continue
+        visited.add(u)
+        if u in goals:
+            best_goal = u
+            best_cost = d_u
+            break
+        for ei, v in adj.get(u, []):
+            if v in visited:
+                continue
+            nd = d_u + te_edge_cost(te.edges[ei], params)
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                came_from[v] = (u, ei)
+                heapq.heappush(heap, (nd, v))
+
+    if best_goal is None:
+        return None
+
+    nodes_rev = [best_goal]
+    edges_rev: list[int] = []
+    cur = best_goal
+    while cur not in starts:
+        if cur not in came_from:
+            break
+        prev, ei = came_from[cur]
+        edges_rev.append(ei)
+        nodes_rev.append(prev)
+        cur = prev
+    nodes_rev.reverse()
+    edges_rev.reverse()
+
+    length = 0.0
+    hdop_w = 0.0
+    nlos_w = 0.0
+    w_h = 0.0
+    w_n = 0.0
+    layers: list[int] = []
+    spatial_ids: list[int] = []
+    for nid in nodes_rev:
+        n = te.nodes[nid]
+        layers.append(n.layer)
+        if not spatial_ids or spatial_ids[-1] != n.spatial_id:
+            spatial_ids.append(n.spatial_id)
+    for ei in edges_rev:
+        e = te.edges[ei]
+        if e.kind != "travel":
+            continue
+        length += e.length_m
+        if math.isfinite(e.mean_hdop):
+            hdop_w += e.mean_hdop * e.length_m
+            w_h += e.length_m
+        if math.isfinite(e.mean_n_los):
+            nlos_w += e.mean_n_los * e.length_m
+            w_n += e.length_m
+
+    return RouteResult(
+        node_ids=nodes_rev,
+        edge_indices=edges_rev,
+        total_cost=float(best_cost),
+        length_m=float(length),
+        mean_hdop=float(hdop_w / w_h) if w_h > 0 else float("nan"),
+        mean_n_los=float(nlos_w / w_n) if w_n > 0 else float("nan"),
+        layers=layers,
+        spatial_node_ids=spatial_ids,
+    )
+
+
+def te_path_to_geojson(
+    te: TimeExtendedGraph,
+    route: RouteResult,
+    *,
+    properties: dict | None = None,
+) -> dict:
+    coords: list[list[float]] = []
+    for ei in route.edge_indices:
+        e = te.edges[ei]
+        if e.kind != "travel":
+            continue
+        for lat, lon in e.geometry:
+            pt = [lon, lat]
+            if not coords or coords[-1] != pt:
+                coords.append(pt)
+    if not coords:
+        for nid in route.node_ids:
+            n = te.nodes[nid]
+            pt = [n.lon_deg, n.lat_deg]
+            if not coords or coords[-1] != pt:
+                coords.append(pt)
+    props = {
+        "length_m": route.length_m,
+        "total_cost": route.total_cost,
+        "mean_hdop": route.mean_hdop,
+        "mean_n_los": route.mean_n_los,
+        "n_edges": len(route.edge_indices),
+        "layers": route.layers,
+        "spatial_node_ids": route.spatial_node_ids,
+    }
+    if properties:
+        props.update(properties)
+    return {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": props,
+                "geometry": {"type": "LineString", "coordinates": coords},
+            }
+        ],
+    }
 
 
 def path_to_geojson(

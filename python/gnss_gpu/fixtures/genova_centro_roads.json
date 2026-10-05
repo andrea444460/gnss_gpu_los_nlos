@@ -1,0 +1,178 @@
+{
+  "note": "Offline OSM-like Genova centro ways with shared intersection coordinates.",
+  "elements": [
+    {
+      "type": "way",
+      "id": 1001,
+      "tags": {"highway": "primary", "name": "Via XX Settembre", "oneway": "yes"},
+      "geometry": [
+        {"lat": 44.40610, "lon": 8.93080},
+        {"lat": 44.40625, "lon": 8.93150},
+        {"lat": 44.40640, "lon": 8.93220},
+        {"lat": 44.40655, "lon": 8.93300},
+        {"lat": 44.40670, "lon": 8.93380},
+        {"lat": 44.40685, "lon": 8.93460},
+        {"lat": 44.40700, "lon": 8.93530}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1002,
+      "tags": {"highway": "secondary", "name": "Via Roma"},
+      "geometry": [
+        {"lat": 44.40790, "lon": 8.93220},
+        {"lat": 44.40740, "lon": 8.93220},
+        {"lat": 44.40690, "lon": 8.93220},
+        {"lat": 44.40640, "lon": 8.93220},
+        {"lat": 44.40580, "lon": 8.93220}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1003,
+      "tags": {"highway": "residential", "name": "Via San Lorenzo"},
+      "geometry": [
+        {"lat": 44.40770, "lon": 8.93100},
+        {"lat": 44.40720, "lon": 8.93160},
+        {"lat": 44.40680, "lon": 8.93200},
+        {"lat": 44.40640, "lon": 8.93220},
+        {"lat": 44.40600, "lon": 8.93300}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1004,
+      "tags": {"highway": "residential", "name": "Via Canneto il Lungo"},
+      "geometry": [
+        {"lat": 44.40790, "lon": 8.93360},
+        {"lat": 44.40740, "lon": 8.93340},
+        {"lat": 44.40695, "lon": 8.93320},
+        {"lat": 44.40655, "lon": 8.93300},
+        {"lat": 44.40610, "lon": 8.93280}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1005,
+      "tags": {"highway": "tertiary", "name": "Via Dante", "oneway": "yes"},
+      "geometry": [
+        {"lat": 44.40570, "lon": 8.93120},
+        {"lat": 44.40590, "lon": 8.93180},
+        {"lat": 44.40615, "lon": 8.93250},
+        {"lat": 44.40640, "lon": 8.93320},
+        {"lat": 44.40670, "lon": 8.93380}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1006,
+      "tags": {"highway": "residential", "name": "Vico dietro il Coro"},
+      "geometry": [
+        {"lat": 44.40730, "lon": 8.93080},
+        {"lat": 44.40710, "lon": 8.93140},
+        {"lat": 44.40690, "lon": 8.93200},
+        {"lat": 44.40680, "lon": 8.93220}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1007,
+      "tags": {"highway": "residential", "name": "Via Luccoli"},
+      "geometry": [
+        {"lat": 44.40820, "lon": 8.93180},
+        {"lat": 44.40790, "lon": 8.93220},
+        {"lat": 44.40750, "lon": 8.93260},
+        {"lat": 44.40710, "lon": 8.93300},
+        {"lat": 44.40670, "lon": 8.93340}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1008,
+      "tags": {"highway": "secondary", "name": "Via Ettore Vernazza"},
+      "geometry": [
+        {"lat": 44.40685, "lon": 8.93460},
+        {"lat": 44.40725, "lon": 8.93480},
+        {"lat": 44.40765, "lon": 8.93500},
+        {"lat": 44.40810, "lon": 8.93520}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1009,
+      "tags": {"highway": "residential", "name": "Salita Pollaiuoli"},
+      "geometry": [
+        {"lat": 44.40600, "lon": 8.93300},
+        {"lat": 44.40580, "lon": 8.93350},
+        {"lat": 44.40570, "lon": 8.93410},
+        {"lat": 44.40570, "lon": 8.93470}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1010,
+      "tags": {"highway": "residential", "name": "Via di Porta Soprana"},
+      "geometry": [
+        {"lat": 44.40580, "lon": 8.93220},
+        {"lat": 44.40575, "lon": 8.93300},
+        {"lat": 44.40570, "lon": 8.93410},
+        {"lat": 44.40580, "lon": 8.93490},
+        {"lat": 44.40600, "lon": 8.93530}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1011,
+      "tags": {"highway": "tertiary", "name": "Via Cascione"},
+      "geometry": [
+        {"lat": 44.40800, "lon": 8.93370},
+        {"lat": 44.40755, "lon": 8.93400},
+        {"lat": 44.40720, "lon": 8.93430},
+        {"lat": 44.40685, "lon": 8.93460}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1012,
+      "tags": {"highway": "residential", "name": "Via al Ponte Reale"},
+      "geometry": [
+        {"lat": 44.40830, "lon": 8.93090},
+        {"lat": 44.40800, "lon": 8.93140},
+        {"lat": 44.40770, "lon": 8.93180},
+        {"lat": 44.40740, "lon": 8.93220}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1013,
+      "tags": {"highway": "residential", "name": "Vico della Casana"},
+      "geometry": [
+        {"lat": 44.40690, "lon": 8.93200},
+        {"lat": 44.40665, "lon": 8.93210},
+        {"lat": 44.40640, "lon": 8.93220},
+        {"lat": 44.40620, "lon": 8.93240}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1014,
+      "tags": {"highway": "primary_link", "name": "Largo Eros Lanfranco", "oneway": "yes"},
+      "geometry": [
+        {"lat": 44.40670, "lon": 8.93380},
+        {"lat": 44.40680, "lon": 8.93420},
+        {"lat": 44.40685, "lon": 8.93460}
+      ]
+    },
+    {
+      "type": "way",
+      "id": 1015,
+      "tags": {"highway": "residential", "name": "Via Giustiniani"},
+      "geometry": [
+        {"lat": 44.40790, "lon": 8.93360},
+        {"lat": 44.40765, "lon": 8.93420},
+        {"lat": 44.40740, "lon": 8.93470},
+        {"lat": 44.40725, "lon": 8.93480}
+      ]
+    }
+  ]
+}

@@ -34,6 +34,7 @@ from gnss_gpu.routing import (
     edges_to_csv,
     load_quality_points_csv,
     path_to_geojson,
+    prepare_contracted_graph,
     route_latlon,
     write_geojson,
 )
@@ -82,6 +83,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--p-max", type=float, default=5.0)
     p.add_argument("--algorithm", choices=("astar", "dijkstra"), default="astar")
     p.add_argument("--include-pedestrian", action="store_true")
+    p.add_argument(
+        "--contract",
+        action="store_true",
+        help="merge consecutive same-direction same-quality degree-2 edges",
+    )
     p.add_argument("--out-prefix", type=Path, required=True)
     args = p.parse_args(argv)
 
@@ -90,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.quality_csv is not None:
         points = load_quality_points_csv(args.quality_csv)
         aggregate_quality_onto_edges(graph, points)
+    if args.contract:
+        graph = prepare_contracted_graph(graph)
 
     params = CostParams(
         alpha=args.alpha,

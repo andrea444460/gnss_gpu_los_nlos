@@ -35,6 +35,7 @@ from gnss_gpu.routing import (
     load_quality_points_csv,
     path_to_geojson,
     prepare_contracted_graph,
+    route_contracted_latlon,
     route_latlon,
     write_geojson,
 )
@@ -96,9 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.quality_csv is not None:
         points = load_quality_points_csv(args.quality_csv)
         aggregate_quality_onto_edges(graph, points)
-    if args.contract:
-        graph = prepare_contracted_graph(graph)
 
+    lat_a, lon_a = args.origin
+    lat_b, lon_b = args.dest
     params = CostParams(
         alpha=args.alpha,
         beta=args.beta,
@@ -108,18 +109,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     distance_only = CostParams(alpha=0.0, beta=0.0, h0=args.h0, n_star=args.n_star, p_max=args.p_max)
 
-    lat_a, lon_a = args.origin
-    lat_b, lon_b = args.dest
-    gnss_route = route_latlon(
-        graph, lat_a, lon_a, lat_b, lon_b, params, algorithm=args.algorithm
-    )
-    dist_route = route_latlon(
-        graph, lat_a, lon_a, lat_b, lon_b, distance_only, algorithm=args.algorithm
-    )
+    if args.contract:
+        cg = prepare_contracted_graph(graph)
+        fine_for_export = cg.fine
+        routing_n_edges = len(cg.graph.edges)
+        gnss_route = route_contracted_latlon(
+            cg, lat_a, lon_a, lat_b, lon_b, params, algorithm=args.algorithm
+        )
+        dist_route = route_contracted_latlon(
+            cg, lat_a, lon_a, lat_b, lon_b, distance_only, algorithm=args.algorithm
+        )
+        export_graph = cg.fine
+    else:
+        fine_for_export = graph
+        routing_n_edges = len(graph.edges)
+        gnss_route = route_latlon(graph, lat_a, lon_a, lat_b, lon_b, params, algorithm=args.algorithm)
+        dist_route = route_latlon(
+            graph, lat_a, lon_a, lat_b, lon_b, distance_only, algorithm=args.algorithm
+        )
+        export_graph = graph
 
     out = Path(args.out_prefix)
     out.parent.mkdir(parents=True, exist_ok=True)
-    edges_to_csv(graph, out.with_name(out.name + "_edges.csv"))
+    edges_to_csv(fine_for_export, out.with_name(out.name + "_edges.csv"))
 
     summary = {
         "bbox": {
@@ -130,8 +142,10 @@ def main(argv: list[str] | None = None) -> int:
         },
         "origin": {"lat": lat_a, "lon": lon_a},
         "dest": {"lat": lat_b, "lon": lon_b},
-        "n_nodes": len(graph.nodes),
-        "n_edges": len(graph.edges),
+        "n_nodes": len(fine_for_export.nodes),
+        "n_edges_fine": len(fine_for_export.edges),
+        "n_edges_routing": routing_n_edges,
+        "contracted_routing": bool(args.contract),
         "params": {
             "alpha": params.alpha,
             "beta": params.beta,
@@ -150,12 +164,12 @@ def main(argv: list[str] | None = None) -> int:
     if gnss_route is not None:
         write_geojson(
             out.with_name(out.name + "_gnss.geojson"),
-            path_to_geojson(graph, gnss_route, properties={"kind": "gnss_aware"}),
+            path_to_geojson(export_graph, gnss_route, properties={"kind": "gnss_aware"}),
         )
     if dist_route is not None:
         write_geojson(
             out.with_name(out.name + "_distance.geojson"),
-            path_to_geojson(graph, dist_route, properties={"kind": "distance_only"}),
+            path_to_geojson(export_graph, dist_route, properties={"kind": "distance_only"}),
         )
 
     print(json.dumps(summary, indent=2))

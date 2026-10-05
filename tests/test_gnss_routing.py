@@ -135,9 +135,6 @@ def test_no_path_against_oneway():
 
 
 def test_contract_merges_same_quality_chain():
-    # 0 -a- 1 -a- 2  (same way, same quality, degree-2 at 1) → one edge 0→2
-    # plus junction spur 1-3 so wait — if 1 has spur, undeg(1)=3, no contract.
-    # Pure chain:
     nodes = {
         0: RoadNode(0, 0.0, 0.0),
         1: RoadNode(1, 0.0, 0.001),
@@ -149,10 +146,11 @@ def test_contract_merges_same_quality_chain():
     ]
     g = RoadGraph(nodes=nodes, edges=edges)
     c = contract_same_quality_edges(g, hdop_step=0.5, n_los_step=1.0)
-    assert len(c.edges) == 1
-    assert c.edges[0].u == 0 and c.edges[0].v == 2
-    assert abs(c.edges[0].length_m - 200.0) < 1e-9
-    assert 1 not in c.nodes  # intermediate dropped
+    assert len(c.graph.edges) == 1
+    assert c.graph.edges[0].u == 0 and c.graph.edges[0].v == 2
+    assert abs(c.graph.edges[0].length_m - 200.0) < 1e-9
+    assert c.members[0] == [0, 1]
+    assert len(c.fine.edges) == 2  # fine graph unchanged
 
 
 def test_contract_stops_when_quality_changes():
@@ -167,7 +165,45 @@ def test_contract_stops_when_quality_changes():
     ]
     g = RoadGraph(nodes=nodes, edges=edges)
     c = contract_same_quality_edges(g, hdop_step=0.5, n_los_step=1.0)
-    assert len(c.edges) == 2
+    assert len(c.graph.edges) == 2
+
+
+def test_expand_route_restores_fine_geometry():
+    from gnss_gpu.routing import CostParams, dijkstra_route, expand_route_result
+
+    nodes = {
+        0: RoadNode(0, 0.0, 0.0),
+        1: RoadNode(1, 0.0, 0.001),
+        2: RoadNode(2, 0.0, 0.002),
+    }
+    edges = [
+        RoadEdge(0, 1, 100.0, way_id=7, mean_hdop=1.0, mean_n_los=10.0, geometry=[(0.0, 0.0), (0.0, 0.001)]),
+        RoadEdge(1, 2, 100.0, way_id=7, mean_hdop=1.0, mean_n_los=10.0, geometry=[(0.0, 0.001), (0.0, 0.002)]),
+    ]
+    fine = RoadGraph(nodes=nodes, edges=edges)
+    cg = contract_same_quality_edges(fine)
+    assert len(cg.graph.edges) == 1
+    route = dijkstra_route(cg.graph, 0, 2, CostParams(alpha=0, beta=0))
+    assert route is not None
+    assert route.edge_indices == [0]  # one contracted edge
+    expand_route_result(cg, route)
+    assert route.fine_edge_indices == [0, 1]
+    assert route.fine_node_ids == [0, 1, 2]
+    assert len(route.fine_geometry) == 3
+
+
+def test_demo_contraction_reduces_micro_edges():
+    spatial, samples = make_demo_spatial_graph()
+    for e in spatial.edges:
+        seq = samples[e.way_id]
+        e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
+    raw_way1 = [e for e in spatial.edges if e.way_id == 1]
+    assert len(raw_way1) == 6  # 3 micro * 2 dirs
+    c = prepare_contracted_graph(spatial)
+    c_way1 = [e for e in c.graph.edges if e.way_id == 1]
+    assert len(c_way1) == 2  # one per direction
+    # map still has all fine edges
+    assert len(c.fine.edges) == len(spatial.edges)
 
 
 def test_collapse_timeline_on_quality_change():
@@ -198,16 +234,6 @@ def test_time_extended_prefers_detour_after_quality_drop():
     assert route is not None
     # Should avoid pure top 0-1-2 if GNSS penalty is high — go via bottom
     assert 3 in route.spatial_node_ids or 4 in route.spatial_node_ids
-
-
-def test_demo_contraction_reduces_micro_edges():
-    spatial, samples = make_demo_spatial_graph()
-    # attach first-sample quality
-    for e in spatial.edges:
-        seq = samples[e.way_id]
-        e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
-    raw_way1 = [e for e in spatial.edges if e.way_id == 1]
-    assert len(raw_way1) == 6  # 3 micro * 2 dirs
-    c = prepare_contracted_graph(spatial)
-    c_way1 = [e for e in c.edges if e.way_id == 1]
-    assert len(c_way1) == 2  # one per direction
+    # Travel edges carry fine member map for display unpacking
+    travel = [te.edges[i] for i in route.edge_indices if te.edges[i].kind == "travel"]
+    assert travel and all(e.fine_edge_indices for e in travel)

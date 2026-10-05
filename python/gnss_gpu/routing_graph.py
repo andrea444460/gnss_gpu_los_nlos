@@ -75,6 +75,8 @@ class TimeExtendedEdge:
     geometry: list[tuple[float, float]] = field(default_factory=list)
     highway: str = ""
     name: str = ""
+    # Fine (uncontracted) spatial edge indices covered by this travel edge.
+    fine_edge_indices: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -127,21 +129,40 @@ def _undirected_degree(graph: RoadGraph) -> dict[int, int]:
     return {nid: len(s) for nid, s in neigh.items()}
 
 
+@dataclass
+class ContractedGraph:
+    """Routing graph after quality/direction contraction, with expand map.
+
+    ``graph`` is what Dijkstra/A* should run on.
+    ``fine`` is the original detailed road network (for map display).
+    ``members[i]`` lists fine-edge indices that contracted edge ``i`` covers,
+    in travel order — used to expand a routed path back to recognizable streets.
+    """
+
+    graph: RoadGraph
+    fine: RoadGraph
+    members: list[list[int]]
+
+
 def contract_same_quality_edges(
     graph: RoadGraph,
     *,
     hdop_step: float = 0.5,
     n_los_step: float = 1.0,
-) -> RoadGraph:
+) -> ContractedGraph:
     """Merge consecutive same-direction same-quality degree-2 chains.
 
     Junctions are nodes with undirected neighbor count != 2. Bidirectional
     OSM edges are OK: at an intermediate node we continue to the *other*
     neighbor (not the predecessor), requiring a directed edge that keeps the
     same ``way_id`` and quantized (HDOP, n_LOS).
+
+    Returns a :class:`ContractedGraph` so callers can route on the compact
+    graph and then expand the path with :func:`expand_contracted_route`.
     """
     if not graph.edges:
-        return RoadGraph(nodes=dict(graph.nodes), edges=[])
+        empty = RoadGraph(nodes=dict(graph.nodes), edges=[])
+        return ContractedGraph(graph=empty, fine=graph, members=[])
 
     undeg = _undirected_degree(graph)
     neighbors: dict[int, set[int]] = {nid: set() for nid in graph.nodes}
@@ -180,6 +201,7 @@ def contract_same_quality_edges(
 
     used: set[int] = set()
     new_edges: list[RoadEdge] = []
+    members: list[list[int]] = []
 
     for start_ei, start_e in enumerate(graph.edges):
         if start_ei in used:
@@ -235,10 +257,40 @@ def contract_same_quality_edges(
                 mean_n_los=first.mean_n_los,
             )
         )
+        members.append(list(chain))
 
-    keep_nodes = {e.u for e in new_edges} | {e.v for e in new_edges}
-    nodes = {nid: n for nid, n in graph.nodes.items() if nid in keep_nodes}
-    return RoadGraph(nodes=nodes, edges=new_edges)
+    # Keep *all* fine nodes in the contracted graph's node dict so snap/display
+    # can still reference intermediate coordinates; adjacency only uses endpoints.
+    return ContractedGraph(
+        graph=RoadGraph(nodes=dict(graph.nodes), edges=new_edges),
+        fine=graph,
+        members=members,
+    )
+
+
+def expand_contracted_route(
+    contracted: ContractedGraph,
+    route_edge_indices: list[int],
+) -> tuple[list[int], list[int], list[tuple[float, float]]]:
+    """Expand contracted route edges → fine edge indices, node ids, polyline.
+
+    Returns ``(fine_edge_indices, fine_node_ids, geometry_latlon)``.
+    """
+    fine_edges: list[int] = []
+    geom: list[tuple[float, float]] = []
+    for cei in route_edge_indices:
+        for fei in contracted.members[cei]:
+            fine_edges.append(fei)
+            e = contracted.fine.edges[fei]
+            for pt in e.geometry:
+                if not geom or geom[-1] != pt:
+                    geom.append(pt)
+    nodes: list[int] = []
+    if fine_edges:
+        nodes.append(contracted.fine.edges[fine_edges[0]].u)
+        for fei in fine_edges:
+            nodes.append(contracted.fine.edges[fei].v)
+    return fine_edges, nodes, geom
 
 
 def collapse_quality_timeline(
@@ -426,16 +478,29 @@ def build_time_extended_graph(
                 )
             )
         snap = RoadGraph(nodes=dict(spatial.nodes), edges=snap_edges)
+        member_map: list[list[int]] | None = None
         if contract_per_layer:
-            snap = contract_same_quality_edges(
+            contracted = contract_same_quality_edges(
                 snap, hdop_step=hdop_step, n_los_step=n_los_step
             )
-        for e in snap.edges:
-            # ensure endpoints exist in spatial.nodes (contraction keeps them)
+            # Remap members: contracted.members index into snap.edges, which
+            # align 1:1 with spatial.edges for this snapshot.
+            member_map = contracted.members
+            snap = contracted.graph
+        for i, e in enumerate(snap.edges):
             if e.u not in spatial.nodes or e.v not in spatial.nodes:
                 continue
             u = _te_node(e.u, layer.index)
             v = _te_node(e.v, layer.index)
+            fine_idx = list(member_map[i]) if member_map is not None else []
+            # Geometry from fine segments when available
+            geom = list(e.geometry)
+            if fine_idx:
+                geom = []
+                for fei in fine_idx:
+                    for pt in spatial.edges[fei].geometry:
+                        if not geom or geom[-1] != pt:
+                            geom.append(pt)
             te_edges.append(
                 TimeExtendedEdge(
                     u=u,
@@ -446,9 +511,10 @@ def build_time_extended_graph(
                     layer=layer.index,
                     mean_hdop=e.mean_hdop,
                     mean_n_los=e.mean_n_los,
-                    geometry=list(e.geometry),
+                    geometry=geom,
                     highway=e.highway,
                     name=e.name,
+                    fine_edge_indices=fine_idx,
                 )
             )
 

@@ -38,7 +38,7 @@ from gnss_gpu.routing import (  # noqa: E402
     dijkstra_te_route,
     path_to_geojson,
     prepare_contracted_graph,
-    route_latlon,
+    route_contracted_latlon,
     snap_nearest_node,
     te_path_to_geojson,
 )
@@ -147,51 +147,10 @@ class DemoState:
             )
         return RoadGraph(nodes=dict(self.spatial.nodes), edges=edges)
 
-    def graph_geojson(self, *, mode: str, layer: int, contract: bool) -> dict:
-        if mode == "te":
-            feats = []
-            seen_undirected: set[tuple[int, int, int]] = set()
-            for e in self.te.edges:
-                if e.kind != "travel" or e.layer != layer:
-                    continue
-                if len(e.geometry) < 2:
-                    continue
-                a, b = sorted((e.u, e.v))
-                key = (a, b, e.way_id)
-                if key in seen_undirected:
-                    continue
-                seen_undirected.add(key)
-                feats.append(
-                    {
-                        "type": "Feature",
-                        "properties": {
-                            "way_id": e.way_id,
-                            "length_m": e.length_m,
-                            "mean_hdop": e.mean_hdop,
-                            "mean_n_los": e.mean_n_los,
-                            "color": _hdop_color(e.mean_hdop),
-                            "layer": e.layer,
-                            "name": e.name,
-                            "highway": e.highway,
-                        },
-                        "geometry": {
-                            "type": "LineString",
-                            "coordinates": [[lon, lat] for lat, lon in e.geometry],
-                        },
-                    }
-                )
-            return {"type": "FeatureCollection", "features": feats}
-
-        t_s = 0.0
-        if self.te.layers:
-            layer = max(0, min(layer, len(self.te.layers) - 1))
-            t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
-        g = self._snapshot(t_s)
-        if contract:
-            g = prepare_contracted_graph(g, hdop_step=self.hdop_step, n_los_step=self.n_los_step)
+    def _edges_to_features(self, edges, *, style: str = "fine") -> list[dict]:
         feats = []
         seen: set[tuple[int, int, int]] = set()
-        for e in g.edges:
+        for e in edges:
             if len(e.geometry) < 2:
                 continue
             a, b = sorted((e.u, e.v))
@@ -210,6 +169,7 @@ class DemoState:
                         "color": _hdop_color(e.mean_hdop),
                         "name": e.name,
                         "highway": e.highway,
+                        "style": style,
                     },
                     "geometry": {
                         "type": "LineString",
@@ -217,23 +177,78 @@ class DemoState:
                     },
                 }
             )
+        return feats
+
+    def graph_geojson(self, *, mode: str, layer: int, show_contracted_overlay: bool = False) -> dict:
+        """Always emit fine (uncontracted) street geometry for the map.
+
+        Routing still uses the contracted graph; the map must stay recognizable.
+        Optional overlay draws contracted edges as dashed lines.
+        """
+        feats: list[dict] = []
+        if mode == "te":
+            # Draw fine spatial streets colored by this layer's quality
+            t_s = 0.0
+            if self.te.layers:
+                layer = max(0, min(layer, len(self.te.layers) - 1))
+                t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
+            fine = self._snapshot(t_s)
+            feats.extend(self._edges_to_features(fine.edges, style="fine"))
+            if show_contracted_overlay:
+                # contracted travel edges for this TE layer
+                te_travel = [
+                    e for e in self.te.edges if e.kind == "travel" and e.layer == layer
+                ]
+                # Build fake RoadEdge-like objects for overlay
+                overlay = []
+                from gnss_gpu.io.osm_roads import RoadEdge as RE
+
+                for e in te_travel:
+                    overlay.append(
+                        RE(
+                            u=e.u,
+                            v=e.v,
+                            length_m=e.length_m,
+                            way_id=e.way_id,
+                            highway=e.highway,
+                            name=e.name,
+                            geometry=list(e.geometry),
+                            mean_hdop=e.mean_hdop,
+                            mean_n_los=e.mean_n_los,
+                        )
+                    )
+                feats.extend(self._edges_to_features(overlay, style="contracted"))
+            return {"type": "FeatureCollection", "features": feats}
+
+        t_s = 0.0
+        if self.te.layers:
+            layer = max(0, min(layer, len(self.te.layers) - 1))
+            t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
+        fine = self._snapshot(t_s)
+        feats.extend(self._edges_to_features(fine.edges, style="fine"))
+        if show_contracted_overlay:
+            cg = prepare_contracted_graph(
+                fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
+            )
+            feats.extend(self._edges_to_features(cg.graph.edges, style="contracted"))
         return {"type": "FeatureCollection", "features": feats}
 
     def meta(self) -> dict:
         return {
             "source": self.source,
             "n_spatial_nodes": len(self.spatial.nodes),
-            "n_spatial_edges": len(self.spatial.edges),
-            "n_contracted_edges_t0": len(self.contracted.edges),
+            "n_spatial_edges_fine": len(self.spatial.edges),
+            "n_contracted_edges_t0": len(self.contracted.graph.edges),
             "n_te_nodes": len(self.te.nodes),
             "n_te_edges": len(self.te.edges),
             "layers": [
                 {"index": ly.index, "t0_s": ly.t0_s, "t1_s": ly.t1_s} for ly in self.te.layers
             ],
             "note": (
-                "Map shows real OSM road centerlines (unless synthetic fallback). "
-                "Color = HDOP (green good → red bad). Contraction merges same-direction "
-                "same-quality degree-2 chains. Time layers split when quantized GNSS quality changes."
+                "Map always shows fine (uncontracted) street geometry. "
+                "Routing runs on the contracted graph; the path is expanded back "
+                "via the member map so the yellow route follows recognizable streets. "
+                "Optional overlay draws contracted edges dashed."
             ),
         }
 
@@ -269,13 +284,13 @@ HTML = r"""<!doctype html>
 <div id="wrap">
   <aside>
     <h1>GNSS route lab</h1>
-    <p class="note">OSM road centerlines (not a demo rectangle). Click: 1st = A, 2nd = B. Edge color = HDOP.</p>
+    <p class="note">Map = fine streets (always). Routing = contracted graph, then path expanded back. Click A then B.</p>
     <label>Mode</label>
     <select id="mode">
-      <option value="spatial">Spatial (contracted)</option>
-      <option value="raw">Spatial (raw micro-edges)</option>
-      <option value="te">Time-extended travel layer</option>
+      <option value="spatial">Spatial routing</option>
+      <option value="te">Time-extended routing</option>
     </select>
+    <label><input id="overlay" type="checkbox"/> show contracted overlay (dashed)</label>
     <label>Layer</label>
     <input id="layer" type="number" min="0" value="0"/>
     <div class="row">
@@ -322,16 +337,23 @@ async function loadMeta(){
 }
 
 async function loadGraph(){
-  const modeSel = document.getElementById('mode').value;
+  const mode = document.getElementById('mode').value;
   const layer = parseInt(document.getElementById('layer').value||'0',10);
-  const mode = modeSel === 'raw' ? 'spatial' : modeSel;
-  const contract = modeSel !== 'raw';
-  const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&contract=${contract}`)).json();
+  const overlay = document.getElementById('overlay').checked;
+  const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}`)).json();
   edgeLayer.clearLayers();
   const layer2 = L.geoJSON(g, {
-    style: f => ({ color: f.properties.color || '#3dbb7a', weight: modeSel==='raw'?3:5, opacity:0.9 }),
+    style: f => {
+      const contracted = f.properties.style === 'contracted';
+      return {
+        color: contracted ? '#9ec9ff' : (f.properties.color || '#3dbb7a'),
+        weight: contracted ? 2 : 5,
+        opacity: contracted ? 0.85 : 0.9,
+        dashArray: contracted ? '6 6' : null,
+      };
+    },
     onEachFeature: (f,l) => l.bindPopup(
-      `${f.properties.name || '(unnamed)'}<br>highway=${f.properties.highway||''}<br>way ${f.properties.way_id}<br>HDOP ${Number(f.properties.mean_hdop).toFixed(2)}<br>nLOS ${Number(f.properties.mean_n_los).toFixed(1)}<br>${Number(f.properties.length_m).toFixed(1)} m`
+      `${f.properties.name || '(unnamed)'}<br>highway=${f.properties.highway||''}<br>way ${f.properties.way_id}<br>HDOP ${Number(f.properties.mean_hdop).toFixed(2)}<br>nLOS ${Number(f.properties.mean_n_los).toFixed(1)}<br>${Number(f.properties.length_m).toFixed(1)} m<br style="${f.properties.style}"`
     )
   }).addTo(edgeLayer);
   if (g.features.length) map.fitBounds(layer2.getBounds(), {padding:[30,30]});
@@ -356,6 +378,7 @@ document.getElementById('btnClear').onclick = () => {
 document.getElementById('btnReload').onclick = () => loadGraph();
 document.getElementById('mode').onchange = () => loadGraph();
 document.getElementById('layer').onchange = () => loadGraph();
+document.getElementById('overlay').onchange = () => loadGraph();
 
 document.getElementById('btnRoute').onclick = async () => {
   if (!origin || !dest) { alert('Click origin and destination on the map'); return; }
@@ -364,11 +387,10 @@ document.getElementById('btnRoute').onclick = async () => {
     lat_b: dest.lat, lon_b: dest.lng,
     alpha: parseFloat(document.getElementById('alpha').value),
     beta: parseFloat(document.getElementById('beta').value),
-    mode: document.getElementById('mode').value === 'te' ? 'te' : 'spatial',
+    mode: document.getElementById('mode').value,
     layer: parseInt(document.getElementById('layer').value||'0',10),
     start_layer: parseInt(document.getElementById('startLayer').value||'-1',10),
     algorithm: document.getElementById('algo').value,
-    contract: document.getElementById('mode').value !== 'raw',
   };
   const res = await (await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
   pathLayer.clearLayers();
@@ -413,8 +435,11 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             mode = qs.get("mode", ["spatial"])[0]
             layer = int(qs.get("layer", ["0"])[0])
-            contract = qs.get("contract", ["true"])[0].lower() != "false"
-            self._json(200, STATE.graph_geojson(mode=mode, layer=layer, contract=contract))
+            overlay = qs.get("overlay", ["false"])[0].lower() == "true"
+            self._json(
+                200,
+                STATE.graph_geojson(mode=mode, layer=layer, show_contracted_overlay=overlay),
+            )
             return
         self._json(404, {"error": "not found"})
 
@@ -444,7 +469,6 @@ class Handler(BaseHTTPRequestHandler):
         layer = int(req.get("layer", 0))
         start_layer = int(req.get("start_layer", -1))
         algorithm = str(req.get("algorithm", "dijkstra"))
-        contract = bool(req.get("contract", True))
 
         if mode == "te":
             sa = snap_nearest_node(STATE.spatial, lat_a, lon_a)
@@ -464,6 +488,14 @@ class Handler(BaseHTTPRequestHandler):
                 "mean_n_los": route.mean_n_los,
                 "layers": route.layers,
                 "spatial_node_ids": route.spatial_node_ids,
+                "n_travel_contracted": sum(
+                    1 for i in route.edge_indices if STATE.te.edges[i].kind == "travel"
+                ),
+                "n_travel_fine": sum(
+                    len(STATE.te.edges[i].fine_edge_indices)
+                    for i in route.edge_indices
+                    if STATE.te.edges[i].kind == "travel"
+                ),
                 "start_spatial": sa,
                 "goal_spatial": sb,
             }
@@ -474,26 +506,34 @@ class Handler(BaseHTTPRequestHandler):
         if STATE.te.layers:
             layer = max(0, min(layer, len(STATE.te.layers) - 1))
             t_s = 0.5 * (STATE.te.layers[layer].t0_s + STATE.te.layers[layer].t1_s)
-        g = STATE._snapshot(t_s)
-        if contract:
-            g = prepare_contracted_graph(g, hdop_step=STATE.hdop_step, n_los_step=STATE.n_los_step)
-        route = route_latlon(g, lat_a, lon_a, lat_b, lon_b, params, algorithm=algorithm)
+        fine = STATE._snapshot(t_s)
+        cg = prepare_contracted_graph(
+            fine, hdop_step=STATE.hdop_step, n_los_step=STATE.n_los_step
+        )
+        route = route_contracted_latlon(
+            cg, lat_a, lon_a, lat_b, lon_b, params, algorithm=algorithm
+        )
         if route is None:
             self._json(200, {"ok": False, "error": "no spatial path"})
             return
-        path = path_to_geojson(g, route, properties={"kind": "spatial"})
+        path = path_to_geojson(cg.fine, route, properties={"kind": "spatial_expanded"})
         summary = {
             "mode": "spatial",
             "source": STATE.source,
-            "contracted": contract,
+            "routed_on": "contracted",
+            "displayed_as": "fine_expanded",
             "layer": layer,
             "t_s": t_s,
             "length_m": route.length_m,
             "total_cost": route.total_cost,
             "mean_hdop": route.mean_hdop,
             "mean_n_los": route.mean_n_los,
-            "node_ids": route.node_ids,
-            "n_graph_edges": len(g.edges),
+            "n_edges_contracted": len(route.edge_indices),
+            "n_edges_fine": len(route.fine_edge_indices),
+            "node_ids_contracted": route.node_ids,
+            "node_ids_fine": route.fine_node_ids,
+            "n_graph_edges_contracted": len(cg.graph.edges),
+            "n_graph_edges_fine": len(cg.fine.edges),
         }
         self._json(200, {"ok": True, "path": path, "summary": summary})
 

@@ -13,12 +13,14 @@ from typing import Iterable
 
 from gnss_gpu.io.osm_roads import RoadEdge, RoadGraph, haversine_m
 from gnss_gpu.routing_graph import (
+    ContractedGraph,
     QualityInterval,
     TimeExtendedEdge,
     TimeExtendedGraph,
     attach_timelines_by_way,
     build_time_extended_graph,
     contract_same_quality_edges,
+    expand_contracted_route,
 )
 
 
@@ -41,6 +43,10 @@ class RouteResult:
     mean_n_los: float
     layers: list[int] = field(default_factory=list)
     spatial_node_ids: list[int] = field(default_factory=list)
+    # After expand: fine (uncontracted) edge indices for map display
+    fine_edge_indices: list[int] = field(default_factory=list)
+    fine_node_ids: list[int] = field(default_factory=list)
+    fine_geometry: list[tuple[float, float]] = field(default_factory=list)
 
 
 def clip(x: float, lo: float, hi: float) -> float:
@@ -162,9 +168,47 @@ def prepare_contracted_graph(
     *,
     hdop_step: float = 0.5,
     n_los_step: float = 1.0,
-) -> RoadGraph:
-    """Contract consecutive same-direction same-quality degree-2 chains."""
+) -> ContractedGraph:
+    """Contract consecutive same-direction same-quality degree-2 chains.
+
+    Returns a :class:`ContractedGraph`: route on ``.graph``, draw ``.fine``,
+    expand the path with :func:`expand_route_result`.
+    """
     return contract_same_quality_edges(graph, hdop_step=hdop_step, n_los_step=n_los_step)
+
+
+def expand_route_result(contracted: ContractedGraph, route: RouteResult) -> RouteResult:
+    """Fill fine_* fields by unpacking contracted edges via the member map."""
+    fine_edges, fine_nodes, geom = expand_contracted_route(contracted, route.edge_indices)
+    route.fine_edge_indices = fine_edges
+    route.fine_node_ids = fine_nodes
+    route.fine_geometry = geom
+    return route
+
+
+def route_contracted_latlon(
+    contracted: ContractedGraph,
+    lat_a: float,
+    lon_a: float,
+    lat_b: float,
+    lon_b: float,
+    params: CostParams | None = None,
+    *,
+    algorithm: str = "astar",
+) -> RouteResult | None:
+    """Route on the contracted graph, then expand to fine street geometry."""
+    route = route_latlon(
+        contracted.graph,
+        lat_a,
+        lon_a,
+        lat_b,
+        lon_b,
+        params,
+        algorithm=algorithm,
+    )
+    if route is None:
+        return None
+    return expand_route_result(contracted, route)
 
 
 def build_te_from_timeseries(
@@ -482,14 +526,22 @@ def te_path_to_geojson(
     properties: dict | None = None,
 ) -> dict:
     coords: list[list[float]] = []
+    # Prefer fine spatial geometry via member map (recognizable streets)
     for ei in route.edge_indices:
         e = te.edges[ei]
         if e.kind != "travel":
             continue
-        for lat, lon in e.geometry:
-            pt = [lon, lat]
-            if not coords or coords[-1] != pt:
-                coords.append(pt)
+        if e.fine_edge_indices:
+            for fei in e.fine_edge_indices:
+                for lat, lon in te.spatial.edges[fei].geometry:
+                    pt = [lon, lat]
+                    if not coords or coords[-1] != pt:
+                        coords.append(pt)
+        else:
+            for lat, lon in e.geometry:
+                pt = [lon, lat]
+                if not coords or coords[-1] != pt:
+                    coords.append(pt)
     if not coords:
         for nid in route.node_ids:
             n = te.nodes[nid]
@@ -501,7 +553,12 @@ def te_path_to_geojson(
         "total_cost": route.total_cost,
         "mean_hdop": route.mean_hdop,
         "mean_n_los": route.mean_n_los,
-        "n_edges": len(route.edge_indices),
+        "n_edges_contracted": len([i for i in route.edge_indices if te.edges[i].kind == "travel"]),
+        "n_edges_fine": sum(
+            len(te.edges[i].fine_edge_indices)
+            for i in route.edge_indices
+            if te.edges[i].kind == "travel"
+        ),
         "layers": route.layers,
         "spatial_node_ids": route.spatial_node_ids,
     }
@@ -526,12 +583,17 @@ def path_to_geojson(
     properties: dict | None = None,
 ) -> dict:
     coords: list[list[float]] = []
-    for ei in route.edge_indices:
-        e = graph.edges[ei]
-        for lat, lon in e.geometry:
-            pt = [lon, lat]
-            if not coords or coords[-1] != pt:
-                coords.append(pt)
+    # Prefer expanded fine geometry when present
+    if route.fine_geometry:
+        for lat, lon in route.fine_geometry:
+            coords.append([lon, lat])
+    else:
+        for ei in route.edge_indices:
+            e = graph.edges[ei]
+            for lat, lon in e.geometry:
+                pt = [lon, lat]
+                if not coords or coords[-1] != pt:
+                    coords.append(pt)
     if not coords and route.node_ids:
         for nid in route.node_ids:
             n = graph.nodes[nid]
@@ -542,6 +604,7 @@ def path_to_geojson(
         "mean_hdop": route.mean_hdop,
         "mean_n_los": route.mean_n_los,
         "n_edges": len(route.edge_indices),
+        "n_edges_fine": len(route.fine_edge_indices) or len(route.edge_indices),
     }
     if properties:
         props.update(properties)

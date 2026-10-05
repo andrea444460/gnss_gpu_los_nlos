@@ -39,6 +39,7 @@ from gnss_gpu.routing import (  # noqa: E402
     path_to_geojson,
     prepare_contracted_graph,
     route_contracted_latlon,
+    routable_nodes,
     snap_nearest_node,
     te_path_to_geojson,
 )
@@ -132,6 +133,31 @@ class DemoState:
             if seq:
                 e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
 
+        self.te = None
+        self.timelines = None
+        self._te_ready = False
+        # Spatial contraction at t=0 for fast routing; TE built lazily on demand.
+        self._ensure_timelines()
+        self.contracted = prepare_contracted_graph(
+            self._snapshot(0.0), hdop_step=self.hdop_step, n_los_step=self.n_los_step
+        )
+
+    def _ensure_timelines(self) -> None:
+        if self.timelines is not None:
+            return
+        from gnss_gpu.routing_graph import attach_timelines_by_way
+
+        self.timelines = attach_timelines_by_way(
+            self.spatial,
+            self.samples,
+            hdop_step=self.hdop_step,
+            n_los_step=self.n_los_step,
+        )
+
+    def _ensure_te(self):
+        if self._te_ready and self.te is not None:
+            return self.te
+        print("Building time-extended graph (first TE use)…", flush=True)
         self.te, self.timelines = build_te_from_timeseries(
             self.spatial,
             self.samples,
@@ -140,11 +166,44 @@ class DemoState:
             wait_cost=0.0,
             contract_per_layer=True,
         )
-        self.contracted = prepare_contracted_graph(
-            self._snapshot(0.0), hdop_step=self.hdop_step, n_los_step=self.n_los_step
+        self._te_ready = True
+        print(
+            f"TE ready: nodes={len(self.te.nodes)} edges={len(self.te.edges)} layers={len(self.te.layers)}",
+            flush=True,
         )
+        return self.te
+
+    def _layer_time(self, layer: int) -> float:
+        """Mid-time of a quality layer without requiring the full TE graph."""
+        self._ensure_timelines()
+        from gnss_gpu.routing_graph import build_layer_boundaries
+
+        bounds = build_layer_boundaries(self.timelines or [])
+        if len(bounds) < 2:
+            return 0.0
+        layers = [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1) if bounds[i + 1] > bounds[i]]
+        if not layers:
+            return 0.0
+        layer = max(0, min(int(layer), len(layers) - 1))
+        t0, t1 = layers[layer]
+        return 0.5 * (t0 + t1)
+
+    def _layer_meta(self) -> list[dict]:
+        self._ensure_timelines()
+        from gnss_gpu.routing_graph import build_layer_boundaries
+
+        bounds = build_layer_boundaries(self.timelines or [])
+        out = []
+        idx = 0
+        for i in range(len(bounds) - 1):
+            if bounds[i + 1] <= bounds[i]:
+                continue
+            out.append({"index": idx, "t0_s": bounds[i], "t1_s": bounds[i + 1]})
+            idx += 1
+        return out or [{"index": 0, "t0_s": 0.0, "t1_s": 1.0}]
 
     def _snapshot(self, t_s: float) -> RoadGraph:
+        self._ensure_timelines()
         edges = []
         for e, tl in zip(self.spatial.edges, self.timelines):
             h, n = quality_at(tl, t_s)
@@ -201,10 +260,7 @@ class DemoState:
         Routing still uses the contracted graph; display uses original way
         geometry so streets sit on the OpenStreetMap tiles.
         """
-        t_s = 0.0
-        if self.te.layers:
-            layer = max(0, min(layer, len(self.te.layers) - 1))
-            t_s = 0.5 * (self.te.layers[layer].t0_s + self.te.layers[layer].t1_s)
+        t_s = self._layer_time(layer)
 
         feats: list[dict] = []
         if self.roads:
@@ -254,15 +310,14 @@ class DemoState:
             "n_spatial_nodes": len(self.spatial.nodes),
             "n_spatial_edges_fine": len(self.spatial.edges),
             "n_contracted_edges_t0": len(self.contracted.graph.edges),
-            "n_te_nodes": len(self.te.nodes),
-            "n_te_edges": len(self.te.edges),
-            "layers": [
-                {"index": ly.index, "t0_s": ly.t0_s, "t1_s": ly.t1_s} for ly in self.te.layers
-            ],
+            "n_te_nodes": len(self.te.nodes) if self.te is not None else None,
+            "n_te_edges": len(self.te.edges) if self.te is not None else None,
+            "te_built": bool(self._te_ready),
+            "layers": self._layer_meta(),
             "note": (
                 "Map draws full OSM way centerlines (same coords as the basemap). "
-                "Routing uses the contracted graph; the yellow path is expanded "
-                "via the member map. Optional dashed overlay = contracted edges."
+                "Routing snaps to routable contracted nodes (not orphan mid-edge nodes). "
+                "Yellow path is expanded via the member map. TE graph builds lazily."
             ),
         }
 
@@ -522,14 +577,20 @@ class Handler(BaseHTTPRequestHandler):
         algorithm = str(req.get("algorithm", "dijkstra"))
 
         if mode == "te":
-            sa = snap_nearest_node(STATE.spatial, lat_a, lon_a)
-            sb = snap_nearest_node(STATE.spatial, lat_b, lon_b)
+            te = STATE._ensure_te()
+            sa = snap_nearest_node(STATE.spatial, lat_a, lon_a, candidates=None)
+            # Prefer TE-routable spatial ids present in index
+            from gnss_gpu.routing import routable_nodes
+
+            # Snap using spatial graph but route on TE
+            sa = snap_nearest_node(te.spatial, lat_a, lon_a, candidates=routable_nodes(te.spatial))
+            sb = snap_nearest_node(te.spatial, lat_b, lon_b, candidates=routable_nodes(te.spatial))
             sl = None if start_layer < 0 else start_layer
-            route = dijkstra_te_route(STATE.te, sa, sb, params, start_layer=sl)
+            route = dijkstra_te_route(te, sa, sb, params, start_layer=sl)
             if route is None:
                 self._json(200, {"ok": False, "error": "no TE path"})
                 return
-            path = te_path_to_geojson(STATE.te, route, properties={"kind": "te"})
+            path = te_path_to_geojson(te, route, properties={"kind": "te"})
             summary = {
                 "mode": "te",
                 "source": STATE.source,
@@ -540,12 +601,12 @@ class Handler(BaseHTTPRequestHandler):
                 "layers": route.layers,
                 "spatial_node_ids": route.spatial_node_ids,
                 "n_travel_contracted": sum(
-                    1 for i in route.edge_indices if STATE.te.edges[i].kind == "travel"
+                    1 for i in route.edge_indices if te.edges[i].kind == "travel"
                 ),
                 "n_travel_fine": sum(
-                    len(STATE.te.edges[i].fine_edge_indices)
+                    len(te.edges[i].fine_edge_indices)
                     for i in route.edge_indices
-                    if STATE.te.edges[i].kind == "travel"
+                    if te.edges[i].kind == "travel"
                 ),
                 "start_spatial": sa,
                 "goal_spatial": sb,
@@ -553,10 +614,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "path": path, "summary": summary})
             return
 
-        t_s = 0.0
-        if STATE.te.layers:
-            layer = max(0, min(layer, len(STATE.te.layers) - 1))
-            t_s = 0.5 * (STATE.te.layers[layer].t0_s + STATE.te.layers[layer].t1_s)
+        t_s = STATE._layer_time(layer)
         fine = STATE._snapshot(t_s)
         cg = prepare_contracted_graph(
             fine, hdop_step=STATE.hdop_step, n_los_step=STATE.n_los_step
@@ -617,7 +675,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Loading graph (demo={args.demo})…", flush=True)
     STATE = DemoState(demo=args.demo, bbox=bbox)
     print(f"source: {STATE.source}", flush=True)
-    print(f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} layers={len(STATE.te.layers)}", flush=True)
+    print(
+        f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
+        f"contracted={len(STATE.contracted.graph.edges)} layers={len(STATE._layer_meta())}",
+        flush=True,
+    )
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"GNSS route GUI at http://{args.host}:{args.port}", flush=True)

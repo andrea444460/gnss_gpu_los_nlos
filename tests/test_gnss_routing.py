@@ -168,6 +168,7 @@ def test_contract_stops_when_quality_changes():
     assert len(c.graph.edges) == 2
 
 
+
 def test_expand_route_restores_fine_geometry():
     from gnss_gpu.routing import CostParams, dijkstra_route, expand_route_result
 
@@ -185,11 +186,38 @@ def test_expand_route_restores_fine_geometry():
     assert len(cg.graph.edges) == 1
     route = dijkstra_route(cg.graph, 0, 2, CostParams(alpha=0, beta=0))
     assert route is not None
-    assert route.edge_indices == [0]  # one contracted edge
+    assert route.edge_indices == [0]
     expand_route_result(cg, route)
     assert route.fine_edge_indices == [0, 1]
     assert route.fine_node_ids == [0, 1, 2]
     assert len(route.fine_geometry) == 3
+
+
+def test_route_avoids_isolated_contracted_nodes():
+    """Snapping must not land on degree-0 nodes left after contraction."""
+    from gnss_gpu.routing import route_contracted_latlon, prepare_contracted_graph, CostParams
+
+    spatial, samples = make_demo_spatial_graph()
+    for e in spatial.edges:
+        seq = samples[e.way_id]
+        e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
+    cg = prepare_contracted_graph(spatial)
+    # Click near a mid-chain micro-node (10) which is degree-0 after contraction
+    n10 = spatial.nodes[10]
+    n2 = spatial.nodes[2]
+    route = route_contracted_latlon(
+        cg,
+        n10.lat_deg,
+        n10.lon_deg,
+        n2.lat_deg,
+        n2.lon_deg,
+        CostParams(alpha=0, beta=0),
+        algorithm="dijkstra",
+    )
+    assert route is not None
+    assert route.length_m > 0
+    assert len(route.fine_edge_indices) >= 1
+
 
 
 def test_demo_contraction_reduces_micro_edges():

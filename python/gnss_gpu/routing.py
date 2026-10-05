@@ -195,6 +195,7 @@ def route_contracted_latlon(
     params: CostParams | None = None,
     *,
     algorithm: str = "astar",
+    snap_k: int = 12,
 ) -> RouteResult | None:
     """Route on the contracted graph, then expand to fine street geometry."""
     route = route_latlon(
@@ -205,6 +206,7 @@ def route_contracted_latlon(
         lon_b,
         params,
         algorithm=algorithm,
+        snap_k=snap_k,
     )
     if route is None:
         return None
@@ -234,17 +236,51 @@ def build_te_from_timeseries(
     return te, timelines
 
 
-def snap_nearest_node(graph: RoadGraph, lat_deg: float, lon_deg: float) -> int:
+def snap_nearest_node(
+    graph: RoadGraph,
+    lat_deg: float,
+    lon_deg: float,
+    *,
+    candidates: Iterable[int] | None = None,
+) -> int:
+    """Nearest node; optionally restrict to ``candidates`` (e.g. routable only)."""
+    pool = candidates if candidates is not None else graph.nodes.keys()
     best_id = -1
     best_d = float("inf")
-    for nid, node in graph.nodes.items():
+    for nid in pool:
+        node = graph.nodes[int(nid)]
         d = haversine_m(lat_deg, lon_deg, node.lat_deg, node.lon_deg)
         if d < best_d:
             best_d = d
-            best_id = nid
+            best_id = int(nid)
     if best_id < 0:
-        raise ValueError("RoadGraph has no nodes")
+        raise ValueError("RoadGraph has no candidate nodes")
     return best_id
+
+
+def routable_nodes(graph: RoadGraph) -> set[int]:
+    """Nodes incident to at least one directed edge (safe snap targets)."""
+    live: set[int] = set()
+    for e in graph.edges:
+        live.add(e.u)
+        live.add(e.v)
+    return live
+
+
+def nearest_routable_nodes(
+    graph: RoadGraph,
+    lat_deg: float,
+    lon_deg: float,
+    *,
+    k: int = 12,
+) -> list[tuple[float, int]]:
+    """k nearest nodes with incident edges, as (distance_m, node_id)."""
+    scored: list[tuple[float, int]] = []
+    for nid in routable_nodes(graph):
+        n = graph.nodes[nid]
+        scored.append((haversine_m(lat_deg, lon_deg, n.lat_deg, n.lon_deg), nid))
+    scored.sort(key=lambda t: t[0])
+    return scored[: max(1, int(k))]
 
 
 def _reconstruct(
@@ -396,14 +432,38 @@ def route_latlon(
     params: CostParams | None = None,
     *,
     algorithm: str = "astar",
+    snap_k: int = 12,
 ) -> RouteResult | None:
-    start = snap_nearest_node(graph, lat_a, lon_a)
-    goal = snap_nearest_node(graph, lat_b, lon_b)
-    if algorithm == "dijkstra":
-        return dijkstra_route(graph, start, goal, params)
-    if algorithm == "astar":
-        return astar_route(graph, start, goal, params)
-    raise ValueError(f"unknown algorithm: {algorithm}")
+    """Snap A/B to routable nodes (trying nearby candidates) then shortest path.
+
+    Avoids snapping onto contracted-away intermediate nodes that have degree 0
+    in the routing graph — a common cause of spurious \"no path\" in the GUI.
+    """
+    params = params or CostParams()
+    cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k)
+    cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k)
+    if not cands_a or not cands_b:
+        return None
+
+    best: RouteResult | None = None
+    best_score = float("inf")
+    for da, sa in cands_a:
+        for db, sb in cands_b:
+            if sa == sb:
+                continue
+            if algorithm == "dijkstra":
+                route = dijkstra_route(graph, sa, sb, params)
+            elif algorithm == "astar":
+                route = astar_route(graph, sa, sb, params)
+            else:
+                raise ValueError(f"unknown algorithm: {algorithm}")
+            if route is None:
+                continue
+            score = da + db + 0.05 * route.total_cost
+            if score < best_score:
+                best_score = score
+                best = route
+    return best
 
 
 def dijkstra_te_route(

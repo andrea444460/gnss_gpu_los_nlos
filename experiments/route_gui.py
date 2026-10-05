@@ -298,7 +298,8 @@ HTML = r"""<!doctype html>
 <div id="wrap">
   <aside>
     <h1>GNSS route lab</h1>
-    <p class="note">Green lines = real OSM centerlines (same coords as the basemap). Routing contracts; path expands back. Click A then B.</p>
+    <p class="note">Green = OSM centerlines. Click anywhere: 1st = A, 2nd = B (roads no longer steal clicks). Then Route.</p>
+    <p id="hint" class="note" style="color:#3dbb7a">Click anywhere on the map to place A (origin).</p>
     <label>Mode</label>
     <select id="mode">
       <option value="spatial">Spatial routing</option>
@@ -341,13 +342,38 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 }).addTo(map);
 let edgeLayer = L.layerGroup().addTo(map);
 let pathLayer = L.layerGroup().addTo(map);
+let markerLayer = L.layerGroup().addTo(map);
 let markers = [];
 let origin = null, dest = null;
+
+function setHint(){
+  const el = document.getElementById('hint');
+  if (!el) return;
+  if (!origin) el.textContent = 'Click anywhere on the map to place A (origin).';
+  else if (!dest) el.textContent = 'Click anywhere else to place B (destination).';
+  else el.textContent = 'A and B set — press Route, or Clear to reset.';
+}
+
+function placeMarker(latlng, kind){
+  const color = kind === 'A' ? '#3dbb7a' : '#e85d4c';
+  const m = L.circleMarker(latlng, {
+    radius: 9,
+    color,
+    fillColor: color,
+    fillOpacity: 1,
+    weight: 2,
+    interactive: false,
+  }).bindTooltip(kind, {permanent: true, direction: 'top', offset: [0, -10]});
+  m.addTo(markerLayer);
+  markers.push(m);
+  return m;
+}
 
 async function loadMeta(){
   const m = await (await fetch('/api/meta')).json();
   document.getElementById('layer').max = Math.max(0, (m.layers||[]).length-1);
   document.getElementById('stats').textContent = JSON.stringify(m, null, 2);
+  setHint();
 }
 
 async function loadGraph(){
@@ -357,6 +383,9 @@ async function loadGraph(){
   const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}`)).json();
   edgeLayer.clearLayers();
   const layer2 = L.geoJSON(g, {
+    // Roads must NOT capture clicks, otherwise B can only be placed where
+    // there is no green polyline (felt like "only on A").
+    interactive: false,
     style: f => {
       const contracted = f.properties.style === 'contracted';
       return {
@@ -366,9 +395,6 @@ async function loadGraph(){
         dashArray: contracted ? '6 6' : null,
       };
     },
-    onEachFeature: (f,l) => l.bindPopup(
-      `${f.properties.name || '(unnamed)'}<br>highway=${f.properties.highway||''}<br>way ${f.properties.way_id}<br>HDOP ${Number(f.properties.mean_hdop).toFixed(2)}<br>nLOS ${Number(f.properties.mean_n_los).toFixed(1)}<br>${Number(f.properties.length_m).toFixed(1)} m<br style="${f.properties.style}"`
-    )
   }).addTo(edgeLayer);
   if (g.features.length) map.fitBounds(layer2.getBounds(), {padding:[30,30]});
 }
@@ -376,17 +402,25 @@ async function loadGraph(){
 map.on('click', (e) => {
   if (!origin) {
     origin = e.latlng;
-    markers.push(L.circleMarker(origin, {radius:8, color:'#3dbb7a', fillColor:'#3dbb7a', fillOpacity:1}).addTo(map).bindTooltip('A'));
+    placeMarker(origin, 'A');
   } else if (!dest) {
     dest = e.latlng;
-    markers.push(L.circleMarker(dest, {radius:8, color:'#e85d4c', fillColor:'#e85d4c', fillOpacity:1}).addTo(map).bindTooltip('B'));
+    placeMarker(dest, 'B');
+  } else {
+    // third click moves B
+    dest = e.latlng;
+    if (markers.length >= 2) markerLayer.removeLayer(markers.pop());
+    placeMarker(dest, 'B');
   }
+  setHint();
 });
 
 document.getElementById('btnClear').onclick = () => {
   origin = dest = null;
-  markers.forEach(m => map.removeLayer(m)); markers = [];
+  markerLayer.clearLayers();
+  markers = [];
   pathLayer.clearLayers();
+  setHint();
 };
 
 document.getElementById('btnReload').onclick = () => loadGraph();
@@ -395,7 +429,7 @@ document.getElementById('layer').onchange = () => loadGraph();
 document.getElementById('overlay').onchange = () => loadGraph();
 
 document.getElementById('btnRoute').onclick = async () => {
-  if (!origin || !dest) { alert('Click origin and destination on the map'); return; }
+  if (!origin || !dest) { alert('Click origin A, then destination B anywhere on the map'); return; }
   const body = {
     lat_a: origin.lat, lon_a: origin.lng,
     lat_b: dest.lat, lon_b: dest.lng,
@@ -413,7 +447,10 @@ document.getElementById('btnRoute').onclick = async () => {
     alert(res.error || 'no path');
     return;
   }
-  L.geoJSON(res.path, { style: { color:'#f5d76e', weight:7, opacity:0.95 } }).addTo(pathLayer);
+  L.geoJSON(res.path, {
+    interactive: false,
+    style: { color:'#f5d76e', weight:7, opacity:0.95 },
+  }).addTo(pathLayer);
   document.getElementById('stats').textContent = JSON.stringify(res.summary, null, 2);
 };
 

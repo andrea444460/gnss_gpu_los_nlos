@@ -579,6 +579,62 @@ def dijkstra_te_route(
     )
 
 
+def te_spatial_ids(te: TimeExtendedGraph) -> set[int]:
+    """Spatial node ids that appear in the TE index (safe TE snap targets)."""
+    return {sid for sid, _layer in te.index.keys()}
+
+
+def nearest_te_spatial_nodes(
+    te: TimeExtendedGraph,
+    lat_deg: float,
+    lon_deg: float,
+    *,
+    k: int = 12,
+) -> list[tuple[float, int]]:
+    scored: list[tuple[float, int]] = []
+    for sid in te_spatial_ids(te):
+        n = te.spatial.nodes[sid]
+        scored.append((haversine_m(lat_deg, lon_deg, n.lat_deg, n.lon_deg), sid))
+    scored.sort(key=lambda t: t[0])
+    return scored[: max(1, int(k))]
+
+
+def route_te_latlon(
+    te: TimeExtendedGraph,
+    lat_a: float,
+    lon_a: float,
+    lat_b: float,
+    lon_b: float,
+    params: CostParams | None = None,
+    *,
+    start_layer: int | None = None,
+    snap_k: int = 12,
+) -> RouteResult | None:
+    """Snap A/B to TE-present spatial nodes (k nearest) then Dijkstra-TE."""
+    params = params or CostParams()
+    cands_a = nearest_te_spatial_nodes(te, lat_a, lon_a, k=snap_k)
+    cands_b = nearest_te_spatial_nodes(te, lat_b, lon_b, k=snap_k)
+    if not cands_a or not cands_b:
+        return None
+
+    best: RouteResult | None = None
+    best_score = float("inf")
+    for da, sa in cands_a:
+        for db, sb in cands_b:
+            if sa == sb:
+                continue
+            route = dijkstra_te_route(
+                te, sa, sb, params, start_layer=start_layer
+            )
+            if route is None:
+                continue
+            score = da + db + 0.05 * route.total_cost
+            if score < best_score:
+                best_score = score
+                best = route
+    return best
+
+
 def te_path_to_geojson(
     te: TimeExtendedGraph,
     route: RouteResult,

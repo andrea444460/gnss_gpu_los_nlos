@@ -35,12 +35,10 @@ from gnss_gpu.io.osm_roads import (  # noqa: E402
 from gnss_gpu.routing import (  # noqa: E402
     CostParams,
     build_te_from_timeseries,
-    dijkstra_te_route,
     path_to_geojson,
     prepare_contracted_graph,
     route_contracted_latlon,
-    routable_nodes,
-    snap_nearest_node,
+    route_te_latlon,
     te_path_to_geojson,
 )
 from gnss_gpu.routing_graph import (  # noqa: E402
@@ -578,15 +576,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if mode == "te":
             te = STATE._ensure_te()
-            sa = snap_nearest_node(STATE.spatial, lat_a, lon_a, candidates=None)
-            # Prefer TE-routable spatial ids present in index
-            from gnss_gpu.routing import routable_nodes
-
-            # Snap using spatial graph but route on TE
-            sa = snap_nearest_node(te.spatial, lat_a, lon_a, candidates=routable_nodes(te.spatial))
-            sb = snap_nearest_node(te.spatial, lat_b, lon_b, candidates=routable_nodes(te.spatial))
             sl = None if start_layer < 0 else start_layer
-            route = dijkstra_te_route(te, sa, sb, params, start_layer=sl)
+            route = route_te_latlon(
+                te,
+                lat_a,
+                lon_a,
+                lat_b,
+                lon_b,
+                params,
+                start_layer=sl,
+            )
             if route is None:
                 self._json(200, {"ok": False, "error": "no TE path"})
                 return
@@ -608,8 +607,9 @@ class Handler(BaseHTTPRequestHandler):
                     for i in route.edge_indices
                     if te.edges[i].kind == "travel"
                 ),
-                "start_spatial": sa,
-                "goal_spatial": sb,
+                "start_spatial": route.spatial_node_ids[0] if route.spatial_node_ids else None,
+                "goal_spatial": route.spatial_node_ids[-1] if route.spatial_node_ids else None,
+                "start_layer": sl,
             }
             self._json(200, {"ok": True, "path": path, "summary": summary})
             return

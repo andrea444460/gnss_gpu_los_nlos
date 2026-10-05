@@ -265,3 +265,26 @@ def test_time_extended_prefers_detour_after_quality_drop():
     # Travel edges carry fine member map for display unpacking
     travel = [te.edges[i] for i in route.edge_indices if te.edges[i].kind == "travel"]
     assert travel and all(e.fine_edge_indices for e in travel)
+
+
+def test_route_te_latlon_snaps_to_te_nodes():
+    """TE snap must use TE-indexed spatial ids, not fine-only orphans."""
+    from gnss_gpu.routing import route_te_latlon
+
+    spatial, samples = make_demo_spatial_graph()
+    te, _ = build_te_from_timeseries(spatial, samples, wait_cost=0.0, contract_per_layer=True)
+    # Click near mid-chain node 10 (often contracted away) toward node 2
+    n10, n2 = spatial.nodes[10], spatial.nodes[2]
+    route = route_te_latlon(
+        te,
+        n10.lat_deg,
+        n10.lon_deg,
+        n2.lat_deg,
+        n2.lon_deg,
+        CostParams(alpha=0, beta=0),
+        start_layer=0,
+    )
+    assert route is not None
+    assert route.length_m > 0
+    assert route.spatial_node_ids[-1] == 2 or 2 in route.spatial_node_ids
+

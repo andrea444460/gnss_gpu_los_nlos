@@ -43,8 +43,8 @@ from gnss_gpu.routing_graph import (  # noqa: E402
     synthesize_quality_timeseries,
 )
 
-# Genova car-only — larger than centro, still Overpass-friendly with disk cache
-DEFAULT_BBOX = BBox(south=44.3950, west=8.9000, north=44.4250, east=8.9600)
+# Genova urban (car-only), loaded via disk-cached Overpass tiles
+DEFAULT_BBOX = BBox(south=44.3850, west=8.8800, north=44.4450, east=8.9800)
 FIXTURE_ROADS = (
     Path(__file__).resolve().parents[1] / "python" / "gnss_gpu" / "fixtures" / "genova_centro_roads.json"
 )
@@ -105,7 +105,7 @@ def _load_overpass_graph(bbox: BBox, *, force_refresh: bool = False):
         car_only=True,
         include_pedestrian=False,
         force_refresh=force_refresh,
-        tile_size_m=2500.0,
+        tile_size_m=3000.0,
         timeout_s=45,
         max_attempts_per_endpoint=2,
     )

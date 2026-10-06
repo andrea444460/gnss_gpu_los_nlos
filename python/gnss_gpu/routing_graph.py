@@ -563,12 +563,39 @@ def synthesize_quality_timeseries(
 ) -> dict[int, list[tuple[float, float, float]]]:
     """Invent piecewise GNSS timelines so the GUI works without a real sim.
 
-    Ways whose midpoint latitude is >= ``lat_split`` become bad after t=100s;
-    southern ways stay good. If ``lat_split`` is None, use the median node lat.
+    Spatial pattern (visible already at t=0):
+    - driveable arterials (secondary/tertiary) stay good
+    - residential/service are mixed
+    - pedestrian/footway corridors act as urban canyons (worse HDOP / fewer LOS)
+    - a soft N/S + E/W gradient adds spatial texture
+
+    Temporal pattern: northern half of the map degrades after t≈100s so the
+    time-extended layers show a real quality change.
     """
     if lat_split is None:
         lats = [n.lat_deg for n in graph.nodes.values()]
         lat_split = float(sorted(lats)[len(lats) // 2]) if lats else 0.0
+    lons = [n.lon_deg for n in graph.nodes.values()]
+    lon0 = float(min(lons)) if lons else 0.0
+    lon1 = float(max(lons)) if lons else 1.0
+    lon_span = max(1e-9, lon1 - lon0)
+
+    # Base (hdop, n_los) by highway class — canyon-like for walkways.
+    class_base: dict[str, tuple[float, float]] = {
+        "motorway": (0.9, 12.0),
+        "trunk": (1.0, 12.0),
+        "primary": (1.1, 11.0),
+        "secondary": (1.3, 11.0),
+        "tertiary": (1.6, 10.0),
+        "residential": (2.4, 8.0),
+        "living_street": (2.8, 7.0),
+        "unclassified": (2.6, 8.0),
+        "service": (3.2, 6.0),
+        "cycleway": (3.8, 5.0),
+        "pedestrian": (4.5, 4.0),
+        "footway": (5.5, 3.0),
+        "path": (5.0, 3.5),
+    }
 
     samples: dict[int, list[tuple[float, float, float]]] = {}
     for e in graph.edges:
@@ -576,21 +603,35 @@ def synthesize_quality_timeseries(
             continue
         if e.geometry:
             mid_lat = 0.5 * (e.geometry[0][0] + e.geometry[-1][0])
+            mid_lon = 0.5 * (e.geometry[0][1] + e.geometry[-1][1])
         else:
-            mid_lat = 0.5 * (graph.nodes[e.u].lat_deg + graph.nodes[e.v].lat_deg)
+            nu, nv = graph.nodes[e.u], graph.nodes[e.v]
+            mid_lat = 0.5 * (nu.lat_deg + nv.lat_deg)
+            mid_lon = 0.5 * (nu.lon_deg + nv.lon_deg)
+
+        h0, n0 = class_base.get(str(e.highway or "").lower(), (3.0, 6.0))
+        # Soft spatial texture so nearby streets aren't identical.
+        east = (mid_lon - lon0) / lon_span
+        north = 1.0 if mid_lat >= lat_split else 0.0
+        # Deterministic jitter from way_id (stable across runs).
+        jitter = ((int(e.way_id) * 1103515245 + 12345) & 0x7FFF) / 32767.0
+        hdop_t0 = max(0.8, h0 + 1.8 * east + 0.6 * north + 0.9 * (jitter - 0.5))
+        nlos_t0 = max(1.0, n0 - 2.0 * east - 1.0 * north - 1.5 * (jitter - 0.5))
+
         if mid_lat >= lat_split:
+            # Northern corridors degrade over time (urban canyon worsens).
             samples[e.way_id] = [
-                (0.0, 1.5, 10.0),
-                (50.0, 1.8, 9.0),
-                (100.0, 7.0, 3.0),
-                (150.0, 7.5, 2.0),
-                (200.0, 7.5, 2.0),
+                (0.0, hdop_t0, nlos_t0),
+                (50.0, hdop_t0 + 0.3, max(1.0, nlos_t0 - 0.5)),
+                (100.0, min(9.0, hdop_t0 + 3.5), max(1.0, nlos_t0 - 4.0)),
+                (150.0, min(9.5, hdop_t0 + 4.0), max(1.0, nlos_t0 - 5.0)),
+                (200.0, min(9.5, hdop_t0 + 4.0), max(1.0, nlos_t0 - 5.0)),
             ]
         else:
             samples[e.way_id] = [
-                (0.0, 1.2, 11.0),
-                (100.0, 1.3, 11.0),
-                (200.0, 1.4, 10.0),
+                (0.0, hdop_t0, nlos_t0),
+                (100.0, hdop_t0 + 0.15, max(1.0, nlos_t0 - 0.2)),
+                (200.0, hdop_t0 + 0.3, max(1.0, nlos_t0 - 0.4)),
             ]
     return samples
 

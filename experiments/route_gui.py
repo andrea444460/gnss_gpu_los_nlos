@@ -48,19 +48,39 @@ from gnss_gpu.routing_graph import (  # noqa: E402
 )
 
 # Genova centro storico — small enough for Overpass, real street geometry
-DEFAULT_BBOX = BBox(south=44.4055, west=8.9305, north=44.4088, east=8.9358)
+DEFAULT_BBOX = BBox(south=44.4030, west=8.9270, north=44.4110, east=8.9400)
 FIXTURE_ROADS = (
     Path(__file__).resolve().parents[1] / "python" / "gnss_gpu" / "fixtures" / "genova_centro_roads.json"
 )
 
 
 def _hdop_color(hdop: float) -> str:
+    """Green (good) → amber → red (bad) from HDOP ∈ [1, 8]."""
     if not math.isfinite(hdop):
-        return "#888888"
-    t = max(0.0, min(1.0, (hdop - 1.0) / 7.0))
-    r = int(255 * t)
-    g = int(200 * (1.0 - t))
-    return f"#{r:02x}{g:02x}40"
+        return "#6b7280"
+    t = max(0.0, min(1.0, (float(hdop) - 1.0) / 7.0))
+    # Piecewise: green → yellow → orange → red
+    if t < 0.33:
+        u = t / 0.33
+        r, g, b = int(40 + 200 * u), int(180 + 40 * u), int(70 * (1.0 - u))
+    elif t < 0.66:
+        u = (t - 0.33) / 0.33
+        r, g, b = int(240), int(220 - 100 * u), int(40)
+    else:
+        u = (t - 0.66) / 0.34
+        r, g, b = int(240 - 40 * u), int(120 - 90 * u), int(40)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _quality_color(hdop: float, n_los: float) -> str:
+    """Blend HDOP + LOS count into one display score (higher = worse)."""
+    if not math.isfinite(hdop):
+        return _hdop_color(hdop)
+    # Fewer LOS satellites worsen the displayed quality.
+    los_pen = 0.0
+    if math.isfinite(n_los):
+        los_pen = max(0.0, (8.0 - float(n_los)) / 8.0) * 3.0
+    return _hdop_color(float(hdop) + los_pen)
 
 
 def _graph_from_roads(roads: list[dict], source: str):
@@ -239,7 +259,7 @@ class DemoState:
                         "length_m": e.length_m,
                         "mean_hdop": e.mean_hdop,
                         "mean_n_los": e.mean_n_los,
-                        "color": _hdop_color(e.mean_hdop),
+                        "color": _quality_color(e.mean_hdop, e.mean_n_los),
                         "name": e.name,
                         "highway": e.highway,
                         "style": style,
@@ -277,7 +297,7 @@ class DemoState:
                             "length_m": None,
                             "mean_hdop": hdop,
                             "mean_n_los": n_los,
-                            "color": _hdop_color(hdop),
+                            "color": _quality_color(hdop, n_los),
                             "name": str(tags.get("name", "")),
                             "highway": str(tags.get("highway", "")),
                             "style": "fine",
@@ -345,13 +365,32 @@ HTML = r"""<!doctype html>
   #map { height:100%; }
   #stats { margin-top:14px; font-size:12px; white-space:pre-wrap; background:#152028; padding:10px; border-radius:6px; color:#c5d6e0; max-height:40vh; overflow:auto; }
   .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  #legend { margin:12px 0; padding:10px; background:#152028; border-radius:6px; font-size:12px; color:#c5d6e0; }
+  #legend h2 { margin:0 0 6px; font-size:12px; font-weight:600; letter-spacing:.04em; text-transform:uppercase; color:var(--muted); }
+  #legend .formula { color:var(--muted); font-size:11px; margin:0 0 8px; line-height:1.35; }
+  #legend table { width:100%; border-collapse:collapse; }
+  #legend td { padding:4px 0; vertical-align:middle; }
+  #legend .swatch { width:18px; height:12px; border-radius:2px; display:inline-block; margin-right:8px; border:1px solid #3a4b58; }
+  #legend .param { color:#e8eef2; }
+  #legend .hint { color:var(--muted); font-size:11px; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <aside>
     <h1>GNSS route lab</h1>
-    <p class="note">Green = OSM centerlines. Click anywhere: 1st = A, 2nd = B (roads no longer steal clicks). Then Route.</p>
+    <p class="note">Click A, then B, then Route. Change <b>Layer</b> to see quality over time.</p>
+    <div id="legend">
+      <h2>Legenda colore archi</h2>
+      <p class="formula">Colore = score GNSS ≈ HDOP + 3·max(0, (8 − n<sub>LOS</sub>)/8).<br/>Verde = buona qualità, rosso = scarsa.</p>
+      <table>
+        <tr><td><span class="swatch" style="background:#28b446"></span><span class="param">HDOP ≈ 1–2</span></td><td class="hint">n<sub>LOS</sub> ≥ 8 · ottima</td></tr>
+        <tr><td><span class="swatch" style="background:#f0dc28"></span><span class="param">HDOP ≈ 3–4</span></td><td class="hint">n<sub>LOS</sub> ≈ 5–7 · media</td></tr>
+        <tr><td><span class="swatch" style="background:#f07828"></span><span class="param">HDOP ≈ 5–6</span></td><td class="hint">n<sub>LOS</sub> ≈ 3–4 · scarsa</td></tr>
+        <tr><td><span class="swatch" style="background:#c81e28"></span><span class="param">HDOP ≥ 7</span></td><td class="hint">n<sub>LOS</sub> ≤ 2 · pessima</td></tr>
+        <tr><td><span class="swatch" style="background:#6b7280"></span><span class="param">n/d</span></td><td class="hint">nessuna metrica</td></tr>
+      </table>
+    </div>
     <p id="hint" class="note" style="color:#3dbb7a">Click anywhere on the map to place A (origin).</p>
     <label>Mode</label>
     <select id="mode">

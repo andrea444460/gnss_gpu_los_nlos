@@ -83,7 +83,38 @@ def _quality_color(hdop: float, n_los: float) -> str:
     return _hdop_color(float(hdop) + los_pen)
 
 
+CAR_HIGHWAYS = frozenset(
+    {
+        "motorway",
+        "trunk",
+        "primary",
+        "secondary",
+        "tertiary",
+        "unclassified",
+        "residential",
+        "living_street",
+        "service",
+        "motorway_link",
+        "trunk_link",
+        "primary_link",
+        "secondary_link",
+        "tertiary_link",
+    }
+)
+
+
+def _filter_car_ways(roads: list[dict]) -> list[dict]:
+    """Keep only motor-vehicle highway classes (no footway/pedestrian/cycleway)."""
+    out = []
+    for w in roads:
+        hw = str((w.get("tags") or {}).get("highway", "")).strip().lower()
+        if hw in CAR_HIGHWAYS:
+            out.append(w)
+    return out
+
+
 def _graph_from_roads(roads: list[dict], source: str):
+    roads = _filter_car_ways(roads)
     graph = build_directed_road_graph(roads)
     if not graph.edges:
         raise RuntimeError("no road edges built")
@@ -94,7 +125,8 @@ def _graph_from_roads(roads: list[dict], source: str):
 def _load_fixture_graph():
     payload = json.loads(FIXTURE_ROADS.read_text(encoding="utf-8"))
     roads = [el for el in payload.get("elements", []) if el.get("type") == "way"]
-    return _graph_from_roads(roads, f"fixture:{FIXTURE_ROADS.name} ({len(roads)} ways)")
+    roads = _filter_car_ways(roads)
+    return _graph_from_roads(roads, f"fixture:{FIXTURE_ROADS.name} ({len(roads)} car ways)")
 
 
 def _load_overpass_graph(bbox: BBox):

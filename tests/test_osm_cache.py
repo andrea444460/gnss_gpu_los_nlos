@@ -97,3 +97,9 @@ def test_write_read_roundtrip(tmp_path: Path):
     assert len(roads) == 1
     assert meta["n_ways"] == 1
     assert cache_path(bbox, tmp_path).name.startswith("osm_roads_")
+
+
+def test_shared_fixture_cache_hit_no_network(cached_roads):
+    roads, info = cached_roads
+    assert info["cache_hit"] is True
+    assert roads[0]["tags"]["highway"] == "residential"

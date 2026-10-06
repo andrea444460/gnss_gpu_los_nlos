@@ -50,6 +50,29 @@ FIXTURE_ROADS = (
 )
 
 
+def _simplify_lonlat(
+    coords: list[list[float]],
+    *,
+    min_step_m: float = 12.0,
+) -> list[list[float]]:
+    """Drop nearly-collinear display points (routing still uses full geometry)."""
+    if len(coords) <= 2:
+        return coords
+    # coords are [lon, lat]
+    kept = [coords[0]]
+    last_lat, last_lon = coords[0][1], coords[0][0]
+    for lon, lat in coords[1:-1]:
+        # cheap equirectangular metres near Genova
+        dy = (lat - last_lat) * 111_320.0
+        dx = (lon - last_lon) * 82_000.0
+        if (dx * dx + dy * dy) >= (min_step_m * min_step_m):
+            kept.append([round(lon, 6), round(lat, 6)])
+            last_lat, last_lon = lat, lon
+    end = coords[-1]
+    kept.append([round(end[0], 6), round(end[1], 6)])
+    return kept if len(kept) >= 2 else [coords[0], coords[-1]]
+
+
 def _hdop_color(hdop: float) -> str:
     """Green (good) → amber → red (bad) from HDOP ∈ [1, 8]."""
     if not math.isfinite(hdop):
@@ -284,24 +307,17 @@ class DemoState:
                 tags = way.get("tags") or {}
                 wid = int(way.get("id", -1))
                 hdop, n_los = _way_quality(self.samples, wid, t_s)
+                raw_coords = [[float(p["lon"]), float(p["lat"])] for p in geom]
                 feats.append(
                     {
                         "type": "Feature",
                         "properties": {
-                            "way_id": wid,
-                            "length_m": None,
-                            "mean_hdop": hdop,
-                            "mean_n_los": n_los,
                             "color": _quality_color(hdop, n_los),
-                            "name": str(tags.get("name", "")),
-                            "highway": str(tags.get("highway", "")),
                             "style": "fine",
                         },
                         "geometry": {
                             "type": "LineString",
-                            "coordinates": [
-                                [float(p["lon"]), float(p["lat"])] for p in geom
-                            ],
+                            "coordinates": _simplify_lonlat(raw_coords),
                         },
                     }
                 )
@@ -414,7 +430,7 @@ HTML = r"""<!doctype html>
   <div id="map"></div>
 </div>
 <script>
-const map = L.map('map');
+const map = L.map('map', { preferCanvas: true, zoomControl: true });
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19, attribution: '&copy; OpenStreetMap'
 }).addTo(map);
@@ -423,6 +439,7 @@ let pathLayer = L.layerGroup().addTo(map);
 let markerLayer = L.layerGroup().addTo(map);
 let markers = [];
 let origin = null, dest = null;
+let didFit = false;
 
 function setHint(){
   const el = document.getElementById('hint');
@@ -458,23 +475,34 @@ async function loadGraph(){
   const mode = 'spatial';
   const layer = parseInt(document.getElementById('layer').value||'0',10);
   const overlay = document.getElementById('overlay').checked;
+  document.getElementById('stats').textContent = 'Loading road layer…';
+  const t0 = performance.now();
   const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}`)).json();
+  const tFetch = performance.now() - t0;
   edgeLayer.clearLayers();
+  const t1 = performance.now();
   const layer2 = L.geoJSON(g, {
     // Roads must NOT capture clicks, otherwise B can only be placed where
     // there is no green polyline (felt like "only on A").
     interactive: false,
+    renderer: L.canvas({ padding: 0.5 }),
     style: f => {
       const contracted = f.properties.style === 'contracted';
       return {
         color: contracted ? '#9ec9ff' : (f.properties.color || '#3dbb7a'),
-        weight: contracted ? 2 : 5,
-        opacity: contracted ? 0.85 : 0.9,
+        weight: contracted ? 2 : 3,
+        opacity: contracted ? 0.85 : 0.75,
         dashArray: contracted ? '6 6' : null,
       };
     },
   }).addTo(edgeLayer);
-  if (g.features.length) map.fitBounds(layer2.getBounds(), {padding:[30,30]});
+  const tDraw = performance.now() - t1;
+  if (g.features.length && !didFit) {
+    map.fitBounds(layer2.getBounds(), {padding:[30,30]});
+    didFit = true;
+  }
+  document.getElementById('stats').textContent =
+    `Roads: ${g.features.length} features\\nfetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms`;
 }
 
 map.on('click', (e) => {

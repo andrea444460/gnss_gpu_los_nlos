@@ -76,8 +76,11 @@ def display_cache_key(
     *,
     detail: str,
     layer: int,
-    n_ways: int,
 ) -> str:
+    """Stable key from bbox + detail + layer only (no dependency on road count).
+
+    Lets the GUI serve a pregenerated map before the routing graph is built.
+    """
     payload = {
         "south": round(bbox.south, 5),
         "west": round(bbox.west, 5),
@@ -85,8 +88,7 @@ def display_cache_key(
         "east": round(bbox.east, 5),
         "detail": detail,
         "layer": int(layer),
-        "n_ways": int(n_ways),
-        "v": 2,
+        "v": 3,
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
@@ -97,11 +99,10 @@ def display_cache_path(
     *,
     detail: str,
     layer: int,
-    n_ways: int,
     cache_dir: Path | None = None,
 ) -> Path:
     root = Path(cache_dir) if cache_dir is not None else default_cache_dir()
-    key = display_cache_key(bbox, detail=detail, layer=layer, n_ways=n_ways)
+    key = display_cache_key(bbox, detail=detail, layer=layer)
     return root / f"display_{detail}_L{int(layer)}_{key}.geojson"
 
 
@@ -224,8 +225,16 @@ def fetch_roads_cached(
         if tile_size_m and tile_size_m > 0
         else [bbox]
     )
+    print(
+        f"Overpass fetch: {len(tiles)} tile(s) for bbox "
+        f"[{bbox.south},{bbox.west},{bbox.north},{bbox.east}] "
+        f"(this can take minutes without a local cache)…",
+        flush=True,
+    )
     dedup: dict[int, dict] = {}
-    for tile in tiles:
+    for i, tile in enumerate(tiles, start=1):
+        t0 = time.perf_counter()
+        print(f"  tile {i}/{len(tiles)}…", flush=True)
         chunk = fetcher(
             tile,
             include_pedestrian=include_pedestrian,
@@ -236,6 +245,11 @@ def fetch_roads_cached(
             wid = w.get("id")
             if isinstance(wid, int):
                 dedup[wid] = w
+        print(
+            f"  tile {i}/{len(tiles)} done: +{len(chunk)} ways "
+            f"(unique={len(dedup)}) in {time.perf_counter()-t0:.1f}s",
+            flush=True,
+        )
 
     roads = list(dedup.values())
     if car_only:

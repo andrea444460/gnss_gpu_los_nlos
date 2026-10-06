@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Minimal Leaflet GUI for GNSS-aware spatial routing (time-extended deferred).
 
-Default: cached OSM Genova car ways. Optional fixture / synthetic demos.
+Default: cached OSM Genova car ways. Map paints from pregenerated GeoJSON
+immediately; the routing graph loads in the background.
 
     PYTHONPATH=python python experiments/route_gui.py --port 8765
     PYTHONPATH=python python experiments/route_gui.py --demo overpass
+    PYTHONPATH=python python experiments/route_gui.py --pregenerate-only
     PYTHONPATH=python python experiments/route_gui.py --demo synthetic
 
 Open http://127.0.0.1:8765 — click origin, click destination, Route.
@@ -16,6 +18,7 @@ import argparse
 import json
 import math
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -178,47 +181,137 @@ def _way_quality(samples: dict, way_id: int, t_s: float = 0.0) -> tuple[float, f
 
 
 class DemoState:
-    def __init__(self, *, demo: str = "fixture", bbox: BBox = DEFAULT_BBOX) -> None:
+    def __init__(
+        self,
+        *,
+        demo: str = "fixture",
+        bbox: BBox = DEFAULT_BBOX,
+        eager: bool = False,
+    ) -> None:
+        self.demo = demo
         self.hdop_step = 0.5
         self.n_los_step = 1.0
-        self.source = ""
+        self.source = "loading…"
         self.bbox = bbox
         self.roads: list[dict] = []
-        if demo == "synthetic":
-            self.spatial, self.samples = make_demo_spatial_graph()
-            self.source = "synthetic rectangular block (unit-test only)"
-            self.roads = []
-        elif demo == "overpass":
-            try:
-                self.spatial, self.samples, self.source, self.roads = _load_overpass_graph(bbox)
-            except Exception as exc:  # noqa: BLE001
-                print(f"WARNING: Overpass failed ({exc}); using offline fixture", flush=True)
-                self.spatial, self.samples, self.source, self.roads = _load_fixture_graph()
-                self.source += f" [overpass fallback: {exc}]"
-        else:
-            self.spatial, self.samples, self.source, self.roads = _load_fixture_graph()
-
-        # Stamp initial quality onto edges for contraction helpers
-        for e in self.spatial.edges:
-            seq = self.samples.get(e.way_id) or []
-            if seq:
-                e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
-
+        self.spatial = RoadGraph(nodes={}, edges=[])
+        self.samples: dict = {}
         self.te = None
         self.timelines = None
         self._te_ready = False
-        self.contracted = None  # built lazily — map display needs only OSM ways + samples
-        # Pregenerated display GeoJSON bytes: (detail, layer) -> raw JSON
+        self.contracted = None  # built lazily on first route
         self._display_bytes: dict[tuple[str, int], bytes] = {}
-        if self.roads and demo != "synthetic":
-            self.pregenerate_display(details=("arterial", "full"), layers=(0,))
+        self._graph_ready = False
+        self._graph_error: str | None = None
+        self._lock = threading.RLock()
+        self._bg: threading.Thread | None = None
+
+        # Map can paint from disk before the routing graph exists.
+        self._hydrate_display_cache(details=("arterial", "full"), layers=(0,))
+        has_map = ("arterial", 0) in self._display_bytes
+
+        if demo == "synthetic" or eager or not has_map:
+            if not has_map and demo != "synthetic":
+                print(
+                    "no display cache yet — building graph+map "
+                    "(next start will be instant; or run --pregenerate-only)",
+                    flush=True,
+                )
+            self._load_graph_blocking()
+            if self.roads and demo != "synthetic":
+                self.pregenerate_display(details=("arterial", "full"), layers=(0,))
+        else:
+            print(
+                "map ready from display cache; routing graph loads in background…",
+                flush=True,
+            )
+            self._bg = threading.Thread(
+                target=self._load_graph_blocking, name="graph-loader", daemon=True
+            )
+            self._bg.start()
+
+    def _hydrate_display_cache(
+        self,
+        *,
+        details: tuple[str, ...],
+        layers: tuple[int, ...],
+    ) -> None:
+        for detail in details:
+            for layer in layers:
+                key = (detail, int(layer))
+                path = self._display_path(detail, layer)
+                raw = read_display_cache_bytes(path)
+                if raw is None:
+                    continue
+                self._display_bytes[key] = raw
+                print(
+                    f"display cache hit {detail} L{layer}: "
+                    f"{path.name} ({len(raw)/1e6:.2f} MB)",
+                    flush=True,
+                )
+
+    def _load_graph_blocking(self) -> None:
+        demo = self.demo
+        bbox = self.bbox
+        t0 = time.perf_counter()
+        try:
+            if demo == "synthetic":
+                spatial, samples = make_demo_spatial_graph()
+                source = "synthetic rectangular block (unit-test only)"
+                roads: list[dict] = []
+            elif demo == "overpass":
+                try:
+                    spatial, samples, source, roads = _load_overpass_graph(bbox)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"WARNING: Overpass failed ({exc}); using offline fixture", flush=True)
+                    spatial, samples, source, roads = _load_fixture_graph()
+                    source += f" [overpass fallback: {exc}]"
+            else:
+                spatial, samples, source, roads = _load_fixture_graph()
+
+            for e in spatial.edges:
+                seq = samples.get(e.way_id) or []
+                if seq:
+                    e.mean_hdop, e.mean_n_los = seq[0][1], seq[0][2]
+
+            with self._lock:
+                self.spatial = spatial
+                self.samples = samples
+                self.source = source
+                self.roads = roads
+                self.contracted = None
+                self.timelines = None
+                self._graph_error = None
+                self._graph_ready = True
+            print(
+                f"routing graph ready: nodes={len(spatial.nodes)} "
+                f"edges={len(spatial.edges)} in {time.perf_counter()-t0:.2f}s "
+                f"({source})",
+                flush=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._graph_error = str(exc)
+                self._graph_ready = False
+                self.source = f"graph load failed: {exc}"
+            print(f"ERROR building routing graph: {exc}", flush=True)
+
+    @property
+    def graph_ready(self) -> bool:
+        return self._graph_ready
+
+    def wait_until_ready(self, timeout_s: float | None = 120.0) -> bool:
+        if self._graph_ready:
+            return True
+        if self._bg is not None:
+            self._bg.join(timeout=timeout_s)
+        return self._graph_ready
 
     def _display_path(self, detail: str, layer: int) -> Path:
         return display_cache_path(
             self.bbox,
             detail=detail,
             layer=layer,
-            n_ways=len(self.roads),
             cache_dir=default_cache_dir(),
         )
 
@@ -230,6 +323,8 @@ class DemoState:
         force: bool = False,
     ) -> None:
         """Build and disk-cache map GeoJSON so /api/graph is a file read."""
+        if not self._graph_ready:
+            self.wait_until_ready()
         for detail in details:
             for layer in layers:
                 key = (detail, int(layer))
@@ -263,6 +358,8 @@ class DemoState:
 
     def _ensure_contracted(self, t_s: float = 0.0):
         """Contracted routing graph for a quality snapshot (cached for t≈0)."""
+        if not self._graph_ready:
+            raise RuntimeError("routing graph still loading")
         if t_s <= 1e-9 and self.contracted is not None:
             return self.contracted
         cg = prepare_contracted_graph(
@@ -374,7 +471,7 @@ class DemoState:
         detail: str = "arterial",
     ) -> dict:
         """Return map GeoJSON; prefer pregenerated disk/memory cache when possible."""
-        if not show_contracted_overlay and self.roads:
+        if not show_contracted_overlay:
             key = (detail, int(layer))
             raw = self._display_bytes.get(key)
             if raw is None:
@@ -384,6 +481,8 @@ class DemoState:
                     self._display_bytes[key] = raw
             if raw is not None:
                 return json.loads(raw.decode("utf-8"))
+        if not self._graph_ready:
+            return {"type": "FeatureCollection", "features": []}
         return self._build_graph_geojson(
             mode=mode,
             layer=layer,
@@ -399,7 +498,7 @@ class DemoState:
         show_contracted_overlay: bool = False,
     ) -> bytes | None:
         """Raw cached JSON bytes for fast HTTP responses (None if unavailable)."""
-        if show_contracted_overlay or not self.roads:
+        if show_contracted_overlay:
             return None
         key = (detail, int(layer))
         raw = self._display_bytes.get(key)
@@ -466,18 +565,25 @@ class DemoState:
         return {"type": "FeatureCollection", "features": feats}
 
     def meta(self) -> dict:
+        # TE disabled in GUI: do not build timelines on every page load.
+        ready = self._graph_ready
         return {
+            "ready": ready,
             "source": self.source,
-            "n_spatial_nodes": len(self.spatial.nodes),
-            "n_spatial_edges_fine": len(self.spatial.edges),
+            "n_spatial_nodes": len(self.spatial.nodes) if ready else 0,
+            "n_spatial_edges_fine": len(self.spatial.edges) if ready else 0,
             "n_contracted_edges_t0": (
-                len(self.contracted.graph.edges) if self.contracted is not None else None
+                len(self.contracted.graph.edges)
+                if ready and self.contracted is not None
+                else None
             ),
-            "layers": self._layer_meta(),
+            "layers": [{"index": 0, "t0_s": 0.0, "t1_s": 1.0}],
+            "display_cached": sorted(f"{d}/L{layer}" for d, layer in self._display_bytes),
+            "error": self._graph_error,
             "note": (
-                "Spatial GNSS-aware routing only (time-extended deferred). "
-                "Map shows OSM centerlines colored by HDOP/n_LOS; Layer changes "
-                "quality snapshot for display/cost. Path is black."
+                "Map paints from pregenerated GeoJSON immediately. "
+                "Routing graph may still be loading in the background. "
+                "Path is black."
             ),
         }
 
@@ -600,8 +706,13 @@ function placeMarker(latlng, kind){
 async function loadMeta(){
   const m = await (await fetch('/api/meta')).json();
   document.getElementById('layer').max = Math.max(0, (m.layers||[]).length-1);
-  document.getElementById('stats').textContent = JSON.stringify(m, null, 2);
+  const status = m.ready
+    ? `Routing ready\\n${m.source}\\nnodes=${m.n_spatial_nodes} edges=${m.n_spatial_edges_fine}`
+    : `Map ready — routing graph still loading…\\n${m.source || ''}`;
+  document.getElementById('stats').textContent = status;
+  document.getElementById('btnRoute').disabled = !m.ready;
   setHint();
+  return m;
 }
 
 async function loadGraph(){
@@ -637,6 +748,14 @@ async function loadGraph(){
     `Display: ${g.features.length} ways (${detail})\\n` +
     `fetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms\\n` +
     `Routing still uses the full car network.`;
+}
+
+async function pollReady(){
+  for (let i = 0; i < 120; i++) {
+    const m = await loadMeta();
+    if (m.ready) return;
+    await new Promise(r => setTimeout(r, 500));
+  }
 }
 
 map.on('click', (e) => {
@@ -682,7 +801,8 @@ document.getElementById('btnRoute').onclick = async () => {
   document.getElementById('stats').textContent = 'Routing…';
   let res;
   try {
-    res = await (await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+    const resp = await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    res = await resp.json();
   } catch (err) {
     document.getElementById('stats').textContent = String(err);
     alert('Route request failed: ' + err);
@@ -701,7 +821,7 @@ document.getElementById('btnRoute').onclick = async () => {
   document.getElementById('stats').textContent = JSON.stringify(res.summary, null, 2);
 };
 
-loadGraph().then(loadMeta);
+loadGraph().then(() => { loadMeta(); pollReady(); });
 </script>
 </body>
 </html>
@@ -790,6 +910,20 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        if not STATE.graph_ready:
+            # Brief wait so a just-opened tab can route once bg load finishes.
+            STATE.wait_until_ready(timeout_s=2.0)
+        if not STATE.graph_ready:
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "error": "routing graph still loading — map is ready, retry in a moment",
+                    "source": STATE.source,
+                },
+            )
+            return
+
         t_s = STATE._layer_time(layer)
         cg = STATE._ensure_contracted(t_s)
         route = route_contracted_latlon(
@@ -859,18 +993,26 @@ def main(argv: list[str] | None = None) -> int:
         parts = [float(x) for x in args.bbox.replace(" ", "").split(",")]
         bbox = BBox(south=parts[0], west=parts[1], north=parts[2], east=parts[3])
 
-    print(f"Loading graph (demo={args.demo})…", flush=True)
+    print(f"Loading GUI (demo={args.demo})…", flush=True)
     if args.demo == "overpass" and args.force_refresh:
         print("Force-refreshing Overpass cache…", flush=True)
         _load_overpass_graph(bbox, force_refresh=True)
-    STATE = DemoState(demo=args.demo, bbox=bbox)
+    eager = bool(args.pregenerate_only)
+    STATE = DemoState(demo=args.demo, bbox=bbox, eager=eager)
     print(f"source: {STATE.source}", flush=True)
-    print(
-        f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
-        f"(contraction lazy; TE disabled; display pregenerated)",
-        flush=True,
-    )
+    if STATE.graph_ready:
+        print(
+            f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
+            f"(contraction lazy; TE disabled; display pregenerated)",
+            flush=True,
+        )
+    else:
+        print(
+            "HTTP starting now — map from display cache; routing graph still loading…",
+            flush=True,
+        )
     if args.pregenerate_only:
+        STATE.wait_until_ready()
         STATE.pregenerate_display(details=("arterial", "full"), layers=(0,), force=True)
         print("pregenerate done", flush=True)
         return 0

@@ -32,6 +32,10 @@ tmp/site_visual_check/
 
 # Runtime cache
 cache/
+# Ship Genova GUI OSM + display extracts (so map/routing start without Overpass)
+!python/gnss_gpu/fixtures/cache/
+!python/gnss_gpu/fixtures/cache/display_*.geojson
+!python/gnss_gpu/fixtures/cache/osm_roads_*.json
 
 # Experiment artifacts
 experiments/results/*/

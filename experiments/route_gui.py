@@ -573,7 +573,15 @@ document.getElementById('btnRoute').onclick = async () => {
     start_layer: parseInt(document.getElementById('startLayer').value||'-1',10),
     algorithm: document.getElementById('algo').value,
   };
-  const res = await (await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+  document.getElementById('stats').textContent = 'Routing…';
+  let res;
+  try {
+    res = await (await fetch('/api/route', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+  } catch (err) {
+    document.getElementById('stats').textContent = String(err);
+    alert('Route request failed: ' + err);
+    return;
+  }
   pathLayer.clearLayers();
   if (!res.ok) {
     document.getElementById('stats').textContent = JSON.stringify(res, null, 2);
@@ -727,6 +735,10 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
 
+class _ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 def main(argv: list[str] | None = None) -> int:
     global STATE
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -758,7 +770,7 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
-    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    httpd = _ReusableThreadingHTTPServer((args.host, args.port), Handler)
     print(f"GNSS route GUI at http://{args.host}:{args.port}", flush=True)
     try:
         httpd.serve_forever()

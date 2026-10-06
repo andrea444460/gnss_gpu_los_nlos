@@ -195,7 +195,7 @@ def route_contracted_latlon(
     params: CostParams | None = None,
     *,
     algorithm: str = "astar",
-    snap_k: int = 12,
+    snap_k: int = 24,
 ) -> RouteResult | None:
     """Route on the contracted graph, then expand to fine street geometry."""
     route = route_latlon(
@@ -210,6 +210,9 @@ def route_contracted_latlon(
     )
     if route is None:
         return None
+    if route.fine_geometry and not route.edge_indices:
+        # Trivial same-node snap already filled fine_* fields.
+        return route
     return expand_route_result(contracted, route)
 
 
@@ -319,26 +322,18 @@ def route_latlon(
     algorithm: str = "astar",
     snap_k: int = 24,
 ) -> RouteResult | None:
-    """Snap A/B to routable nodes (prefer same weak component) then shortest path."""
+    """Snap A/B to nearby routable nodes (same weak component) then shortest path.
+
+    Snaps stay local to the click — do not jump to a distant \"main\" component,
+    which made nearby clicks on side streets look broken.
+    """
     params = params or CostParams()
     comps = weak_components(graph)
     if not comps:
         return None
 
-    # Prefer the largest component (main driveable network).
-    sizes: dict[int, int] = {}
-    for c in comps.values():
-        sizes[c] = sizes.get(c, 0) + 1
-    main_cid = max(sizes, key=sizes.get)
-    main_nodes = {n for n, c in comps.items() if c == main_cid}
-
-    cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k, candidates=main_nodes)
-    cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k, candidates=main_nodes)
-    # Fallback: any routable if main component has no nearby nodes
-    if not cands_a:
-        cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k)
-    if not cands_b:
-        cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k)
+    cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k)
+    cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k)
     if not cands_a or not cands_b:
         return None
 
@@ -348,7 +343,6 @@ def route_latlon(
         for db, sb in cands_b:
             if sa == sb:
                 continue
-            # Skip pairs in different weak components (no undirected path).
             if comps.get(sa) != comps.get(sb):
                 continue
             if algorithm == "dijkstra":
@@ -363,6 +357,33 @@ def route_latlon(
             if score < best_score:
                 best_score = score
                 best = route
+
+    # Very close clicks often share the nearest node — try 1st A × 2nd+ B, etc.
+    if best is None and cands_a and cands_b:
+        sa = cands_a[0][1]
+        for db, sb in cands_b[1:]:
+            if comps.get(sa) != comps.get(sb):
+                continue
+            if algorithm == "dijkstra":
+                route = dijkstra_route(graph, sa, sb, params)
+            else:
+                route = astar_route(graph, sa, sb, params)
+            if route is not None:
+                return route
+        # Still nothing: trivial zero-length path at shared snap (same place).
+        if cands_a[0][1] == cands_b[0][1]:
+            nid = cands_a[0][1]
+            return RouteResult(
+                node_ids=[nid],
+                edge_indices=[],
+                total_cost=0.0,
+                length_m=0.0,
+                mean_hdop=float("nan"),
+                mean_n_los=float("nan"),
+                fine_node_ids=[nid],
+                fine_edge_indices=[],
+                fine_geometry=[(graph.nodes[nid].lat_deg, graph.nodes[nid].lon_deg)],
+            )
     return best
 
 

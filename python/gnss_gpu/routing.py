@@ -194,7 +194,7 @@ def route_contracted_latlon(
     params: CostParams | None = None,
     *,
     algorithm: str = "astar",
-    snap_k: int = 24,
+    snap_k: int = 12,
 ) -> RouteResult | None:
     """Route on the contracted graph, then expand to fine street geometry."""
     route = route_latlon(
@@ -317,12 +317,16 @@ def route_latlon(
     params: CostParams | None = None,
     *,
     algorithm: str = "astar",
-    snap_k: int = 24,
+    snap_k: int = 12,
+    max_pair_attempts: int = 16,
 ) -> RouteResult | None:
     """Snap A/B to nearby routable nodes (same weak component) then shortest path.
 
     Snaps stay local to the click — do not jump to a distant \"main\" component,
     which made nearby clicks on side streets look broken.
+
+    Candidate pairs are tried nearest-first and stop at the first successful
+    path so city-scale graphs stay interactive (full k×k search is too slow).
     """
     params = params or CostParams()
     comps = weak_components(graph)
@@ -334,31 +338,39 @@ def route_latlon(
     if not cands_a or not cands_b:
         return None
 
-    best: RouteResult | None = None
-    best_score = float("inf")
+    pairs: list[tuple[float, float, float, int, int]] = []
     for da, sa in cands_a:
         for db, sb in cands_b:
             if sa == sb:
                 continue
             if comps.get(sa) != comps.get(sb):
                 continue
-            if algorithm == "dijkstra":
-                route = dijkstra_route(graph, sa, sb, params)
-            elif algorithm == "astar":
-                route = astar_route(graph, sa, sb, params)
-            else:
-                raise ValueError(f"unknown algorithm: {algorithm}")
-            if route is None:
-                continue
-            score = da + db + 0.05 * route.total_cost
-            if score < best_score:
-                best_score = score
-                best = route
+            pairs.append((da + db, da, db, sa, sb))
+    pairs.sort(key=lambda t: t[0])
+
+    limit = max(1, min(int(max_pair_attempts), len(pairs)))
+    best: RouteResult | None = None
+    best_score = float("inf")
+    for _dsum, da, db, sa, sb in pairs[:limit]:
+        if algorithm == "dijkstra":
+            route = dijkstra_route(graph, sa, sb, params)
+        elif algorithm == "astar":
+            route = astar_route(graph, sa, sb, params)
+        else:
+            raise ValueError(f"unknown algorithm: {algorithm}")
+        if route is None:
+            continue
+        score = float(da) + float(db) + 0.05 * float(route.total_cost)
+        if score < best_score:
+            best_score = score
+            best = route
+    if best is not None:
+        return best
 
     # Very close clicks often share the nearest node — try 1st A × 2nd+ B, etc.
-    if best is None and cands_a and cands_b:
+    if cands_a and cands_b:
         sa = cands_a[0][1]
-        for db, sb in cands_b[1:]:
+        for _db, sb in cands_b[1:]:
             if comps.get(sa) != comps.get(sb):
                 continue
             if algorithm == "dijkstra":
@@ -381,7 +393,7 @@ def route_latlon(
                 fine_edge_indices=[],
                 fine_geometry=[(graph.nodes[nid].lat_deg, graph.nodes[nid].lon_deg)],
             )
-    return best
+    return None
 
 
 def _reconstruct(

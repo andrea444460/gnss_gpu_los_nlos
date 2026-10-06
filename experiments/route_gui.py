@@ -481,14 +481,32 @@ class DemoState:
                     self._display_bytes[key] = raw
             if raw is not None:
                 return json.loads(raw.decode("utf-8"))
-        if not self._graph_ready:
-            return {"type": "FeatureCollection", "features": []}
-        return self._build_graph_geojson(
+            if not self._graph_ready:
+                return {"type": "FeatureCollection", "features": []}
+            return self._build_graph_geojson(
+                mode=mode,
+                layer=layer,
+                show_contracted_overlay=False,
+                detail=detail,
+            )
+
+        # Overlay on: reuse cached base roads, then append a capped contracted set.
+        base = self.graph_geojson(
             mode=mode,
             layer=layer,
-            show_contracted_overlay=show_contracted_overlay,
+            show_contracted_overlay=False,
             detail=detail,
         )
+        if not self._graph_ready:
+            return base
+        # TE disabled in GUI — contracted overlay uses the t=0 snapshot.
+        cg = self._ensure_contracted(0.0)
+        contracted_edges = sorted(
+            cg.graph.edges, key=lambda e: float(e.length_m), reverse=True
+        )[:2500]
+        feats = list(base.get("features") or [])
+        feats.extend(self._edges_to_features(contracted_edges, style="contracted"))
+        return {"type": "FeatureCollection", "features": feats}
 
     def graph_geojson_bytes(
         self,
@@ -561,7 +579,12 @@ class DemoState:
             cg = self._ensure_contracted(t_s) if t_s <= 1e-9 else prepare_contracted_graph(
                 fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
             )
-            feats.extend(self._edges_to_features(cg.graph.edges, style="contracted"))
+            # Cap overlay size — full contracted city graph freezes Leaflet and
+            # made unchecking the box look broken while a huge draw was in flight.
+            contracted_edges = sorted(
+                cg.graph.edges, key=lambda e: float(e.length_m), reverse=True
+            )[:2500]
+            feats.extend(self._edges_to_features(contracted_edges, style="contracted"))
         return {"type": "FeatureCollection", "features": feats}
 
     def meta(self) -> dict:
@@ -657,7 +680,7 @@ HTML = r"""<!doctype html>
     <div class="row">
       <div>
         <label>algorithm</label>
-        <select id="algo"><option value="dijkstra">Dijkstra</option><option value="astar">A*</option></select>
+        <select id="algo"><option value="astar">A*</option><option value="dijkstra">Dijkstra</option></select>
       </div>
       <div></div>
     </div>
@@ -679,6 +702,8 @@ let markerLayer = L.layerGroup().addTo(map);
 let markers = [];
 let origin = null, dest = null;
 let didFit = false;
+let graphAbort = null;
+let graphReqId = 0;
 
 function setHint(){
   const el = document.getElementById('hint');
@@ -720,11 +745,30 @@ async function loadGraph(){
   const layer = parseInt(document.getElementById('layer').value||'0',10);
   const overlay = document.getElementById('overlay').checked;
   const detail = document.getElementById('fullRoads').checked ? 'full' : 'arterial';
-  document.getElementById('stats').textContent = 'Loading road layer (' + detail + ')…';
-  const t0 = performance.now();
-  const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}&detail=${detail}`)).json();
-  const tFetch = performance.now() - t0;
+  // Cancel in-flight overlay draws so unchecking can take effect immediately.
+  if (graphAbort) {
+    try { graphAbort.abort(); } catch (_) {}
+  }
+  graphAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const reqId = ++graphReqId;
   edgeLayer.clearLayers();
+  document.getElementById('stats').textContent = 'Loading road layer (' + detail + (overlay ? '+overlay' : '') + ')…';
+  const t0 = performance.now();
+  let g;
+  try {
+    const resp = await fetch(
+      `/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}&detail=${detail}`,
+      graphAbort ? { signal: graphAbort.signal } : undefined
+    );
+    g = await resp.json();
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    document.getElementById('stats').textContent = 'Graph load failed: ' + err;
+    return;
+  }
+  if (reqId !== graphReqId) return; // stale response
+  edgeLayer.clearLayers();
+  const tFetch = performance.now() - t0;
   const t1 = performance.now();
   const layer2 = L.geoJSON(g, {
     interactive: false,
@@ -740,12 +784,13 @@ async function loadGraph(){
     },
   }).addTo(edgeLayer);
   const tDraw = performance.now() - t1;
+  if (reqId !== graphReqId) return;
   if (g.features.length && !didFit) {
     map.fitBounds(layer2.getBounds(), {padding:[30,30]});
     didFit = true;
   }
   document.getElementById('stats').textContent =
-    `Display: ${g.features.length} ways (${detail})\\n` +
+    `Display: ${g.features.length} ways (${detail}${overlay ? '+overlay' : ''})\\n` +
     `fetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms\\n` +
     `Routing still uses the full car network.`;
 }
@@ -924,7 +969,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        t_s = STATE._layer_time(layer)
+        # TE disabled in GUI: use t=0 so first route does not build timelines.
+        t_s = 0.0
         cg = STATE._ensure_contracted(t_s)
         route = route_contracted_latlon(
             cg, lat_a, lon_a, lat_b, lon_b, params, algorithm=algorithm

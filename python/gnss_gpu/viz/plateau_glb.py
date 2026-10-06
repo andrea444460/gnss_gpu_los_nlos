@@ -11,11 +11,41 @@ offsets; world corners match ``pivotCart + offset`` in the WGS84 ellipsoid frame
 from __future__ import annotations
 
 import json
+import math
 import struct
 from pathlib import Path
-from typing import Tuple
+from typing import Literal, Tuple
 
 import numpy as np
+
+WGS84_A = 6378137.0
+WGS84_F = 1.0 / 298.257223563
+WGS84_E2 = 2.0 * WGS84_F - WGS84_F * WGS84_F
+
+
+def _ecef_to_lla_rad(x: float, y: float, z: float) -> tuple[float, float, float]:
+    lon = math.atan2(y, x)
+    p = math.sqrt(x * x + y * y)
+    lat = math.atan2(z, p * (1.0 - WGS84_E2))
+    for _ in range(10):
+        sin_lat = math.sin(lat)
+        n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+        lat = math.atan2(z + WGS84_E2 * n * sin_lat, p)
+    sin_lat = math.sin(lat)
+    n = WGS84_A / math.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+    alt = p / max(1e-12, math.cos(lat)) - n
+    return lat, lon, alt
+
+
+def _ecef_delta_to_enu(delta: np.ndarray, lat_rad: float, lon_rad: float) -> np.ndarray:
+    d = np.asarray(delta, dtype=np.float64).reshape(-1, 3)
+    sl, cl = math.sin(lat_rad), math.cos(lat_rad)
+    so, co = math.sin(lon_rad), math.cos(lon_rad)
+    dx, dy, dz = d[:, 0], d[:, 1], d[:, 2]
+    east = -so * dx + co * dy
+    north = -sl * co * dx - sl * so * dy + cl * dz
+    up = cl * co * dx + cl * so * dy + sl * dz
+    return np.stack([east, north, up], axis=1)
 
 
 def export_plateau_roi_glb(
@@ -26,6 +56,8 @@ def export_plateau_roi_glb(
     radius_m: float = 650.0,
     max_triangles: int = 150_000,
     full_mesh: bool = False,
+    base_color_factor: tuple[float, float, float, float] | None = None,
+    coordinate_frame: Literal["ecef_offset", "enu_yup"] = "ecef_offset",
 ) -> Tuple[int, int]:
     """Write triangles within ``radius_m`` of ``pivot_ecef`` to GLB.
 
@@ -40,6 +72,8 @@ def export_plateau_roi_glb(
         Ignored when ``full_mesh`` is True.
     max_triangles
         If more triangles pass the ROI filter, evenly subsample to this cap.
+        Warning: uniform triangle subsampling breaks building meshes in GLB viewers
+        (scattered triangle shards). Use a high cap for area-wide visualization.
     full_mesh
         If True, skip the distance filter and export all triangles (subject only to
         ``max_triangles`` subsampling).
@@ -78,7 +112,16 @@ def export_plateau_roi_glb(
     corners = tri[sel].reshape(-1, 3)
     n_corner = corners.shape[0]
 
-    pos = (corners - pivot).astype(np.float32).reshape(-1)
+    delta = corners - pivot
+    if coordinate_frame == "enu_yup":
+        lat_rad, lon_rad, _alt = _ecef_to_lla_rad(float(pivot[0]), float(pivot[1]), float(pivot[2]))
+        enu = _ecef_delta_to_enu(delta, lat_rad, lon_rad)
+        # glTF Y-up: X=east, Y=up, Z=-north (right-handed)
+        pos = np.stack([enu[:, 0], enu[:, 2], -enu[:, 1]], axis=1).astype(np.float32).reshape(-1)
+    elif coordinate_frame == "ecef_offset":
+        pos = delta.astype(np.float32).reshape(-1)
+    else:
+        raise ValueError(f"unsupported coordinate_frame: {coordinate_frame}")
 
     xyz_min = pos.reshape(-1, 3).min(axis=0).tolist()
     xyz_max = pos.reshape(-1, 3).max(axis=0).tolist()
@@ -89,6 +132,7 @@ def export_plateau_roi_glb(
     bin_chunk += b"\x00" * pad_bin
     padded_bin_len = len(bin_chunk)
 
+    color = list(base_color_factor) if base_color_factor is not None else [0.58, 0.66, 0.74, 0.82]
     gltf = {
         "asset": {"version": "2.0", "generator": "gnss_gpu.plateau_glb"},
         "scene": 0,
@@ -108,7 +152,7 @@ def export_plateau_roi_glb(
         "materials": [
             {
                 "pbrMetallicRoughness": {
-                    "baseColorFactor": [0.58, 0.66, 0.74, 0.82],
+                    "baseColorFactor": color,
                     "metallicFactor": 0.0,
                     "roughnessFactor": 0.88,
                 },

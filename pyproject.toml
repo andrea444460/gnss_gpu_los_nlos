@@ -53,7 +53,7 @@ all = [
 [tool.scikit-build]
 wheel.packages = ["python/gnss_gpu"]
 cmake.build-type = "Release"
-cmake.verbose = true
+build.verbose = true
 
 [tool.scikit-build.cmake.define]
 CMAKE_CUDA_ARCHITECTURES = "native"

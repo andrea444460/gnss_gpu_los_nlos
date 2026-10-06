@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -37,19 +38,16 @@ OVERPASS_ENDPOINTS = (
 )
 
 
-def _build_dem_alt_sampler(dem_path: Path):
-    import rasterio
-    from pyproj import Transformer
+def _build_dem_alt_sampler(dem_path: Path, geoid_correction):
+    from gnss_gpu.io.dem_native import NativeDemSampler
 
-    ds = rasterio.open(str(dem_path))
-    to_dem = Transformer.from_crs("EPSG:4326", ds.crs, always_xy=True)
-
-    def sample_alt_m(lat_deg: float, lon_deg: float) -> float:
-        x, y = to_dem.transform(float(lon_deg), float(lat_deg))
-        v = float(next(ds.sample([(x, y)]))[0])
-        return v
-
-    return sample_alt_m
+    sampler = NativeDemSampler(dem_path, geoid_correction=geoid_correction)
+    print(
+        f"DEM native sampler: crs={sampler.crs} geoid={sampler.geoid_label} "
+        f"grid={sampler.rows}x{sampler.cols} elev={sampler.min_m:.1f}..{sampler.max_m:.1f} m",
+        flush=True,
+    )
+    return sampler.sample
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,6 +66,11 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help="Optional DEM GeoTIFF; when provided, building bases start at local DEM altitude + base-alt-m.",
+    )
+    p.add_argument(
+        "--geoid-correction",
+        default="none",
+        help="Only for orthometric DEMs: egm96 or constant N [m]. Satellite DEMs: none (default).",
     )
     p.add_argument("--export-glb", action="store_true", help="Also export GLB sidecar from output triangles")
     p.add_argument("--out-glb", type=Path, default=None, help="Explicit GLB path (default: triangles path with .glb)")
@@ -128,7 +131,14 @@ def main() -> None:
     args.cache_json.write_text(json.dumps({"elements": elements}, ensure_ascii=False, indent=2), encoding="utf-8")
     print("saved cache:", args.cache_json)
 
-    terrain_alt_fn = _build_dem_alt_sampler(args.dem_path) if args.dem_path is not None else None
+    if args.dem_path is not None:
+        from gnss_gpu.io.dem_native import parse_geoid_correction_arg
+
+        terrain_alt_fn = _build_dem_alt_sampler(
+            args.dem_path, parse_geoid_correction_arg(str(args.geoid_correction))
+        )
+    else:
+        terrain_alt_fn = None
     if terrain_alt_fn is not None:
         print(f"using DEM-grounded building bases: {args.dem_path}")
 

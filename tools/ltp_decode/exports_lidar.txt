@@ -1,0 +1,145 @@
+﻿Microsoft (R) COFF/PE Dumper Version 14.44.35228.0
+Copyright (C) Microsoft Corporation.  All rights reserved.
+
+
+Dump of file C:\Program Files\CHCNAV\CoPre2\Release\LiDARLTDataSolver.dll
+
+File Type: DLL
+
+  Section contains the following exports for LiDARLTDataSolver.dll
+
+    00000000 characteristics
+    FFFFFFFF time date stamp
+        0.00 version
+           1 ordinal base
+         117 number of functions
+         117 number of names
+
+    ordinal hint RVA      name
+
+          1    0 00002160 ??$?HDU?$char_traits@D@std@@V?$allocator@D@1@@std@@YA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@0@$$QEAV10@0@Z
+          2    1 000021F0 ??$_Assign_range@PEAURawDataGapTimeInfo@@@?$vector@URawDataGapTimeInfo@@V?$allocator@URawDataGapTimeInfo@@@std@@@std@@AEAAXPEAURawDataGapTimeInfo@@0Uforward_iterator_tag@1@@Z
+          3    2 000023D0 ??$_Buynode@AEBU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@?$_Tree_comp_alloc@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@1@AEBU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@1@@Z
+          4    3 00002430 ??$_Emplace_reallocate@AEBURawDataGapTimeInfo@@@?$vector@URawDataGapTimeInfo@@V?$allocator@URawDataGapTimeInfo@@@std@@@std@@QEAAPEAURawDataGapTimeInfo@@QEAU2@AEBU2@@Z
+          5    4 00002660 ??$_Emplace_reallocate@AEBURawDataJumpTimeInfo@@@?$vector@URawDataJumpTimeInfo@@V?$allocator@URawDataJumpTimeInfo@@@std@@@std@@QEAAPEAURawDataJumpTimeInfo@@QEAU2@AEBU2@@Z
+          6    5 00002800 ??$_Getvals@_W@?$time_get@DV?$istreambuf_iterator@DU?$char_traits@D@std@@@std@@@std@@IEAAX_WAEBV_Locinfo@1@@Z
+          7    6 000028D0 ??$_Getvals@_W@?$time_get@_WV?$istreambuf_iterator@_WU?$char_traits@_W@std@@@std@@@std@@IEAAX_WAEBV_Locinfo@1@@Z
+          8    7 000029A0 ??$_Insert_at@AEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@IEAA?AV?$_Tree_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@1@_NPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@1@AEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@1@1@Z
+          9    8 00002C20 ??$_Insert_hint@AEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@IEAA?AV?$_Tree_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@1@V?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@1@AEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@1@PEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@1@@Z
+         10    9 00002E60 ??$_Insert_nohint@AEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@IEAA?AU?$pair@V?$_Tree_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@std@@_N@1@_NAEAU?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@1@PEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@1@@Z
+         11    A 00003040 ??$_Reallocate_grow_by@V<lambda_65e615be2a453ca0576c979606f46740>@@PEBD_K@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV01@_KV<lambda_65e615be2a453ca0576c979606f46740>@@PEBD_K@Z
+         12    B 000031C0 ??$_Reallocate_grow_by@V<lambda_f3a66ab6a0570788f31503db83886f49>@@_KPEBD_K@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV01@_KV<lambda_f3a66ab6a0570788f31503db83886f49>@@_KPEBD2@Z
+         13    C 00003360 ??0?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@AEBV01@@Z
+         14    D 00003440 ??0RawDataLTChecker@@QEAA@XZ
+         15    E 00003640 ??0RawLTLiDARDataReader@@QEAA@XZ
+         16    F 00003780 ??0RawLiDARDataReader@@QEAA@XZ
+         17   10 00003E50 ??0tagImuErrorModelParam@@QEAA@XZ
+         18   11 00003F00 ??0tagSensorCalibParam@@QEAA@XZ
+         19   12 00004550 ??1?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAA@XZ
+         20   13 00004590 ??1?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAA@XZ
+         21   14 000045F0 ??1?$map@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@2@@std@@QEAA@XZ
+         22   15 00004630 ??1?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@QEAA@XZ
+         23   16 000046E0 ??1?$vector@ULTGapTimeInfo@@V?$allocator@ULTGapTimeInfo@@@std@@@std@@QEAA@XZ
+         24   17 00004760 ??1?$vector@ULTLaserPoint@@V?$allocator@ULTLaserPoint@@@std@@@std@@QEAA@XZ
+         25   18 000047C0 ??1?$vector@URawDataGapTimeInfo@@V?$allocator@URawDataGapTimeInfo@@@std@@@std@@QEAA@XZ
+         26   19 000047D0 ??1?$vector@URawDataJumpTimeInfo@@V?$allocator@URawDataJumpTimeInfo@@@std@@@std@@QEAA@XZ
+         27   1A 00004830 ??1LTLaserCheckReport@@QEAA@XZ
+         28   1B 00004930 ??1RawDataCheckParam@@QEAA@XZ
+         29   1C 000049E0 ??1RawDataCheckReport@@QEAA@XZ
+         30   1D 00004AF0 ??1RawDataChecker@@UEAA@XZ
+         31   1E 00004C00 ??1RawDataLTChecker@@UEAA@XZ
+         32   1F 00004C40 ??1RawLTLiDARDataReader@@UEAA@XZ
+         33   20 00004D80 ??1RawLiDARDataReader@@UEAA@XZ
+         34   21 00004E70 ??4?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV01@$$QEAV01@@Z
+         35   22 00004EC0 ??4?$vector@URawDataJumpTimeInfo@@V?$allocator@URawDataJumpTimeInfo@@@std@@@std@@QEAAAEAV01@AEBV01@@Z
+         36   23 00005030 ??4RawDataCheckParam@@QEAAAEAU0@AEBU0@@Z
+         37   24 000050C0 ??E?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@std@@QEAAAEAV01@XZ
+         38   25 00005130 ??F?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@std@@QEAAAEAV01@XZ
+         39   26 0002DE20 ??_7RawDataChecker@@6B@
+         40   27 0002DEC8 ??_7RawDataLTChecker@@6B@
+         41   28 0002DE68 ??_7RawLTLiDARDataReader@@6B@
+         42   29 0002DDC0 ??_7RawLiDARDataReader@@6B@
+         43   2A 00005400 ??_H@YAXPEAX_K1P6APEAX0@Z@Z
+         44   2B 000450A0 ??_R0?AVRawDataChecker@@@8
+         45   2C 000450F8 ??_R0?AVRawDataLTChecker@@@8
+         46   2D 000450C8 ??_R0?AVRawLTLiDARDataReader@@@8
+         47   2E 00045070 ??_R0?AVRawLiDARDataReader@@@8
+         48   2F 00005450 ?CreatePtr@RawLasPointAttributes@@QEAAXAEB_K@Z
+         49   30 00005720 ?GetDateSecondsFromFile@RawLTLiDARDataReader@@AEAA_NPEBDAEA_K@Z
+         50   31 00005820 ?LTLaserCheckProgress@@YAXAEBHPEBDPEBX@Z
+         51   32 00005880 ?LTPrintProgress@RawDataLTChecker@@QEAAXAEBH@Z
+         52   33 000058E0 ?Las2Imu@RawLiDARDataReader@@IEAAXPEAN0@Z
+         53   34 00005990 ?PrePointFilter@RawLiDARDataReader@@IEAAHAEBNPEANAEBMAEANAEAE@Z
+         54   35 00005C20 ?PrintLdrSolverProgress@RawLTLiDARDataReader@@QEAAXXZ
+         55   36 00005CA0 ?PtrIsNull@RawLasPointAttributes@@QEAA_NXZ
+         56   37 00005D00 ?_Buyheadnode@?$_Tree_comp_alloc@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@2@$0A@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@XZ
+         57   38 00005D40 ?_Buyheadnode@?$_Tree_comp_alloc@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@XZ
+         58   39 00005D80 ?_Buynode0@?$_Tree_comp_alloc@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@XZ
+         59   3A 00005DC0 ?_Destroy_if_node@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@IEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@Z
+         60   3B 00005DF0 ?_Erase@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@2@$0A@@std@@@std@@IEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@@Z
+         61   3C 00005EB0 ?_Erase@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@IEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@Z
+         62   3D 00005F10 ?_Extract@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@V?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@@2@@Z
+         63   3E 00006270 ?_Extract@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@QEAAPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@V?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@2@@Z
+         64   3F 000065D0 ?_Freenode0@?$_Tree_comp_alloc@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@Z
+         65   40 000065E0 ?_Lrotate@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@QEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@@Z
+         66   41 00006640 ?_Lrotate@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@QEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@Z
+         67   42 000066A0 ?_Maklocwcs@std@@YAPEA_WPEB_W@Z
+         68   43 00045840 ?_OptionsStorage@?1??__local_stdio_scanf_options@@9@4_KA
+         69   44 00006710 ?_Rrotate@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@QEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@@Z
+         70   45 00006770 ?_Rrotate@?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@QEAAXPEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@@Z
+         71   46 000067D0 ?_Tidy@?$vector@URawDataGapTimeInfo@@V?$allocator@URawDataGapTimeInfo@@@std@@@std@@AEAAXXZ
+         72   47 00006850 ?_Tidy_deallocate@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAXXZ
+         73   48 000068B0 ?_Xlen@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@SAXXZ
+         74   49 000068D0 ?_Xlength@?$vector@URawDataGapTimeInfo@@V?$allocator@URawDataGapTimeInfo@@@std@@@std@@CAXXZ
+         75   4A 000068F0 ?_Xlength@?$vector@URawDataJumpTimeInfo@@V?$allocator@URawDataJumpTimeInfo@@@std@@@std@@CAXXZ
+         76   4B 00006910 ?_Xran@?$_String_val@U?$_Simple_types@D@std@@@std@@SAXXZ
+         77   4C 00006930 ?allocate@?$allocator@URawDataGapTimeInfo@@@std@@QEAAPEAURawDataGapTimeInfo@@_K@Z
+         78   4D 000069B0 ?allocate@?$allocator@URawDataJumpTimeInfo@@@std@@QEAAPEAURawDataJumpTimeInfo@@_K@Z
+         79   4E 00006A30 ?append@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV12@QEBD_K@Z
+         80   4F 00006AC0 ?assign@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV12@QEBD_K@Z
+         81   50 00006C10 ?closeStream@RawLTLiDARDataReader@@UEAA_NXZ
+         82   51 00006C40 ?compare@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBAHAEBV12@@Z
+         83   52 00006CB0 ?deallocate@?$allocator@U?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@std@@@std@@QEAAXQEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@PEAX@2@_K@Z
+         84   53 00006D00 ?deallocate@?$allocator@U?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@std@@@std@@QEAAXQEAU?$_Tree_node@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@PEAX@2@_K@Z
+         85   54 00006D50 ?deallocate@?$allocator@URawDataGapTimeInfo@@@std@@QEAAXQEAURawDataGapTimeInfo@@_K@Z
+         86   55 00006DA0 ?deallocate@?$allocator@URawDataJumpTimeInfo@@@std@@QEAAXQEAURawDataJumpTimeInfo@@_K@Z
+         87   56 00006DF0 ?erase@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@2@$0A@@std@@@std@@QEAA?AV?$_Tree_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@@2@V?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@UtagSensorPart@@@std@@@std@@@std@@@2@0@Z
+         88   57 00006FA0 ?erase@?$_Tree@V?$_Tmap_traits@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@U?$less@V?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@2@V?$allocator@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@2@$0A@@std@@@std@@QEAA?AV?$_Tree_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@2@V?$_Tree_const_iterator@V?$_Tree_val@U?$_Tree_simple_types@U?$pair@$$CBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@V12@@std@@@std@@@std@@@2@0@Z
+         89   58 00007140 ?find_last_of@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEBA_KQEBD_K@Z
+         90   59 00007240 ?getErrorString@RawLTLiDARDataReader@@UEAAXAEAPEAD@Z
+         91   5A 000072C0 ?getFrameData@RawLTLiDARDataReader@@UEAA?AW4ReadResult@@IAEAURawLasPointAttributes@@PEAI@Z
+         92   5B 000072D0 ?getFrameData@RawLiDARDataReader@@UEAA_NP6AXAEBURawLasPointAttributes@@AEBIPEAX@Z2@Z
+         93   5C 000072F0 ?getPointData@RawLTLiDARDataReader@@UEAA?AW4ReadResult@@IAEAURawLasPointAttributes@@PEAI@Z
+         94   5D 00007890 ?getYYMMDDhhFromFileName@RawLTLiDARDataReader@@UEAA_NPEBDAEAUTimeInfo@@@Z
+         95   5E 00007C00 ?getYYMMDDhhFromScannerInfo@RawLiDARDataReader@@QEAA_NPEBDAEAUTimeInfo@@@Z
+         96   5F 00008000 ?initialize@RawDataCheckReport@@QEAAXXZ
+         97   60 00008070 ?insert@?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@QEAAAEAV12@_KQEBD0@Z
+         98   61 00008180 ?openStream@RawLTLiDARDataReader@@UEAA_NPEBD@Z
+         99   62 00008AE0 ?polar2CartesianWithCorrection@RawLiDARDataReader@@UEAA_NHNNNAEAN00_N@Z
+        100   63 00008BC0 ?rawLaserCoordTrans@RawLiDARDataReader@@UEAA_NPEAMPEANH@Z
+        101   64 00008C00 ?rdc_checkData@RawDataLTChecker@@UEAA_NPEBD@Z
+        102   65 00008C50 ?rdc_getErrorString@RawDataChecker@@UEAA?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@XZ
+        103   66 00008C80 ?rdc_getParam@RawDataChecker@@UEAA_NAEAURawDataCheckParam@@@Z
+        104   67 00008CA0 ?rdc_getReport@RawDataChecker@@UEAA_NAEAURawDataCheckReport@@@Z
+        105   68 00008D90 ?rdc_getReport@RawDataLTChecker@@UEAA_NAEAURawDataCheckReport@@@Z
+        106   69 00008FA0 ?rdc_initReport@RawDataChecker@@UEAA_NXZ
+        107   6A 00008FC0 ?rdc_setParam@RawDataChecker@@UEAA_NAEBURawDataCheckParam@@@Z
+        108   6B 00008FE0 ?rdc_setParam@RawDataLTChecker@@UEAA_NAEBURawDataCheckParam@@@Z
+        109   6C 00009030 ?rdc_stopCheck@RawDataChecker@@UEAAXXZ
+        110   6D 00009040 ?rdc_stopCheck@RawDataLTChecker@@UEAAXXZ
+        111   6E 00009060 ?seekStream@RawLTLiDARDataReader@@UEAA_NN@Z
+        112   6F 00009070 CreateCheckerPlugin
+        113   70 000090A0 CreateLidarPlugin
+        114   71 000091F0 DestroyCheckerPlugin
+        115   72 00009210 DestroyLidarPlugin
+        116   73 00009230 __local_stdio_scanf_options
+        117   74 00009240 sscanf
+
+  Summary
+
+        1000 .data
+        3000 .pdata
+       18000 .rdata
+        1000 .reloc
+        1000 .rsrc
+       2C000 .text

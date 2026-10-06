@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<RinexOption xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <rnxver>VER_3_02</rnxver>
+  <sample>30</sample>
+  <splitInterval>3600</splitInterval>
+  <toSplit>false</toSplit>
+  <toSplitTime>false</toSplitTime>
+  <chkObsSequence>true</chkObsSequence>
+  <sysGPS>true</sysGPS>
+  <sysGLO>true</sysGLO>
+  <sysBDS>true</sysBDS>
+  <sysGAL>true</sysGAL>
+  <freq_L1>true</freq_L1>
+  <freq_L2>true</freq_L2>
+  <freq_L5>true</freq_L5>
+  <freq_L7>true</freq_L7>
+  <freq_B1c>true</freq_B1c>
+  <freq_B2a>true</freq_B2a>
+  <obs_C>true</obs_C>
+  <obs_L>true</obs_L>
+  <obs_D>true</obs_D>
+  <obs_S>true</obs_S>
+  <gloChaneelType>0</gloChaneelType>
+  <leapSeconds>0</leapSeconds>
+  <rtcmTime>2021-03-12T02:34:01.4624183Z</rtcmTime>
+  <starttime>2021-02-04 11:44:05</starttime>
+  <endtime>2021-02-04 11:44:05</endtime>
+  <leapSecondsSource>0</leapSecondsSource>
+  <bUseInterfaceTime>false</bUseInterfaceTime>
+</RinexOption>

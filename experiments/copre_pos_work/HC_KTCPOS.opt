@@ -1,0 +1,17 @@
+GNSS_PMode = R_RTK_LCI
+GNSS_FilePath = C:\Users\Andrea\Desktop\Rover\20260324_111523_T.hcn
+GNSS_OBSFile = C:\Users\Andrea\Desktop\Rover\20260324_111523_T.hcn
+GNSS_GPSNavFile = C:\Users\Andrea\Desktop\Rover\base\brdc0830.26n
+GNSS_BaseXYZ = 34.668694694 33.042387809 25.6743
+GNSS_BaseXYZCoorSys = WGS84
+GNSS_ElevMask = 15
+GNSS_SatSYS = GPS+GLO+GAL+BDS
+GNSS_ResultPath = c:\Users\Andrea\Documents\gnss_gpu\experiments\copre_pos_work\output_lci
+GNSS_END
+SINS_PMode = R_RTK_LCI
+SINS_IMUFile = C:\Users\Andrea\Desktop\Rover\20260324_111523_I.imr
+SINS_GNSSFile = C:\Users\Andrea\Desktop\Rover\20260324_111523_T.hcn
+SINS_DMIFile = C:\Users\Andrea\Desktop\Rover\20260324_111523_D.dmr
+SINS_ResultPath = c:\Users\Andrea\Documents\gnss_gpu\experiments\copre_pos_work\output_lci
+SINS_POSFile = c:\Users\Andrea\Documents\gnss_gpu\experiments\copre_pos_work\output_lci\trajectory.pos
+SINS_END

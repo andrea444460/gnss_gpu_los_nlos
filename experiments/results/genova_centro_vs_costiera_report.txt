@@ -1,0 +1,25 @@
+Genova — statistiche centro storico vs zona costiera
+CSV: C:\Users\Andrea\Desktop\Gneova Map\genova_area_points_osm (3).csv
+Centro storico bbox: S=44.4038 W=8.9290 N=44.4108 E=8.9415
+Costiera: entro 150 m a nord dell'inviluppo strade più meridionali (escluso centro)
+
+## Centro storico — 3,117 punti strada
+  mean_n_los: mean=8.94 med=8.43 p25=4.43 p75=13.00
+  mean_n_nlos: mean=15.05 med=15.57 p25=11.00 p75=19.57
+  mean_n_visible: mean=23.99 med=24.00 p25=24.00 p75=24.00
+  mean_n_terrain_blocked: mean=69.41 med=69.29 p25=69.00 p75=69.71
+  mean_n_terrain_blocked_visible: mean=0.01 med=0.00 p25=0.00 p75=0.00
+  nlos_fraction: mean=0.63 med=0.65 p25=0.46 p75=0.82
+
+## Zona costiera — 1,833 punti strada
+  mean_n_los: mean=19.34 med=20.86 p25=17.00 p75=23.29
+  mean_n_nlos: mean=4.13 med=2.43 p25=0.00 p75=6.43
+  mean_n_visible: mean=23.47 med=23.86 p25=23.29 p75=24.00
+  mean_n_terrain_blocked: mean=70.56 med=70.43 p25=68.57 p75=72.29
+  mean_n_terrain_blocked_visible: mean=0.46 med=0.00 p25=0.00 p75=0.71
+  nlos_fraction: mean=0.17 med=0.10 p25=0.00 p75=0.28
+
+## Confronto sintetico
+  LOS medio: centro 8.94 vs costiera 19.34 (delta -10.40)
+  NLOS medio: centro 15.05 vs costiera 4.13 (delta +10.92)
+  Frazione NLOS/visible: centro 63% vs costiera 17%

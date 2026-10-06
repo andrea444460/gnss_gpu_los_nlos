@@ -222,6 +222,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--eph-batch-chunk", type=int, default=16)
     p.add_argument("--point-batch-chunk", type=int, default=128)
     p.add_argument("--dem-path", type=Path, default=None)
+    p.add_argument(
+        "--geoid-correction",
+        default="none",
+        help="Only for orthometric DEMs: egm96 or constant N [m]. Satellite DEMs: none (default).",
+    )
     p.add_argument("--dem-auto-download", action="store_true")
     p.add_argument("--dem-auto-out", type=Path, default=Path("experiments/results/area_auto_dem.tif"))
     p.add_argument("--dem-auto-zoom", type=int, default=12)
@@ -375,10 +380,22 @@ def main() -> None:
         )
         print(f"[area] DEM auto-downloaded: {dem_path} ({ntiles} tiles)")
 
+    from gnss_gpu.io.dem_native import NativeDemSampler, parse_geoid_correction_arg
+
+    geoid_corr = parse_geoid_correction_arg(str(args.geoid_correction))
     terrain_mask: TerrainHorizonMask | None = None
+    dem_sampler: NativeDemSampler | None = None
     dem_grid: np.ndarray | None = None
     dem_meta: tuple[float, float, float, float] | None = None
     if dem_path is not None:
+        dem_sampler = NativeDemSampler(dem_path, geoid_correction=geoid_corr)
+        print(
+            f"[area] DEM native sampler: crs={dem_sampler.crs} geoid={dem_sampler.geoid_label} "
+            f"datum={'ellipsoidal' if dem_sampler._geoid_fn else 'orthometric'} "
+            f"grid={dem_sampler.rows}x{dem_sampler.cols} "
+            f"elev={dem_sampler.min_m:.1f}..{dem_sampler.max_m:.1f} m ({dem_path})",
+            flush=True,
+        )
         terrain_mask = TerrainHorizonMask(
             dem_path,
             HorizonConfig(
@@ -394,7 +411,7 @@ def main() -> None:
             dem_grid, lat0, lon0, lat_step, lon_step = _load_dem_wgs84_grid(dem_path)
             dem_meta = (lat0, lon0, lat_step, lon_step)
             print(
-                f"[area] terrain cuda dem grid: shape={dem_grid.shape} "
+                f"[area] terrain cuda dem grid (WGS84 reproject): shape={dem_grid.shape} "
                 f"lat0={lat0:.8f} lon0={lon0:.8f} dlat={lat_step:.9f} dlon={lon_step:.9f}",
                 flush=True,
             )
@@ -418,22 +435,9 @@ def main() -> None:
     point_lats = np.asarray([float(p["lat_deg"]) for p in points], dtype=np.float64)
     point_lons = np.asarray([float(p["lon_deg"]) for p in points], dtype=np.float64)
     if args.rx_alt_mode == "dem":
-        if dem_grid is None or dem_meta is None:
+        if dem_sampler is None:
             raise RuntimeError("--rx-alt-mode dem requires DEM (use --dem-path or --dem-auto-download).")
-        lat0, lon0, lat_step, lon_step = dem_meta
-        dem_z = _sample_dem_wgs84_bilinear(dem_grid, lat0, lon0, lat_step, lon_step, point_lats, point_lons)
-        n_valid = int(np.sum(np.isfinite(dem_z)))
-        n_total = int(dem_z.size)
-        if n_valid <= 0:
-            raise RuntimeError("DEM altitude sampling failed for all road points.")
-        if n_valid < n_total:
-            fallback_alt = float(np.nanmedian(dem_z[np.isfinite(dem_z)])) + float(args.rx_ant_height_m)
-            dem_z = np.where(np.isfinite(dem_z), dem_z, fallback_alt - float(args.rx_ant_height_m))
-            print(
-                f"[area] rx-alt dem coverage: {n_valid}/{n_total} points; "
-                f"fallback for {n_total - n_valid} points",
-                flush=True,
-            )
+        dem_z = dem_sampler.sample_many(point_lats, point_lons)
         rx_alts = dem_z + float(args.rx_ant_height_m)
         print(
             f"[area] rx-alt mode=dem ant_height={args.rx_ant_height_m:.2f}m "
@@ -692,6 +696,8 @@ def main() -> None:
             f"est_GFLOPs={est / max(los_s, 1e-12) / 1e9:.2f}",
             flush=True,
         )
+    if dem_sampler is not None:
+        dem_sampler.close()
 
 
 if __name__ == "__main__":

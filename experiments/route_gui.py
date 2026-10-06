@@ -590,7 +590,7 @@ document.getElementById('btnRoute').onclick = async () => {
   }
   L.geoJSON(res.path, {
     interactive: false,
-    style: { color:'#f5d76e', weight:7, opacity:0.95 },
+    style: { color:'#111111', weight:8, opacity:1 },
   }).addTo(pathLayer);
   document.getElementById('stats').textContent = JSON.stringify(res.summary, null, 2);
 };

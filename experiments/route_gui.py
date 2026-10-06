@@ -50,27 +50,42 @@ FIXTURE_ROADS = (
 )
 
 
+DISPLAY_ARTERIAL = frozenset(
+    {
+        "motorway",
+        "trunk",
+        "primary",
+        "secondary",
+        "tertiary",
+        "motorway_link",
+        "trunk_link",
+        "primary_link",
+        "secondary_link",
+        "tertiary_link",
+    }
+)
+
+
 def _simplify_lonlat(
     coords: list[list[float]],
     *,
-    min_step_m: float = 12.0,
+    min_step_m: float = 20.0,
 ) -> list[list[float]]:
     """Drop nearly-collinear display points (routing still uses full geometry)."""
     if len(coords) <= 2:
-        return coords
-    # coords are [lon, lat]
-    kept = [coords[0]]
+        return [[round(coords[0][0], 5), round(coords[0][1], 5)],
+                [round(coords[-1][0], 5), round(coords[-1][1], 5)]] if len(coords) >= 2 else coords
+    kept = [[round(coords[0][0], 5), round(coords[0][1], 5)]]
     last_lat, last_lon = coords[0][1], coords[0][0]
     for lon, lat in coords[1:-1]:
-        # cheap equirectangular metres near Genova
         dy = (lat - last_lat) * 111_320.0
         dx = (lon - last_lon) * 82_000.0
         if (dx * dx + dy * dy) >= (min_step_m * min_step_m):
-            kept.append([round(lon, 6), round(lat, 6)])
+            kept.append([round(lon, 5), round(lat, 5)])
             last_lat, last_lon = lat, lon
     end = coords[-1]
-    kept.append([round(end[0], 6), round(end[1], 6)])
-    return kept if len(kept) >= 2 else [coords[0], coords[-1]]
+    kept.append([round(end[0], 5), round(end[1], 5)])
+    return kept if len(kept) >= 2 else [kept[0], [round(end[0], 5), round(end[1], 5)]]
 
 
 def _hdop_color(hdop: float) -> str:
@@ -290,21 +305,32 @@ class DemoState:
             )
         return feats
 
-    def graph_geojson(self, *, mode: str, layer: int, show_contracted_overlay: bool = False) -> dict:
-        """Map layer: full OSM way polylines (match basemap), not chord stubs.
+    def graph_geojson(
+        self,
+        *,
+        mode: str,
+        layer: int,
+        show_contracted_overlay: bool = False,
+        detail: str = "arterial",
+    ) -> dict:
+        """Map overlay GeoJSON. Routing still uses the full contracted graph.
 
-        Routing still uses the contracted graph; display uses original way
-        geometry so streets sit on the OpenStreetMap tiles.
+        ``detail``:
+          - ``arterial`` (default): major roads only (~fast Leaflet draw)
+          - ``full``: all car ways (slow for city-scale)
         """
         t_s = self._layer_time(layer)
 
         feats: list[dict] = []
         if self.roads:
             for way in self.roads:
+                tags = way.get("tags") or {}
+                hw = str(tags.get("highway", "")).strip().lower()
+                if detail != "full" and hw not in DISPLAY_ARTERIAL:
+                    continue
                 geom = way.get("geometry") or []
                 if len(geom) < 2:
                     continue
-                tags = way.get("tags") or {}
                 wid = int(way.get("id", -1))
                 hdop, n_los = _way_quality(self.samples, wid, t_s)
                 raw_coords = [[float(p["lon"]), float(p["lat"])] for p in geom]
@@ -403,6 +429,7 @@ HTML = r"""<!doctype html>
     </div>
     <p id="hint" class="note" style="color:#3dbb7a">Click anywhere on the map to place A (origin).</p>
     <label><input id="overlay" type="checkbox"/> show contracted overlay (dashed)</label>
+    <label><input id="fullRoads" type="checkbox"/> show all streets (slow)</label>
     <label>Quality layer (map colors / costs)</label>
     <input id="layer" type="number" min="0" value="0"/>
     <div class="row">
@@ -475,15 +502,14 @@ async function loadGraph(){
   const mode = 'spatial';
   const layer = parseInt(document.getElementById('layer').value||'0',10);
   const overlay = document.getElementById('overlay').checked;
-  document.getElementById('stats').textContent = 'Loading road layer…';
+  const detail = document.getElementById('fullRoads').checked ? 'full' : 'arterial';
+  document.getElementById('stats').textContent = 'Loading road layer (' + detail + ')…';
   const t0 = performance.now();
-  const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}`)).json();
+  const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}&detail=${detail}`)).json();
   const tFetch = performance.now() - t0;
   edgeLayer.clearLayers();
   const t1 = performance.now();
   const layer2 = L.geoJSON(g, {
-    // Roads must NOT capture clicks, otherwise B can only be placed where
-    // there is no green polyline (felt like "only on A").
     interactive: false,
     renderer: L.canvas({ padding: 0.5 }),
     style: f => {
@@ -491,7 +517,7 @@ async function loadGraph(){
       return {
         color: contracted ? '#9ec9ff' : (f.properties.color || '#3dbb7a'),
         weight: contracted ? 2 : 3,
-        opacity: contracted ? 0.85 : 0.75,
+        opacity: contracted ? 0.85 : 0.8,
         dashArray: contracted ? '6 6' : null,
       };
     },
@@ -502,7 +528,9 @@ async function loadGraph(){
     didFit = true;
   }
   document.getElementById('stats').textContent =
-    `Roads: ${g.features.length} features\\nfetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms`;
+    `Display: ${g.features.length} ways (${detail})\\n` +
+    `fetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms\\n` +
+    `Routing still uses the full car network.`;
 }
 
 map.on('click', (e) => {
@@ -532,6 +560,7 @@ document.getElementById('btnClear').onclick = () => {
 document.getElementById('btnReload').onclick = () => loadGraph();
 document.getElementById('layer').onchange = () => loadGraph();
 document.getElementById('overlay').onchange = () => loadGraph();
+document.getElementById('fullRoads').onchange = () => loadGraph();
 
 document.getElementById('btnRoute').onclick = async () => {
   if (!origin || !dest) { alert('Click origin A, then destination B anywhere on the map'); return; }
@@ -566,7 +595,7 @@ document.getElementById('btnRoute').onclick = async () => {
   document.getElementById('stats').textContent = JSON.stringify(res.summary, null, 2);
 };
 
-loadMeta().then(loadGraph);
+loadGraph().then(loadMeta);
 </script>
 </body>
 </html>
@@ -599,9 +628,15 @@ class Handler(BaseHTTPRequestHandler):
             mode = qs.get("mode", ["spatial"])[0]
             layer = int(qs.get("layer", ["0"])[0])
             overlay = qs.get("overlay", ["false"])[0].lower() == "true"
+            detail = qs.get("detail", ["arterial"])[0]
             self._json(
                 200,
-                STATE.graph_geojson(mode=mode, layer=layer, show_contracted_overlay=overlay),
+                STATE.graph_geojson(
+                    mode=mode,
+                    layer=layer,
+                    show_contracted_overlay=overlay,
+                    detail=detail,
+                ),
             )
             return
         self._json(404, {"error": "not found"})

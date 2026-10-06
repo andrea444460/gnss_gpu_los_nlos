@@ -48,7 +48,7 @@ from gnss_gpu.routing_graph import (  # noqa: E402
 )
 
 # Genova centro storico — small enough for Overpass, real street geometry
-DEFAULT_BBOX = BBox(south=44.4030, west=8.9270, north=44.4110, east=8.9400)
+DEFAULT_BBOX = BBox(south=44.4000, west=8.9200, north=44.4140, east=8.9450)
 FIXTURE_ROADS = (
     Path(__file__).resolve().parents[1] / "python" / "gnss_gpu" / "fixtures" / "genova_centro_roads.json"
 )

@@ -273,14 +273,97 @@ def nearest_routable_nodes(
     lon_deg: float,
     *,
     k: int = 12,
+    candidates: set[int] | None = None,
 ) -> list[tuple[float, int]]:
     """k nearest nodes with incident edges, as (distance_m, node_id)."""
+    pool = candidates if candidates is not None else routable_nodes(graph)
     scored: list[tuple[float, int]] = []
-    for nid in routable_nodes(graph):
+    for nid in pool:
         n = graph.nodes[nid]
         scored.append((haversine_m(lat_deg, lon_deg, n.lat_deg, n.lon_deg), nid))
     scored.sort(key=lambda t: t[0])
     return scored[: max(1, int(k))]
+
+
+def weak_components(graph: RoadGraph) -> dict[int, int]:
+    """Map node_id -> weakly-connected component id (ignore direction)."""
+    und: dict[int, set[int]] = {}
+    for e in graph.edges:
+        und.setdefault(e.u, set()).add(e.v)
+        und.setdefault(e.v, set()).add(e.u)
+    comp: dict[int, int] = {}
+    cid = 0
+    for seed in und:
+        if seed in comp:
+            continue
+        stack = [seed]
+        comp[seed] = cid
+        while stack:
+            u = stack.pop()
+            for v in und.get(u, ()):
+                if v not in comp:
+                    comp[v] = cid
+                    stack.append(v)
+        cid += 1
+    return comp
+
+
+def route_latlon(
+    graph: RoadGraph,
+    lat_a: float,
+    lon_a: float,
+    lat_b: float,
+    lon_b: float,
+    params: CostParams | None = None,
+    *,
+    algorithm: str = "astar",
+    snap_k: int = 24,
+) -> RouteResult | None:
+    """Snap A/B to routable nodes (prefer same weak component) then shortest path."""
+    params = params or CostParams()
+    comps = weak_components(graph)
+    if not comps:
+        return None
+
+    # Prefer the largest component (main driveable network).
+    sizes: dict[int, int] = {}
+    for c in comps.values():
+        sizes[c] = sizes.get(c, 0) + 1
+    main_cid = max(sizes, key=sizes.get)
+    main_nodes = {n for n, c in comps.items() if c == main_cid}
+
+    cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k, candidates=main_nodes)
+    cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k, candidates=main_nodes)
+    # Fallback: any routable if main component has no nearby nodes
+    if not cands_a:
+        cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k)
+    if not cands_b:
+        cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k)
+    if not cands_a or not cands_b:
+        return None
+
+    best: RouteResult | None = None
+    best_score = float("inf")
+    for da, sa in cands_a:
+        for db, sb in cands_b:
+            if sa == sb:
+                continue
+            # Skip pairs in different weak components (no undirected path).
+            if comps.get(sa) != comps.get(sb):
+                continue
+            if algorithm == "dijkstra":
+                route = dijkstra_route(graph, sa, sb, params)
+            elif algorithm == "astar":
+                route = astar_route(graph, sa, sb, params)
+            else:
+                raise ValueError(f"unknown algorithm: {algorithm}")
+            if route is None:
+                continue
+            score = da + db + 0.05 * route.total_cost
+            if score < best_score:
+                best_score = score
+                best = route
+    return best
 
 
 def _reconstruct(
@@ -421,49 +504,6 @@ def astar_route(
                 came_from[v] = (u, ei)
                 heapq.heappush(heap, (tentative + h(v), v))
     return None
-
-
-def route_latlon(
-    graph: RoadGraph,
-    lat_a: float,
-    lon_a: float,
-    lat_b: float,
-    lon_b: float,
-    params: CostParams | None = None,
-    *,
-    algorithm: str = "astar",
-    snap_k: int = 12,
-) -> RouteResult | None:
-    """Snap A/B to routable nodes (trying nearby candidates) then shortest path.
-
-    Avoids snapping onto contracted-away intermediate nodes that have degree 0
-    in the routing graph — a common cause of spurious \"no path\" in the GUI.
-    """
-    params = params or CostParams()
-    cands_a = nearest_routable_nodes(graph, lat_a, lon_a, k=snap_k)
-    cands_b = nearest_routable_nodes(graph, lat_b, lon_b, k=snap_k)
-    if not cands_a or not cands_b:
-        return None
-
-    best: RouteResult | None = None
-    best_score = float("inf")
-    for da, sa in cands_a:
-        for db, sb in cands_b:
-            if sa == sb:
-                continue
-            if algorithm == "dijkstra":
-                route = dijkstra_route(graph, sa, sb, params)
-            elif algorithm == "astar":
-                route = astar_route(graph, sa, sb, params)
-            else:
-                raise ValueError(f"unknown algorithm: {algorithm}")
-            if route is None:
-                continue
-            score = da + db + 0.05 * route.total_cost
-            if score < best_score:
-                best_score = score
-                best = route
-    return best
 
 
 def dijkstra_te_route(

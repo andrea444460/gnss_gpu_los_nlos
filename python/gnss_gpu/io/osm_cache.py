@@ -71,6 +71,57 @@ def cache_path(bbox: BBox, cache_dir: Path | None = None, **kwargs) -> Path:
     return root / f"osm_roads_{cache_key(bbox, **kwargs)}.json"
 
 
+def display_cache_key(
+    bbox: BBox,
+    *,
+    detail: str,
+    layer: int,
+    n_ways: int,
+) -> str:
+    payload = {
+        "south": round(bbox.south, 5),
+        "west": round(bbox.west, 5),
+        "north": round(bbox.north, 5),
+        "east": round(bbox.east, 5),
+        "detail": detail,
+        "layer": int(layer),
+        "n_ways": int(n_ways),
+        "v": 2,
+    }
+    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def display_cache_path(
+    bbox: BBox,
+    *,
+    detail: str,
+    layer: int,
+    n_ways: int,
+    cache_dir: Path | None = None,
+) -> Path:
+    root = Path(cache_dir) if cache_dir is not None else default_cache_dir()
+    key = display_cache_key(bbox, detail=detail, layer=layer, n_ways=n_ways)
+    return root / f"display_{detail}_L{int(layer)}_{key}.geojson"
+
+
+def write_display_cache(path: Path, geojson: dict) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(geojson, separators=(",", ":")), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def read_display_cache_bytes(path: Path) -> bytes | None:
+    p = Path(path)
+    if not p.is_file():
+        return None
+    return p.read_bytes()
+
+
+
 def filter_car_ways(roads: list[dict]) -> list[dict]:
     out: list[dict] = []
     for w in roads:

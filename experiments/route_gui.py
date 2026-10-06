@@ -16,6 +16,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -24,7 +25,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "python") not in sys.path:
     sys.path.insert(0, str(_ROOT / "python"))
 
-from gnss_gpu.io.osm_cache import fetch_roads_cached, filter_car_ways  # noqa: E402
+from gnss_gpu.io.osm_cache import (  # noqa: E402
+    default_cache_dir,
+    display_cache_path,
+    fetch_roads_cached,
+    filter_car_ways,
+    read_display_cache_bytes,
+    write_display_cache,
+)
 from gnss_gpu.io.osm_roads import (  # noqa: E402
     BBox,
     RoadEdge,
@@ -200,6 +208,58 @@ class DemoState:
         self.timelines = None
         self._te_ready = False
         self.contracted = None  # built lazily — map display needs only OSM ways + samples
+        # Pregenerated display GeoJSON bytes: (detail, layer) -> raw JSON
+        self._display_bytes: dict[tuple[str, int], bytes] = {}
+        if self.roads and demo != "synthetic":
+            self.pregenerate_display(details=("arterial", "full"), layers=(0,))
+
+    def _display_path(self, detail: str, layer: int) -> Path:
+        return display_cache_path(
+            self.bbox,
+            detail=detail,
+            layer=layer,
+            n_ways=len(self.roads),
+            cache_dir=default_cache_dir(),
+        )
+
+    def pregenerate_display(
+        self,
+        *,
+        details: tuple[str, ...] = ("arterial", "full"),
+        layers: tuple[int, ...] = (0,),
+        force: bool = False,
+    ) -> None:
+        """Build and disk-cache map GeoJSON so /api/graph is a file read."""
+        for detail in details:
+            for layer in layers:
+                key = (detail, int(layer))
+                path = self._display_path(detail, layer)
+                if not force and path.is_file():
+                    raw = read_display_cache_bytes(path)
+                    if raw is not None:
+                        self._display_bytes[key] = raw
+                        print(
+                            f"display cache hit {detail} L{layer}: "
+                            f"{path.name} ({len(raw)/1e6:.2f} MB)",
+                            flush=True,
+                        )
+                        continue
+                print(f"pregenerating display {detail} L{layer}…", flush=True)
+                t0 = time.perf_counter()
+                geo = self._build_graph_geojson(
+                    mode="spatial",
+                    layer=layer,
+                    show_contracted_overlay=False,
+                    detail=detail,
+                )
+                write_display_cache(path, geo)
+                raw = path.read_bytes()
+                self._display_bytes[key] = raw
+                print(
+                    f"  wrote {path.name} features={len(geo['features'])} "
+                    f"{len(raw)/1e6:.2f} MB in {time.perf_counter()-t0:.2f}s",
+                    flush=True,
+                )
 
     def _ensure_contracted(self, t_s: float = 0.0):
         """Contracted routing graph for a quality snapshot (cached for t≈0)."""
@@ -306,6 +366,52 @@ class DemoState:
         return feats
 
     def graph_geojson(
+        self,
+        *,
+        mode: str,
+        layer: int,
+        show_contracted_overlay: bool = False,
+        detail: str = "arterial",
+    ) -> dict:
+        """Return map GeoJSON; prefer pregenerated disk/memory cache when possible."""
+        if not show_contracted_overlay and self.roads:
+            key = (detail, int(layer))
+            raw = self._display_bytes.get(key)
+            if raw is None:
+                path = self._display_path(detail, layer)
+                raw = read_display_cache_bytes(path)
+                if raw is not None:
+                    self._display_bytes[key] = raw
+            if raw is not None:
+                return json.loads(raw.decode("utf-8"))
+        return self._build_graph_geojson(
+            mode=mode,
+            layer=layer,
+            show_contracted_overlay=show_contracted_overlay,
+            detail=detail,
+        )
+
+    def graph_geojson_bytes(
+        self,
+        *,
+        layer: int,
+        detail: str = "arterial",
+        show_contracted_overlay: bool = False,
+    ) -> bytes | None:
+        """Raw cached JSON bytes for fast HTTP responses (None if unavailable)."""
+        if show_contracted_overlay or not self.roads:
+            return None
+        key = (detail, int(layer))
+        raw = self._display_bytes.get(key)
+        if raw is not None:
+            return raw
+        path = self._display_path(detail, layer)
+        raw = read_display_cache_bytes(path)
+        if raw is not None:
+            self._display_bytes[key] = raw
+        return raw
+
+    def _build_graph_geojson(
         self,
         *,
         mode: str,
@@ -629,6 +735,13 @@ class Handler(BaseHTTPRequestHandler):
             layer = int(qs.get("layer", ["0"])[0])
             overlay = qs.get("overlay", ["false"])[0].lower() == "true"
             detail = qs.get("detail", ["arterial"])[0]
+            if not overlay:
+                raw = STATE.graph_geojson_bytes(
+                    layer=layer, detail=detail, show_contracted_overlay=False
+                )
+                if raw is not None:
+                    self._send(200, raw, "application/json")
+                    return
             self._json(
                 200,
                 STATE.graph_geojson(
@@ -735,6 +848,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Ignore OSM disk cache and re-fetch from Overpass",
     )
+    p.add_argument(
+        "--pregenerate-only",
+        action="store_true",
+        help="Build OSM+display caches and exit (no HTTP server)",
+    )
     args = p.parse_args(argv)
     bbox = DEFAULT_BBOX
     if args.bbox:
@@ -743,16 +861,19 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Loading graph (demo={args.demo})…", flush=True)
     if args.demo == "overpass" and args.force_refresh:
-        # Build via force path once, then hand off to DemoState from cache hit.
         print("Force-refreshing Overpass cache…", flush=True)
         _load_overpass_graph(bbox, force_refresh=True)
     STATE = DemoState(demo=args.demo, bbox=bbox)
     print(f"source: {STATE.source}", flush=True)
     print(
         f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
-        f"(contraction lazy; TE disabled)",
+        f"(contraction lazy; TE disabled; display pregenerated)",
         flush=True,
     )
+    if args.pregenerate_only:
+        STATE.pregenerate_display(details=("arterial", "full"), layers=(0,), force=True)
+        print("pregenerate done", flush=True)
+        return 0
 
     httpd = _ReusableThreadingHTTPServer((args.host, args.port), Handler)
     print(f"GNSS route GUI at http://{args.host}:{args.port}", flush=True)

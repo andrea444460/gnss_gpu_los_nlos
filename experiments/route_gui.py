@@ -25,12 +25,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT / "python") not in sys.path:
     sys.path.insert(0, str(_ROOT / "python"))
 
+from gnss_gpu.io.osm_cache import fetch_roads_cached, filter_car_ways  # noqa: E402
 from gnss_gpu.io.osm_roads import (  # noqa: E402
     BBox,
     RoadEdge,
     RoadGraph,
     build_directed_road_graph,
-    fetch_roads_overpass,
 )
 from gnss_gpu.routing import (  # noqa: E402
     CostParams,
@@ -47,8 +47,8 @@ from gnss_gpu.routing_graph import (  # noqa: E402
     synthesize_quality_timeseries,
 )
 
-# Genova centro storico — small enough for Overpass, real street geometry
-DEFAULT_BBOX = BBox(south=44.4000, west=8.9200, north=44.4140, east=8.9450)
+# Genova car-only — larger than centro, still Overpass-friendly with disk cache
+DEFAULT_BBOX = BBox(south=44.3950, west=8.9000, north=44.4250, east=8.9600)
 FIXTURE_ROADS = (
     Path(__file__).resolve().parents[1] / "python" / "gnss_gpu" / "fixtures" / "genova_centro_roads.json"
 )
@@ -83,34 +83,8 @@ def _quality_color(hdop: float, n_los: float) -> str:
     return _hdop_color(float(hdop) + los_pen)
 
 
-CAR_HIGHWAYS = frozenset(
-    {
-        "motorway",
-        "trunk",
-        "primary",
-        "secondary",
-        "tertiary",
-        "unclassified",
-        "residential",
-        "living_street",
-        "service",
-        "motorway_link",
-        "trunk_link",
-        "primary_link",
-        "secondary_link",
-        "tertiary_link",
-    }
-)
-
-
 def _filter_car_ways(roads: list[dict]) -> list[dict]:
-    """Keep only motor-vehicle highway classes (no footway/pedestrian/cycleway)."""
-    out = []
-    for w in roads:
-        hw = str((w.get("tags") or {}).get("highway", "")).strip().lower()
-        if hw in CAR_HIGHWAYS:
-            out.append(w)
-    return out
+    return filter_car_ways(roads)
 
 
 def _graph_from_roads(roads: list[dict], source: str):
@@ -129,17 +103,22 @@ def _load_fixture_graph():
     return _graph_from_roads(roads, f"fixture:{FIXTURE_ROADS.name} ({len(roads)} car ways)")
 
 
-def _load_overpass_graph(bbox: BBox):
-    roads = fetch_roads_overpass(
+def _load_overpass_graph(bbox: BBox, *, force_refresh: bool = False):
+    roads, info = fetch_roads_cached(
         bbox,
+        car_only=True,
         include_pedestrian=False,
+        force_refresh=force_refresh,
+        tile_size_m=2500.0,
         timeout_s=45,
         max_attempts_per_endpoint=2,
     )
-    return _graph_from_roads(
-        roads,
-        f"overpass:{bbox.south},{bbox.west},{bbox.north},{bbox.east} ({len(roads)} ways)",
+    hit = "cache-hit" if info.get("cache_hit") else "cache-miss"
+    src = (
+        f"overpass+{hit}:{bbox.south},{bbox.west},{bbox.north},{bbox.east} "
+        f"({len(roads)} car ways)"
     )
+    return _graph_from_roads(roads, src)
 
 
 def _way_quality(samples: dict, way_id: int, t_s: float = 0.0) -> tuple[float, float]:
@@ -747,13 +726,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--demo",
         choices=("fixture", "overpass", "synthetic"),
-        default="fixture",
-        help="fixture=offline Genova streets (default); overpass=live OSM; synthetic=tiny rectangle",
+        default="overpass",
+        help="overpass=cached OSM Genova (default); fixture=bundled snippet; synthetic=tiny rectangle",
     )
     p.add_argument(
         "--bbox",
         default=None,
-        help="south,west,north,east (default: Genova centro snippet)",
+        help="south,west,north,east (default: Genova urban core)",
+    )
+    p.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help="Ignore OSM disk cache and re-fetch from Overpass",
     )
     args = p.parse_args(argv)
     bbox = DEFAULT_BBOX
@@ -762,6 +746,10 @@ def main(argv: list[str] | None = None) -> int:
         bbox = BBox(south=parts[0], west=parts[1], north=parts[2], east=parts[3])
 
     print(f"Loading graph (demo={args.demo})…", flush=True)
+    if args.demo == "overpass" and args.force_refresh:
+        # Build via force path once, then hand off to DemoState from cache hit.
+        print("Force-refreshing Overpass cache…", flush=True)
+        _load_overpass_graph(bbox, force_refresh=True)
     STATE = DemoState(demo=args.demo, bbox=bbox)
     print(f"source: {STATE.source}", flush=True)
     print(

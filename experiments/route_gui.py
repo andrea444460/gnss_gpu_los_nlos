@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Minimal Leaflet GUI to inspect contracted / time-extended GNSS routes.
+"""Minimal Leaflet GUI for GNSS-aware spatial routing (time-extended deferred).
 
-Default: offline Genova street fixture (real street-shaped polylines + names).
-Optional live Overpass if the network allows it.
+Default: cached OSM Genova car ways. Optional fixture / synthetic demos.
 
     PYTHONPATH=python python experiments/route_gui.py --port 8765
     PYTHONPATH=python python experiments/route_gui.py --demo overpass
@@ -34,12 +33,9 @@ from gnss_gpu.io.osm_roads import (  # noqa: E402
 )
 from gnss_gpu.routing import (  # noqa: E402
     CostParams,
-    build_te_from_timeseries,
     path_to_geojson,
     prepare_contracted_graph,
     route_contracted_latlon,
-    route_te_latlon,
-    te_path_to_geojson,
 )
 from gnss_gpu.routing_graph import (  # noqa: E402
     make_demo_spatial_graph,
@@ -190,25 +186,6 @@ class DemoState:
             n_los_step=self.n_los_step,
         )
 
-    def _ensure_te(self):
-        if self._te_ready and self.te is not None:
-            return self.te
-        print("Building time-extended graph (first TE use)…", flush=True)
-        self.te, self.timelines = build_te_from_timeseries(
-            self.spatial,
-            self.samples,
-            hdop_step=self.hdop_step,
-            n_los_step=self.n_los_step,
-            wait_cost=0.0,
-            contract_per_layer=True,
-        )
-        self._te_ready = True
-        print(
-            f"TE ready: nodes={len(self.te.nodes)} edges={len(self.te.edges)} layers={len(self.te.layers)}",
-            flush=True,
-        )
-        return self.te
-
     def _layer_time(self, layer: int) -> float:
         """Mid-time of a quality layer without requiring the full TE graph."""
         self._ensure_timelines()
@@ -348,14 +325,11 @@ class DemoState:
             "n_contracted_edges_t0": (
                 len(self.contracted.graph.edges) if self.contracted is not None else None
             ),
-            "n_te_nodes": len(self.te.nodes) if self.te is not None else None,
-            "n_te_edges": len(self.te.edges) if self.te is not None else None,
-            "te_built": bool(self._te_ready),
             "layers": self._layer_meta(),
             "note": (
-                "Map draws full OSM way centerlines (same coords as the basemap). "
-                "Routing snaps to routable contracted nodes (not orphan mid-edge nodes). "
-                "Yellow path is expanded via the member map. TE graph builds lazily."
+                "Spatial GNSS-aware routing only (time-extended deferred). "
+                "Map shows OSM centerlines colored by HDOP/n_LOS; Layer changes "
+                "quality snapshot for display/cost. Path is black."
             ),
         }
 
@@ -399,7 +373,7 @@ HTML = r"""<!doctype html>
 <div id="wrap">
   <aside>
     <h1>GNSS route lab</h1>
-    <p class="note">Click A, then B, then Route. Change <b>Layer</b> to see quality over time.</p>
+    <p class="note">Click A, then B, then Route. Path in black. (Time-extended routing is disabled for now.)</p>
     <div id="legend">
       <h2>Legenda colore archi</h2>
       <p class="formula">Colore = score GNSS ≈ HDOP + 3·max(0, (8 − n<sub>LOS</sub>)/8).<br/>Verde = buona qualità, rosso = scarsa.</p>
@@ -412,13 +386,8 @@ HTML = r"""<!doctype html>
       </table>
     </div>
     <p id="hint" class="note" style="color:#3dbb7a">Click anywhere on the map to place A (origin).</p>
-    <label>Mode</label>
-    <select id="mode">
-      <option value="spatial">Spatial routing</option>
-      <option value="te">Time-extended routing</option>
-    </select>
     <label><input id="overlay" type="checkbox"/> show contracted overlay (dashed)</label>
-    <label>Layer</label>
+    <label>Quality layer (map colors / costs)</label>
     <input id="layer" type="number" min="0" value="0"/>
     <div class="row">
       <div>
@@ -432,13 +401,10 @@ HTML = r"""<!doctype html>
     </div>
     <div class="row">
       <div>
-        <label>start layer (TE)</label>
-        <input id="startLayer" type="number" min="-1" value="-1" title="-1 = any"/>
-      </div>
-      <div>
         <label>algorithm</label>
         <select id="algo"><option value="dijkstra">Dijkstra</option><option value="astar">A*</option></select>
       </div>
+      <div></div>
     </div>
     <button id="btnRoute">Route A → B</button>
     <button id="btnClear" class="secondary">Clear markers</button>
@@ -489,7 +455,7 @@ async function loadMeta(){
 }
 
 async function loadGraph(){
-  const mode = document.getElementById('mode').value;
+  const mode = 'spatial';
   const layer = parseInt(document.getElementById('layer').value||'0',10);
   const overlay = document.getElementById('overlay').checked;
   const g = await (await fetch(`/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}`)).json();
@@ -536,7 +502,6 @@ document.getElementById('btnClear').onclick = () => {
 };
 
 document.getElementById('btnReload').onclick = () => loadGraph();
-document.getElementById('mode').onchange = () => loadGraph();
 document.getElementById('layer').onchange = () => loadGraph();
 document.getElementById('overlay').onchange = () => loadGraph();
 
@@ -547,9 +512,8 @@ document.getElementById('btnRoute').onclick = async () => {
     lat_b: dest.lat, lon_b: dest.lng,
     alpha: parseFloat(document.getElementById('alpha').value),
     beta: parseFloat(document.getElementById('beta').value),
-    mode: document.getElementById('mode').value,
+    mode: 'spatial',
     layer: parseInt(document.getElementById('layer').value||'0',10),
-    start_layer: parseInt(document.getElementById('startLayer').value||'-1',10),
     algorithm: document.getElementById('algo').value,
   };
   document.getElementById('stats').textContent = 'Routing…';
@@ -638,47 +602,16 @@ class Handler(BaseHTTPRequestHandler):
         lon_b = float(req["lon_b"])
         mode = str(req.get("mode", "spatial"))
         layer = int(req.get("layer", 0))
-        start_layer = int(req.get("start_layer", -1))
         algorithm = str(req.get("algorithm", "dijkstra"))
 
         if mode == "te":
-            te = STATE._ensure_te()
-            sl = None if start_layer < 0 else start_layer
-            route = route_te_latlon(
-                te,
-                lat_a,
-                lon_a,
-                lat_b,
-                lon_b,
-                params,
-                start_layer=sl,
+            self._json(
+                200,
+                {
+                    "ok": False,
+                    "error": "time-extended routing is disabled for now (spatial only)",
+                },
             )
-            if route is None:
-                self._json(200, {"ok": False, "error": "no TE path"})
-                return
-            path = te_path_to_geojson(te, route, properties={"kind": "te"})
-            summary = {
-                "mode": "te",
-                "source": STATE.source,
-                "length_m": route.length_m,
-                "total_cost": route.total_cost,
-                "mean_hdop": route.mean_hdop,
-                "mean_n_los": route.mean_n_los,
-                "layers": route.layers,
-                "spatial_node_ids": route.spatial_node_ids,
-                "n_travel_contracted": sum(
-                    1 for i in route.edge_indices if te.edges[i].kind == "travel"
-                ),
-                "n_travel_fine": sum(
-                    len(te.edges[i].fine_edge_indices)
-                    for i in route.edge_indices
-                    if te.edges[i].kind == "travel"
-                ),
-                "start_spatial": route.spatial_node_ids[0] if route.spatial_node_ids else None,
-                "goal_spatial": route.spatial_node_ids[-1] if route.spatial_node_ids else None,
-                "start_layer": sl,
-            }
-            self._json(200, {"ok": True, "path": path, "summary": summary})
             return
 
         t_s = STATE._layer_time(layer)
@@ -754,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source: {STATE.source}", flush=True)
     print(
         f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
-        f"(contraction/TE lazy)",
+        f"(contraction lazy; TE disabled)",
         flush=True,
     )
 

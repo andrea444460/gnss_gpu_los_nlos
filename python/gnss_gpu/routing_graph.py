@@ -5,7 +5,8 @@ label; consecutive same-direction same-quality runs through degree-2 nodes are
 then contracted into a single edge.
 
 Time extension adds a layer whenever the quantized GNSS quality of any edge
-changes. Nodes become (spatial_node, layer); waiting edges advance time.
+changes. Nodes become (spatial_node, layer). Travel stays inside one layer;
+there are no waiting / time-advance edges.
 """
 
 from __future__ import annotations
@@ -68,7 +69,7 @@ class TimeExtendedEdge:
     v: int
     length_m: float
     way_id: int
-    kind: str  # "travel" | "wait"
+    kind: str  # "travel"
     layer: int
     mean_hdop: float = float("nan")
     mean_n_los: float = float("nan")
@@ -408,7 +409,6 @@ def build_time_extended_graph(
     spatial: RoadGraph,
     timelines: list[list[QualityInterval]],
     *,
-    wait_cost: float = 0.0,
     hdop_step: float = 0.5,
     n_los_step: float = 1.0,
     contract_per_layer: bool = True,
@@ -416,11 +416,9 @@ def build_time_extended_graph(
     """Build a time-extended graph; layers split at GNSS quality change times.
 
     - Travel edges stay inside one layer and use that layer's quality.
-    - Wait edges (u,k) -> (u,k+1) cost ``wait_cost`` (default 0).
+    - No wait / time-advance edges: a path cannot jump between layers.
     - If ``contract_per_layer``, spatial edges are contracted using that layer's
-      quality before being lifted into the TE graph (per layer independently
-      for travel edges; node set remains the union of contracted endpoints plus
-      all original spatial nodes that appear).
+      quality before being lifted into the TE graph.
     """
     if len(timelines) != len(spatial.edges):
         raise ValueError("timelines must align with spatial.edges")
@@ -517,35 +515,6 @@ def build_time_extended_graph(
                     fine_edge_indices=fine_idx,
                 )
             )
-
-    # Waiting edges between layers for every spatial node that appears
-    spatial_ids = sorted({n.spatial_id for n in te_nodes.values()})
-    for sid in spatial_ids:
-        for layer in layers[:-1]:
-            # create nodes even if isolated in a layer
-            u = _te_node(sid, layer.index)
-            v = _te_node(sid, layer.index + 1)
-            te_edges.append(
-                TimeExtendedEdge(
-                    u=u,
-                    v=v,
-                    length_m=0.0,
-                    way_id=-1,
-                    kind="wait",
-                    layer=layer.index,
-                    mean_hdop=float("nan"),
-                    mean_n_los=float("nan"),
-                    geometry=[],
-                )
-            )
-
-    # Store wait_cost on wait edges via length_m abuse? Better: keep length 0 and
-    # handle wait_cost in the router. Annotate with mean_hdop unused; store cost
-    # in length_m as wait_cost for simplicity in generic Dijkstra.
-    if wait_cost != 0.0:
-        for e in te_edges:
-            if e.kind == "wait":
-                e.length_m = float(wait_cost)
 
     return TimeExtendedGraph(
         layers=layers,

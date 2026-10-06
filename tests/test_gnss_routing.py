@@ -252,8 +252,9 @@ def test_collapse_timeline_on_quality_change():
 
 def test_time_extended_prefers_detour_after_quality_drop():
     spatial, samples = make_demo_spatial_graph()
-    te, _ = build_te_from_timeseries(spatial, samples, wait_cost=0.0, contract_per_layer=True)
+    te, _ = build_te_from_timeseries(spatial, samples, contract_per_layer=True)
     assert len(te.layers) >= 2
+    assert all(e.kind == "travel" for e in te.edges)
 
     # Force start in a late layer where top corridor is bad
     late = te.layers[-1].index
@@ -265,6 +266,8 @@ def test_time_extended_prefers_detour_after_quality_drop():
     # Travel edges carry fine member map for display unpacking
     travel = [te.edges[i] for i in route.edge_indices if te.edges[i].kind == "travel"]
     assert travel and all(e.fine_edge_indices for e in travel)
+    # Path stays in one layer (no wait edges between layers)
+    assert len(set(route.layers)) == 1
 
 
 def test_route_te_latlon_snaps_to_te_nodes():
@@ -272,7 +275,8 @@ def test_route_te_latlon_snaps_to_te_nodes():
     from gnss_gpu.routing import route_te_latlon
 
     spatial, samples = make_demo_spatial_graph()
-    te, _ = build_te_from_timeseries(spatial, samples, wait_cost=0.0, contract_per_layer=True)
+    te, _ = build_te_from_timeseries(spatial, samples, contract_per_layer=True)
+    assert all(e.kind == "travel" for e in te.edges)
     # Click near mid-chain node 10 (often contracted away) toward node 2
     n10, n2 = spatial.nodes[10], spatial.nodes[2]
     route = route_te_latlon(

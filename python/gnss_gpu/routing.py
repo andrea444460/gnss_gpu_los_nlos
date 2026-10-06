@@ -71,10 +71,9 @@ def edge_cost(edge: RoadEdge, params: CostParams) -> float:
 
 
 def te_edge_cost(edge: TimeExtendedEdge, params: CostParams) -> float:
-    """Cost for a time-extended edge (wait uses length_m as wait penalty)."""
-    if edge.kind == "wait":
-        return max(0.0, float(edge.length_m))
-    # reuse RoadEdge penalty fields
+    """Cost for a time-extended travel edge."""
+    if edge.kind != "travel":
+        return float("inf")
     tmp = RoadEdge(
         u=edge.u,
         v=edge.v,
@@ -222,7 +221,6 @@ def build_te_from_timeseries(
     *,
     hdop_step: float = 0.5,
     n_los_step: float = 1.0,
-    wait_cost: float = 0.0,
     contract_per_layer: bool = True,
 ) -> tuple[TimeExtendedGraph, list[list[QualityInterval]]]:
     timelines = attach_timelines_by_way(
@@ -231,7 +229,6 @@ def build_te_from_timeseries(
     te = build_time_extended_graph(
         graph,
         timelines,
-        wait_cost=wait_cost,
         hdop_step=hdop_step,
         n_los_step=n_los_step,
         contract_per_layer=contract_per_layer,

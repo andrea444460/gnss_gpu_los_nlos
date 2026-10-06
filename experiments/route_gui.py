@@ -154,11 +154,18 @@ class DemoState:
         self.te = None
         self.timelines = None
         self._te_ready = False
-        # Spatial contraction at t=0 for fast routing; TE built lazily on demand.
-        self._ensure_timelines()
-        self.contracted = prepare_contracted_graph(
-            self._snapshot(0.0), hdop_step=self.hdop_step, n_los_step=self.n_los_step
+        self.contracted = None  # built lazily — map display needs only OSM ways + samples
+
+    def _ensure_contracted(self, t_s: float = 0.0):
+        """Contracted routing graph for a quality snapshot (cached for t≈0)."""
+        if t_s <= 1e-9 and self.contracted is not None:
+            return self.contracted
+        cg = prepare_contracted_graph(
+            self._snapshot(t_s), hdop_step=self.hdop_step, n_los_step=self.n_los_step
         )
+        if t_s <= 1e-9:
+            self.contracted = cg
+        return cg
 
     def _ensure_timelines(self) -> None:
         if self.timelines is not None:
@@ -316,7 +323,7 @@ class DemoState:
 
         if show_contracted_overlay:
             fine = self._snapshot(t_s)
-            cg = prepare_contracted_graph(
+            cg = self._ensure_contracted(t_s) if t_s <= 1e-9 else prepare_contracted_graph(
                 fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
             )
             feats.extend(self._edges_to_features(cg.graph.edges, style="contracted"))
@@ -327,7 +334,9 @@ class DemoState:
             "source": self.source,
             "n_spatial_nodes": len(self.spatial.nodes),
             "n_spatial_edges_fine": len(self.spatial.edges),
-            "n_contracted_edges_t0": len(self.contracted.graph.edges),
+            "n_contracted_edges_t0": (
+                len(self.contracted.graph.edges) if self.contracted is not None else None
+            ),
             "n_te_nodes": len(self.te.nodes) if self.te is not None else None,
             "n_te_edges": len(self.te.edges) if self.te is not None else None,
             "te_built": bool(self._te_ready),
@@ -384,9 +393,9 @@ HTML = r"""<!doctype html>
       <h2>Legenda colore archi</h2>
       <p class="formula">Colore = score GNSS ≈ HDOP + 3·max(0, (8 − n<sub>LOS</sub>)/8).<br/>Verde = buona qualità, rosso = scarsa.</p>
       <table>
-        <tr><td><span class="swatch" style="background:#28b446"></span><span class="param">HDOP ≈ 1–2</span></td><td class="hint">n<sub>LOS</sub> ≥ 8 · ottima</td></tr>
-        <tr><td><span class="swatch" style="background:#f0dc28"></span><span class="param">HDOP ≈ 3–4</span></td><td class="hint">n<sub>LOS</sub> ≈ 5–7 · media</td></tr>
-        <tr><td><span class="swatch" style="background:#f07828"></span><span class="param">HDOP ≈ 5–6</span></td><td class="hint">n<sub>LOS</sub> ≈ 3–4 · scarsa</td></tr>
+        <tr><td><span class="swatch" style="background:#53bc36"></span><span class="param">HDOP ≈ 1–2</span></td><td class="hint">n<sub>LOS</sub> ≥ 8 · ottima</td></tr>
+        <tr><td><span class="swatch" style="background:#f0d328"></span><span class="param">HDOP ≈ 3–4</span></td><td class="hint">n<sub>LOS</sub> ≈ 5–7 · media</td></tr>
+        <tr><td><span class="swatch" style="background:#f07d28"></span><span class="param">HDOP ≈ 5–6</span></td><td class="hint">n<sub>LOS</sub> ≈ 3–4 · scarsa</td></tr>
         <tr><td><span class="swatch" style="background:#c81e28"></span><span class="param">HDOP ≥ 7</span></td><td class="hint">n<sub>LOS</sub> ≤ 2 · pessima</td></tr>
         <tr><td><span class="swatch" style="background:#6b7280"></span><span class="param">n/d</span></td><td class="hint">nessuna metrica</td></tr>
       </table>
@@ -654,10 +663,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         t_s = STATE._layer_time(layer)
-        fine = STATE._snapshot(t_s)
-        cg = prepare_contracted_graph(
-            fine, hdop_step=STATE.hdop_step, n_los_step=STATE.n_los_step
-        )
+        cg = STATE._ensure_contracted(t_s)
         route = route_contracted_latlon(
             cg, lat_a, lon_a, lat_b, lon_b, params, algorithm=algorithm
         )
@@ -716,7 +722,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"source: {STATE.source}", flush=True)
     print(
         f"nodes={len(STATE.spatial.nodes)} edges={len(STATE.spatial.edges)} "
-        f"contracted={len(STATE.contracted.graph.edges)} layers={len(STATE._layer_meta())}",
+        f"(contraction/TE lazy)",
         flush=True,
     )
 

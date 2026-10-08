@@ -462,6 +462,14 @@ class DemoState:
             )
         return feats
 
+    def _sample_time_range(self) -> tuple[float, float]:
+        """Min/max sample times available for the time scrubber."""
+        t_max = 0.0
+        for seq in self.samples.values():
+            if seq:
+                t_max = max(t_max, float(seq[-1][0]))
+        return 0.0, t_max
+
     def graph_geojson(
         self,
         *,
@@ -469,9 +477,14 @@ class DemoState:
         layer: int,
         show_contracted_overlay: bool = False,
         detail: str = "arterial",
+        t_s: float | None = None,
     ) -> dict:
         """Return map GeoJSON; prefer pregenerated disk/memory cache when possible."""
-        if not show_contracted_overlay:
+        use_cache = (
+            not show_contracted_overlay
+            and (t_s is None or float(t_s) <= 1e-9)
+        )
+        if use_cache:
             key = (detail, int(layer))
             raw = self._display_bytes.get(key)
             if raw is None:
@@ -488,14 +501,27 @@ class DemoState:
                 layer=layer,
                 show_contracted_overlay=False,
                 detail=detail,
+                t_s=0.0,
             )
 
-        # Overlay on: reuse cached base roads, then append a capped contracted set.
+        if t_s is not None and not show_contracted_overlay:
+            if not self._graph_ready:
+                return {"type": "FeatureCollection", "features": []}
+            return self._build_graph_geojson(
+                mode=mode,
+                layer=layer,
+                show_contracted_overlay=False,
+                detail=detail,
+                t_s=float(t_s),
+            )
+
+        # Overlay on: reuse cached/base roads, then append a capped contracted set.
         base = self.graph_geojson(
             mode=mode,
             layer=layer,
             show_contracted_overlay=False,
             detail=detail,
+            t_s=t_s,
         )
         if not self._graph_ready:
             return base
@@ -514,9 +540,12 @@ class DemoState:
         layer: int,
         detail: str = "arterial",
         show_contracted_overlay: bool = False,
+        t_s: float | None = None,
     ) -> bytes | None:
         """Raw cached JSON bytes for fast HTTP responses (None if unavailable)."""
         if show_contracted_overlay:
+            return None
+        if t_s is not None and float(t_s) > 1e-9:
             return None
         key = (detail, int(layer))
         raw = self._display_bytes.get(key)
@@ -535,6 +564,7 @@ class DemoState:
         layer: int,
         show_contracted_overlay: bool = False,
         detail: str = "arterial",
+        t_s: float | None = None,
     ) -> dict:
         """Map overlay GeoJSON. Routing still uses the full contracted graph.
 
@@ -542,7 +572,8 @@ class DemoState:
           - ``arterial`` (default): major roads only (~fast Leaflet draw)
           - ``full``: all car ways (slow for city-scale)
         """
-        t_s = self._layer_time(layer)
+        if t_s is None:
+            t_s = self._layer_time(layer)
 
         feats: list[dict] = []
         if self.roads:
@@ -555,14 +586,18 @@ class DemoState:
                 if len(geom) < 2:
                     continue
                 wid = int(way.get("id", -1))
-                hdop, n_los = _way_quality(self.samples, wid, t_s)
+                hdop, n_los = _way_quality(self.samples, wid, float(t_s))
                 raw_coords = [[float(p["lon"]), float(p["lat"])] for p in geom]
                 feats.append(
                     {
                         "type": "Feature",
                         "properties": {
+                            "way_id": wid,
+                            "mean_hdop": hdop,
+                            "mean_n_los": n_los,
                             "color": _quality_color(hdop, n_los),
                             "style": "fine",
+                            "t_s": float(t_s),
                         },
                         "geometry": {
                             "type": "LineString",
@@ -571,13 +606,17 @@ class DemoState:
                     }
                 )
         else:
-            fine = self._snapshot(t_s)
+            fine = self._snapshot(float(t_s))
             feats.extend(self._edges_to_features(fine.edges, style="fine"))
 
         if show_contracted_overlay:
-            fine = self._snapshot(t_s)
-            cg = self._ensure_contracted(t_s) if t_s <= 1e-9 else prepare_contracted_graph(
-                fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
+            fine = self._snapshot(float(t_s))
+            cg = (
+                self._ensure_contracted(float(t_s))
+                if float(t_s) <= 1e-9
+                else prepare_contracted_graph(
+                    fine, hdop_step=self.hdop_step, n_los_step=self.n_los_step
+                )
             )
             # Cap overlay size — full contracted city graph freezes Leaflet and
             # made unchecking the box look broken while a huge draw was in flight.
@@ -590,6 +629,7 @@ class DemoState:
     def meta(self) -> dict:
         # TE disabled in GUI: do not build timelines on every page load.
         ready = self._graph_ready
+        t_min, t_max = self._sample_time_range() if ready else (0.0, 0.0)
         return {
             "ready": ready,
             "source": self.source,
@@ -601,11 +641,13 @@ class DemoState:
                 else None
             ),
             "layers": [{"index": 0, "t0_s": 0.0, "t1_s": 1.0}],
+            "t_min_s": t_min,
+            "t_max_s": t_max,
             "display_cached": sorted(f"{d}/L{layer}" for d, layer in self._display_bytes),
             "error": self._graph_error,
             "note": (
                 "Map paints from pregenerated GeoJSON immediately. "
-                "Routing graph may still be loading in the background. "
+                "Optional time scrubber recolors roads from the GNSS timeline. "
                 "Path is black."
             ),
         }
@@ -644,6 +686,11 @@ HTML = r"""<!doctype html>
   #legend .swatch { width:18px; height:12px; border-radius:2px; display:inline-block; margin-right:8px; border:1px solid #3a4b58; }
   #legend .param { color:#e8eef2; }
   #legend .hint { color:var(--muted); font-size:11px; }
+  #timePanel { display:none; margin-top:8px; padding:10px; background:#152028; border-radius:6px; }
+  #timePanel.active { display:block; }
+  #timeSlider { width:100%; padding:0; accent-color:var(--accent); }
+  #timeLabel { color:var(--ink); font-variant-numeric: tabular-nums; }
+  button.active-toggle { background:#2a6b4f; color:#e8eef2; }
 </style>
 </head>
 <body>
@@ -665,7 +712,13 @@ HTML = r"""<!doctype html>
     <p id="hint" class="note" style="color:#3dbb7a">Click anywhere on the map to place A (origin).</p>
     <label><input id="overlay" type="checkbox"/> show contracted overlay (dashed)</label>
     <label><input id="fullRoads" type="checkbox"/> show all streets (slow)</label>
-    <label>Quality layer (map colors / costs)</label>
+    <button id="btnTime" class="secondary" disabled>Enable time scrubber</button>
+    <div id="timePanel">
+      <label>GNSS time <span id="timeLabel">t = 0 s</span></label>
+      <input id="timeSlider" type="range" min="0" max="200" step="1" value="0"/>
+      <p class="note" style="margin:6px 0 0">Move to recolor roads from the quality timeline (north degrades after ~100 s).</p>
+    </div>
+    <label>Quality layer (routing costs)</label>
     <input id="layer" type="number" min="0" value="0"/>
     <div class="row">
       <div>
@@ -704,6 +757,10 @@ let origin = null, dest = null;
 let didFit = false;
 let graphAbort = null;
 let graphReqId = 0;
+let timeEnabled = false;
+let timeDebounce = null;
+let tMinS = 0;
+let tMaxS = 200;
 
 function setHint(){
   const el = document.getElementById('hint');
@@ -728,14 +785,48 @@ function placeMarker(latlng, kind){
   return m;
 }
 
+function currentTimeS(){
+  if (!timeEnabled) return null;
+  return parseFloat(document.getElementById('timeSlider').value || '0');
+}
+
+function updateTimeLabel(){
+  const t = parseFloat(document.getElementById('timeSlider').value || '0');
+  document.getElementById('timeLabel').textContent = 't = ' + t.toFixed(0) + ' s';
+}
+
+function setTimeEnabled(on){
+  timeEnabled = !!on;
+  const btn = document.getElementById('btnTime');
+  const panel = document.getElementById('timePanel');
+  btn.textContent = timeEnabled ? 'Disable time scrubber' : 'Enable time scrubber';
+  btn.classList.toggle('active-toggle', timeEnabled);
+  panel.classList.toggle('active', timeEnabled);
+  if (!timeEnabled) {
+    document.getElementById('timeSlider').value = String(tMinS);
+    updateTimeLabel();
+  }
+  loadGraph();
+}
+
 async function loadMeta(){
   const m = await (await fetch('/api/meta')).json();
   document.getElementById('layer').max = Math.max(0, (m.layers||[]).length-1);
+  tMinS = Number.isFinite(m.t_min_s) ? m.t_min_s : 0;
+  tMaxS = Number.isFinite(m.t_max_s) && m.t_max_s > tMinS ? m.t_max_s : 200;
+  const slider = document.getElementById('timeSlider');
+  slider.min = String(tMinS);
+  slider.max = String(tMaxS);
+  if (parseFloat(slider.value) < tMinS || parseFloat(slider.value) > tMaxS) {
+    slider.value = String(tMinS);
+  }
+  updateTimeLabel();
   const status = m.ready
-    ? `Routing ready\\n${m.source}\\nnodes=${m.n_spatial_nodes} edges=${m.n_spatial_edges_fine}`
+    ? `Routing ready\\n${m.source}\\nnodes=${m.n_spatial_nodes} edges=${m.n_spatial_edges_fine}\\nGNSS timeline: ${tMinS.toFixed(0)}–${tMaxS.toFixed(0)} s`
     : `Map ready — routing graph still loading…\\n${m.source || ''}`;
   document.getElementById('stats').textContent = status;
   document.getElementById('btnRoute').disabled = !m.ready;
+  document.getElementById('btnTime').disabled = !m.ready;
   setHint();
   return m;
 }
@@ -745,6 +836,7 @@ async function loadGraph(){
   const layer = parseInt(document.getElementById('layer').value||'0',10);
   const overlay = document.getElementById('overlay').checked;
   const detail = document.getElementById('fullRoads').checked ? 'full' : 'arterial';
+  const tS = currentTimeS();
   // Cancel in-flight overlay draws so unchecking can take effect immediately.
   if (graphAbort) {
     try { graphAbort.abort(); } catch (_) {}
@@ -752,14 +844,14 @@ async function loadGraph(){
   graphAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
   const reqId = ++graphReqId;
   edgeLayer.clearLayers();
-  document.getElementById('stats').textContent = 'Loading road layer (' + detail + (overlay ? '+overlay' : '') + ')…';
+  const tTag = (tS === null) ? '' : (' @ t=' + tS.toFixed(0) + 's');
+  document.getElementById('stats').textContent = 'Loading road layer (' + detail + (overlay ? '+overlay' : '') + tTag + ')…';
   const t0 = performance.now();
   let g;
   try {
-    const resp = await fetch(
-      `/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}&detail=${detail}`,
-      graphAbort ? { signal: graphAbort.signal } : undefined
-    );
+    let url = `/api/graph?mode=${mode}&layer=${layer}&overlay=${overlay}&detail=${detail}`;
+    if (tS !== null) url += `&t_s=${encodeURIComponent(tS)}`;
+    const resp = await fetch(url, graphAbort ? { signal: graphAbort.signal } : undefined);
     g = await resp.json();
   } catch (err) {
     if (err && err.name === 'AbortError') return;
@@ -790,7 +882,7 @@ async function loadGraph(){
     didFit = true;
   }
   document.getElementById('stats').textContent =
-    `Display: ${g.features.length} ways (${detail}${overlay ? '+overlay' : ''})\\n` +
+    `Display: ${g.features.length} ways (${detail}${overlay ? '+overlay' : ''}${tTag})\\n` +
     `fetch ${tFetch.toFixed(0)}ms / draw ${tDraw.toFixed(0)}ms\\n` +
     `Routing still uses the full car network.`;
 }
@@ -831,6 +923,13 @@ document.getElementById('btnReload').onclick = () => loadGraph();
 document.getElementById('layer').onchange = () => loadGraph();
 document.getElementById('overlay').onchange = () => loadGraph();
 document.getElementById('fullRoads').onchange = () => loadGraph();
+document.getElementById('btnTime').onclick = () => setTimeEnabled(!timeEnabled);
+document.getElementById('timeSlider').addEventListener('input', () => {
+  updateTimeLabel();
+  if (!timeEnabled) return;
+  if (timeDebounce) clearTimeout(timeDebounce);
+  timeDebounce = setTimeout(() => loadGraph(), 80);
+});
 
 document.getElementById('btnRoute').onclick = async () => {
   if (!origin || !dest) { alert('Click origin A, then destination B anywhere on the map'); return; }
@@ -900,9 +999,14 @@ class Handler(BaseHTTPRequestHandler):
             layer = int(qs.get("layer", ["0"])[0])
             overlay = qs.get("overlay", ["false"])[0].lower() == "true"
             detail = qs.get("detail", ["arterial"])[0]
+            t_raw = qs.get("t_s", [None])[0]
+            t_s = float(t_raw) if t_raw is not None and str(t_raw).strip() != "" else None
             if not overlay:
                 raw = STATE.graph_geojson_bytes(
-                    layer=layer, detail=detail, show_contracted_overlay=False
+                    layer=layer,
+                    detail=detail,
+                    show_contracted_overlay=False,
+                    t_s=t_s,
                 )
                 if raw is not None:
                     self._send(200, raw, "application/json")
@@ -914,6 +1018,7 @@ class Handler(BaseHTTPRequestHandler):
                     layer=layer,
                     show_contracted_overlay=overlay,
                     detail=detail,
+                    t_s=t_s,
                 ),
             )
             return

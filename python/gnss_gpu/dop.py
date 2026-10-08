@@ -80,18 +80,39 @@ def hdop_from_los(
     return math.sqrt(h2)
 
 
+def hdop_series(
+    rx_ecef: np.ndarray,
+    sat_ecef: np.ndarray,
+    los_vis: np.ndarray,
+) -> np.ndarray:
+    """HDOP for one receiver over epochs: sat_ecef (n_t,n_sat,3), los_vis (n_t,n_sat)."""
+    rx = np.asarray(rx_ecef, dtype=np.float64).reshape(3)
+    sat = np.asarray(sat_ecef, dtype=np.float64)
+    mask = np.asarray(los_vis, dtype=bool)
+    n_t = int(mask.shape[0])
+    out = np.full(n_t, np.nan, dtype=np.float64)
+    for ti in range(n_t):
+        out[ti] = hdop_from_los(rx, sat[ti], mask[ti])
+    return out
+
+
 def n_los_and_hdop_chunk(
     rx_ecef: np.ndarray,
     sat_ecef: np.ndarray,
     los_vis: np.ndarray,
+    *,
+    hdop_point_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Per-point / per-epoch n_LOS counts and HDOP.
+    """Per-point / per-epoch n_LOS (always) and HDOP (optional subset).
 
     Parameters
     ----------
     rx_ecef : (n_p, 3)
     sat_ecef : (n_t, n_sat, 3)
-    los_vis : (n_p, n_t, n_sat)  True where sat is elevation/terrain-visible AND LOS
+    los_vis : (n_p, n_t, n_sat)
+    hdop_point_mask : (n_p,) bool, optional
+        If given, HDOP is computed only for True rows (others stay NaN).
+        Use this for one representative sample per OSM way.
 
     Returns
     -------
@@ -109,8 +130,10 @@ def n_los_and_hdop_chunk(
 
     n_los = np.sum(mask, axis=2).astype(np.float64)
     hdop = np.full((n_p, n_t), np.nan, dtype=np.float64)
-    for pi in range(n_p):
-        rx_p = rx[pi]
-        for ti in range(n_t):
-            hdop[pi, ti] = hdop_from_los(rx_p, sat[ti], mask[pi, ti])
+    if hdop_point_mask is None:
+        do_hdop = np.ones(n_p, dtype=bool)
+    else:
+        do_hdop = np.asarray(hdop_point_mask, dtype=bool).reshape(n_p)
+    for pi in np.flatnonzero(do_hdop):
+        hdop[pi] = hdop_series(rx[pi], sat, mask[pi])
     return n_los, hdop

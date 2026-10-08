@@ -78,3 +78,23 @@ def test_n_los_and_hdop_chunk_shape():
     assert n_los[1, 1] == 0.0
     assert math.isfinite(hdop[0, 0])
     assert math.isnan(hdop[1, 1])
+
+
+def test_hdop_point_mask_skips_rows():
+    rx = np.stack([_ecef_from_lla(44.41, 8.93, 50.0), _ecef_from_lla(44.42, 8.94, 60.0)])
+    offsets = [
+        [2.0e7, 0.0, 1.5e7],
+        [0.0, 2.0e7, 1.5e7],
+        [-2.0e7, 0.0, 1.5e7],
+        [0.0, -2.0e7, 1.5e7],
+        [1.0e7, 1.0e7, 2.0e7],
+    ]
+    base = rx[0]
+    sats = np.stack([np.array([base + np.asarray(o, dtype=np.float64) for o in offsets])] * 2)
+    mask = np.ones((2, 2, 5), dtype=bool)
+    n_los, hdop = n_los_and_hdop_chunk(
+        rx, sats, mask, hdop_point_mask=np.array([True, False])
+    )
+    assert n_los[0, 0] == 5.0 and n_los[1, 0] == 5.0
+    assert math.isfinite(hdop[0, 0])
+    assert math.isnan(hdop[1, 0])

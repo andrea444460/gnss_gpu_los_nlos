@@ -340,7 +340,22 @@ def main() -> None:
     way_ids = sorted(wid for wid in way_to_idxs if wid >= 0)
     if not way_ids:
         raise RuntimeError("Sampled points have no valid way_id.")
-    print(f"[rqz] ways with samples: {len(way_ids)}", flush=True)
+    wid_to_row = {wid: i for i, wid in enumerate(way_ids)}
+    point_way_row = np.asarray(
+        [wid_to_row.get(int(p.get("way_id", -1)), -1) for p in points],
+        dtype=np.int64,
+    )
+    # One representative sample per way for HDOP (mid point). n_LOS still uses all samples.
+    is_hdop_rep = np.zeros(len(points), dtype=bool)
+    for idxs in way_to_idxs.values():
+        if not idxs:
+            continue
+        is_hdop_rep[idxs[len(idxs) // 2]] = True
+    print(
+        f"[rqz] ways with samples: {len(way_ids)} "
+        f"(HDOP on {int(np.count_nonzero(is_hdop_rep))} rep points, not every sample)",
+        flush=True,
+    )
 
     # --- mesh / BVH -----------------------------------------------------------
     tri = np.asarray(np.load(args.triangles_npy), dtype=np.float64)
@@ -437,11 +452,11 @@ def main() -> None:
 
     n_points = len(points)
     n_epochs = int(tow_samples.size)
-    # Accumulators for way-mean quality per epoch.
-    way_hdop_sum = {wid: np.zeros(n_epochs, dtype=np.float64) for wid in way_ids}
-    way_nlos_sum = {wid: np.zeros(n_epochs, dtype=np.float64) for wid in way_ids}
-    way_hdop_cnt = {wid: np.zeros(n_epochs, dtype=np.int32) for wid in way_ids}
-    way_nlos_cnt = {wid: np.zeros(n_epochs, dtype=np.int32) for wid in way_ids}
+    n_ways = len(way_ids)
+    # Dense accumulators: n_LOS = mean over all samples on the way; HDOP = rep point only.
+    way_nlos_sum = np.zeros((n_ways, n_epochs), dtype=np.float64)
+    way_nlos_cnt = np.zeros((n_ways, n_epochs), dtype=np.int32)
+    way_hdop = np.full((n_ways, n_epochs), np.nan, dtype=np.float64)
 
     p_chunk = max(1, int(args.point_batch_chunk))
     e_chunk = max(1, int(args.eph_batch_chunk))
@@ -449,6 +464,9 @@ def main() -> None:
     n_epochs_processed = 0
     m_rays = 0
     t_ray = 0.0
+    t_pre = 0.0
+    t_hdop = 0.0
+    t_agg = 0.0
     t_last_log = t0
 
     for es in range(0, n_epochs, e_chunk):
@@ -472,31 +490,43 @@ def main() -> None:
             n_p = rx_chunk.shape[0]
             rx_flat = np.repeat(rx_chunk, n_t, axis=0)
 
+            t_cp = time.perf_counter()
             visible, sat_work = _cpu_preprocess_chunk(
                 rx_chunk, sat_b, n_t, n_sat, mask_rad, terrain_mask
             )
+            t_pre += time.perf_counter() - t_cp
+
             t_cr = time.perf_counter()
             los = np.asarray(bvh.check_los_batch(rx_flat, sat_work), dtype=bool)
             t_ray += time.perf_counter() - t_cr
             m_rays += int(n_p) * int(n_t) * int(n_sat)
 
             los_vis = np.logical_and(los, visible).reshape(n_p, n_t, n_sat)
-            n_los_pt, hdop_pt = n_los_and_hdop_chunk(rx_chunk, sat_b, los_vis)
+            # Cheap vectorized n_LOS; HDOP only on way representative samples.
+            t_ch = time.perf_counter()
+            n_los_pt, hdop_pt = n_los_and_hdop_chunk(
+                rx_chunk,
+                sat_b,
+                los_vis,
+                hdop_point_mask=is_hdop_rep[ps:pe],
+            )
+            t_hdop += time.perf_counter() - t_ch
 
-            # Scatter point stats into way accumulators for epochs [es:ee].
-            for local_i, global_i in enumerate(range(ps, pe)):
-                wid = int(points[global_i].get("way_id", -1))
-                if wid not in way_hdop_sum:
-                    continue
+            t_ca = time.perf_counter()
+            rows = point_way_row[ps:pe]
+            valid = rows >= 0
+            if np.any(valid):
+                rv = rows[valid]
+                nv = n_los_pt[valid]
                 for ti in range(n_t):
-                    ei = es + ti
-                    n_val = float(n_los_pt[local_i, ti])
-                    h_val = float(hdop_pt[local_i, ti])
-                    way_nlos_sum[wid][ei] += n_val
-                    way_nlos_cnt[wid][ei] += 1
-                    if math.isfinite(h_val):
-                        way_hdop_sum[wid][ei] += h_val
-                        way_hdop_cnt[wid][ei] += 1
+                    np.add.at(way_nlos_sum[:, es + ti], rv, nv[:, ti])
+                    np.add.at(way_nlos_cnt[:, es + ti], rv, 1)
+            # HDOP from representatives → way row
+            for li in np.flatnonzero(is_hdop_rep[ps:pe]):
+                row = int(rows[li])
+                if row >= 0:
+                    way_hdop[row, es:ee] = hdop_pt[li]
+            t_agg += time.perf_counter() - t_ca
 
             now = time.perf_counter()
             if (now - t_last_log) >= 5.0 or pe == n_points:
@@ -510,7 +540,8 @@ def main() -> None:
                 print(
                     f"[rqz][progress] {progress*100:5.1f}% | "
                     f"epoch_chunk={epoch_chunk_idx}/{epoch_chunk_total} "
-                    f"points={pe}/{n_points} | elapsed={elapsed:7.1f}s eta={eta_s:7.1f}s",
+                    f"points={pe}/{n_points} | elapsed={elapsed:7.1f}s eta={eta_s:7.1f}s "
+                    f"(pre={t_pre:.1f}s ray={t_ray:.1f}s hdop={t_hdop:.1f}s agg={t_agg:.1f}s)",
                     flush=True,
                 )
                 t_last_log = now
@@ -519,16 +550,13 @@ def main() -> None:
         raise RuntimeError("No valid epochs processed.")
 
     samples_by_way: dict[int, list[tuple[float, float, float]]] = {}
-    for wid in way_ids:
+    for row, wid in enumerate(way_ids):
         seq: list[tuple[float, float, float]] = []
         for ei in range(n_epochs):
-            if way_nlos_cnt[wid][ei] <= 0:
+            if way_nlos_cnt[row, ei] <= 0:
                 continue
-            n_mean = float(way_nlos_sum[wid][ei] / way_nlos_cnt[wid][ei])
-            if way_hdop_cnt[wid][ei] > 0:
-                h_mean = float(way_hdop_sum[wid][ei] / way_hdop_cnt[wid][ei])
-            else:
-                h_mean = float("nan")
+            n_mean = float(way_nlos_sum[row, ei] / way_nlos_cnt[row, ei])
+            h_mean = float(way_hdop[row, ei])
             seq.append((float(t_rel[ei]), h_mean, n_mean))
         if seq:
             samples_by_way[wid] = seq
@@ -574,7 +602,8 @@ def main() -> None:
         flush=True,
     )
     print(
-        f"[rqz] done runtime_s={dt_total:.1f} raytrace_s={t_ray:.1f} "
+        f"[rqz] done runtime_s={dt_total:.1f} "
+        f"preprocess_s={t_pre:.1f} raytrace_s={t_ray:.1f} hdop_s={t_hdop:.1f} agg_s={t_agg:.1f} "
         f"rays={m_rays} rays/s={m_rays/max(t_ray,1e-12):,.0f}",
         flush=True,
     )

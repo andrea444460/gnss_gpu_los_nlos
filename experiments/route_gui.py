@@ -814,7 +814,10 @@ function currentTimeS(){
 
 function updateTimeLabel(){
   const t = parseFloat(document.getElementById('timeSlider').value || '0');
-  document.getElementById('timeLabel').textContent = 't = ' + t.toFixed(0) + ' s';
+  const hh = Math.floor(t / 3600);
+  const mm = Math.floor((t % 3600) / 60);
+  const clock = String(hh).padStart(2,'0') + ':' + String(mm).padStart(2,'0');
+  document.getElementById('timeLabel').textContent = 't = ' + t.toFixed(0) + ' s (' + clock + ')';
 }
 
 function setTimeEnabled(on){
@@ -839,6 +842,8 @@ async function loadMeta(){
   const slider = document.getElementById('timeSlider');
   slider.min = String(tMinS);
   slider.max = String(tMaxS);
+  // Match pack cadence when horizon is long (e.g. 24h @ 60s).
+  slider.step = (tMaxS - tMinS) >= 3600 ? '60' : '1';
   if (parseFloat(slider.value) < tMinS || parseFloat(slider.value) > tMaxS) {
     slider.value = String(tMinS);
   }

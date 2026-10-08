@@ -148,16 +148,40 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--tile-size-m", type=float, default=12000.0)
     p.add_argument("--eph-batch-chunk", type=int, default=32)
     p.add_argument("--point-batch-chunk", type=int, default=256)
-    p.add_argument("--arterial-only", action="store_true", default=True)
-    p.add_argument("--no-arterial-only", action="store_true")
-    p.add_argument("--include-pedestrian", action="store_true")
+    scope = p.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--all-streets",
+        action="store_true",
+        help="All car-drivable OSM highways (default). Residential/service included.",
+    )
+    scope.add_argument(
+        "--arterial-only",
+        action="store_true",
+        help="Only arterial classes (motorway…tertiary).",
+    )
+    p.add_argument(
+        "--include-pedestrian",
+        action="store_true",
+        help="Also include footways/paths (huge; usually not needed for car routing).",
+    )
     p.add_argument("--skip-mesh", action="store_true", help="Reuse existing triangles npy")
     p.add_argument("--nav", type=Path, default=None, help="Optional local NAV override")
+    p.add_argument(
+        "--out-name",
+        type=str,
+        default="",
+        help="Output .rqz basename under results/ (default depends on street scope).",
+    )
     return p.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    # Default scope: all car streets (not only arterials).
+    arterial_only = bool(args.arterial_only) and not bool(args.all_streets)
+    if not args.arterial_only and not args.all_streets:
+        arterial_only = False
+
     work = args.work_dir.resolve()
     data = work / "data"
     out_dir = work / "results"
@@ -167,8 +191,12 @@ def main() -> int:
     tri = out_dir / "genova_osm_triangles.npy"
     cache = out_dir / "genova_osm_cache.json"
     dem = out_dir / "genova_area_dem.tif"
-    rqz = out_dir / "genova_quality_24h.rqz"
-    metrics = out_dir / "metrics.csv"
+    default_name = "genova_quality_24h_arterial.rqz" if arterial_only else "genova_quality_24h_all.rqz"
+    rqz_name = args.out_name.strip() or default_name
+    if not rqz_name.endswith(".rqz"):
+        rqz_name += ".rqz"
+    rqz = out_dir / rqz_name
+    metrics = out_dir / (rqz.stem + "_metrics.csv")
 
     # Sanity: CUDA BVH
     sys.path.insert(0, str(_ROOT / "python"))
@@ -251,8 +279,13 @@ def main() -> int:
     ]
     if args.include_pedestrian:
         cmd.append("--include-pedestrian")
-    if not args.no_arterial_only:
+    if arterial_only:
         cmd.append("--arterial-only")
+    print(
+        f"[colab] street_scope={'arterial-only' if arterial_only else 'all-car-streets'} "
+        f"out={rqz}",
+        flush=True,
+    )
 
     _run(cmd)
     print(f"\nDONE: {rqz}  ({rqz.stat().st_size/1024:.1f} KB)", flush=True)

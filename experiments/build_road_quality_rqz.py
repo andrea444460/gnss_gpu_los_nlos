@@ -22,7 +22,8 @@ Example (Genova-style Colab run)::
       --point-batch-chunk 256 \\
       --dem-auto-download \\
       --dem-auto-out "$OUT_DIR/genova_area_dem.tif" \\
-      --arterial-only
+      # omit --arterial-only for ALL car streets (residential/service/…)
+      # --arterial-only
 """
 
 from __future__ import annotations

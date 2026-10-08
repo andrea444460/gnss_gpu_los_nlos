@@ -14,7 +14,7 @@ Example after Colab setup::
     !python experiments/run_genova_road_quality_colab.py \\
         --work-dir /content/genova_rqz \\
         --year 2026 --doy 120 \\
-        --duration-s 86400 --dt-s 300 --arterial-only
+        --duration-s 86400 --dt-s 60 --all-streets
 """
 
 from __future__ import annotations

@@ -2,8 +2,11 @@
 """Generate a compact per-way GNSS quality pack (``.rqz``) for a road extract.
 
 The pack stores **quantized change-points only** (not one sample per epoch),
-so a day of city data stays small. Values are synthetic unless ``--from-csv``
-is provided (real pipeline can write the same format later).
+so a day of city data stays small. Values are **synthetic** unless ``--from-csv``
+is provided.
+
+For a real BVH/GPU LOS pack (NAV + building mesh → HDOP/n_LOS timelines), use
+``experiments/build_road_quality_rqz.py`` instead.
 
 Example::
 

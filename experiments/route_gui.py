@@ -736,9 +736,9 @@ HTML = r"""<!doctype html>
     <label><input id="fullRoads" type="checkbox"/> show all streets (slow)</label>
     <button id="btnTime" class="secondary" disabled>Enable time scrubber</button>
     <div id="timePanel">
-      <label>GNSS time <span id="timeLabel">t = 0 s</span></label>
-      <input id="timeSlider" type="range" min="0" max="200" step="1" value="0"/>
-      <p class="note" style="margin:6px 0 0">Move to recolor roads from the quality timeline (north degrades after ~100 s).</p>
+      <label>GNSS time <span id="timeLabel">t = 0 s (00:00)</span></label>
+      <input id="timeSlider" type="range" min="0" max="200" step="60" value="0"/>
+      <p class="note" style="margin:6px 0 0">Move to recolor arterial roads from the 24h quality pack (HDOP / n<sub>LOS</sub>).</p>
     </div>
     <label>Quality layer (routing costs)</label>
     <input id="layer" type="number" min="0" value="0"/>
@@ -814,7 +814,10 @@ function currentTimeS(){
 
 function updateTimeLabel(){
   const t = parseFloat(document.getElementById('timeSlider').value || '0');
-  document.getElementById('timeLabel').textContent = 't = ' + t.toFixed(0) + ' s';
+  const hh = Math.floor(t / 3600);
+  const mm = Math.floor((t % 3600) / 60);
+  const clock = String(hh).padStart(2,'0') + ':' + String(mm).padStart(2,'0');
+  document.getElementById('timeLabel').textContent = 't = ' + t.toFixed(0) + ' s (' + clock + ')';
 }
 
 function setTimeEnabled(on){
@@ -839,6 +842,8 @@ async function loadMeta(){
   const slider = document.getElementById('timeSlider');
   slider.min = String(tMinS);
   slider.max = String(tMaxS);
+  // Match pack cadence when horizon is long (e.g. 24h @ 60s).
+  slider.step = (tMaxS - tMinS) >= 3600 ? '60' : '1';
   if (parseFloat(slider.value) < tMinS || parseFloat(slider.value) > tMaxS) {
     slider.value = String(tMinS);
   }

@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -36,6 +37,7 @@ from gnss_gpu.io.osm_cache import (  # noqa: E402
     read_display_cache_bytes,
     write_display_cache,
 )
+from gnss_gpu.io.road_quality_pack import read_road_quality_pack  # noqa: E402
 from gnss_gpu.io.osm_roads import (  # noqa: E402
     BBox,
     RoadEdge,
@@ -132,13 +134,33 @@ def _filter_car_ways(roads: list[dict]) -> list[dict]:
     return filter_car_ways(roads)
 
 
+def _default_quality_pack_path() -> Path:
+    return default_cache_dir() / "genova_quality_24h.rqz"
+
+
+def _load_quality_samples(graph: RoadGraph, roads: list[dict]) -> tuple[dict, str]:
+    """Prefer compact ``.rqz`` pack when present; else synthetic short timeline."""
+    pack_path = Path(
+        os.environ.get("GNSS_GPU_QUALITY_PACK", "").strip() or _default_quality_pack_path()
+    )
+    if pack_path.is_file():
+        pack = read_road_quality_pack(pack_path)
+        samples = pack.to_samples_dict()
+        # Keep only ways present in this extract.
+        way_ids = {int(w["id"]) for w in roads}
+        samples = {wid: seq for wid, seq in samples.items() if wid in way_ids}
+        if samples:
+            return samples, f"quality-pack:{pack_path.name} ({len(samples)} ways, {pack.horizon_s/3600:.0f}h)"
+    return synthesize_quality_timeseries(graph), "synthetic-short"
+
+
 def _graph_from_roads(roads: list[dict], source: str):
     roads = _filter_car_ways(roads)
     graph = build_directed_road_graph(roads)
     if not graph.edges:
         raise RuntimeError("no road edges built")
-    samples = synthesize_quality_timeseries(graph)
-    return graph, samples, source, roads
+    samples, qsrc = _load_quality_samples(graph, roads)
+    return graph, samples, f"{source} | {qsrc}", roads
 
 
 def _load_fixture_graph():

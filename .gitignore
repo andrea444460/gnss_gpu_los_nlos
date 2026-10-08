@@ -36,6 +36,7 @@ cache/
 !python/gnss_gpu/fixtures/cache/
 !python/gnss_gpu/fixtures/cache/display_*.geojson
 !python/gnss_gpu/fixtures/cache/osm_roads_*.json
+!python/gnss_gpu/fixtures/cache/*.rqz
 
 # Experiment artifacts
 experiments/results/*/

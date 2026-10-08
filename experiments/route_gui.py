@@ -736,9 +736,9 @@ HTML = r"""<!doctype html>
     <label><input id="fullRoads" type="checkbox"/> show all streets (slow)</label>
     <button id="btnTime" class="secondary" disabled>Enable time scrubber</button>
     <div id="timePanel">
-      <label>GNSS time <span id="timeLabel">t = 0 s</span></label>
-      <input id="timeSlider" type="range" min="0" max="200" step="1" value="0"/>
-      <p class="note" style="margin:6px 0 0">Move to recolor roads from the quality timeline (north degrades after ~100 s).</p>
+      <label>GNSS time <span id="timeLabel">t = 0 s (00:00)</span></label>
+      <input id="timeSlider" type="range" min="0" max="200" step="60" value="0"/>
+      <p class="note" style="margin:6px 0 0">Move to recolor arterial roads from the 24h quality pack (HDOP / n<sub>LOS</sub>).</p>
     </div>
     <label>Quality layer (routing costs)</label>
     <input id="layer" type="number" min="0" value="0"/>

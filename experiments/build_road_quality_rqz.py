@@ -58,7 +58,7 @@ from gnss_gpu.io.road_quality_pack import (
 )
 from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.terrain_horizon import HorizonConfig, TerrainHorizonMask
-from gnss_gpu.urban_signal_sim import _sat_elevation_azimuth
+from gnss_gpu.urban_signal_sim import ecef_to_lla
 
 
 WGS84_A = 6378137.0
@@ -190,6 +190,19 @@ def _sample_dem_wgs84_bilinear(
     return out
 
 
+def _ecef_to_enu_matrix(lat_rad: float, lon_rad: float) -> np.ndarray:
+    sin_lat, cos_lat = math.sin(lat_rad), math.cos(lat_rad)
+    sin_lon, cos_lon = math.sin(lon_rad), math.cos(lon_rad)
+    return np.array(
+        [
+            [-sin_lon, cos_lon, 0.0],
+            [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+            [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+        ],
+        dtype=np.float64,
+    )
+
+
 def _cpu_preprocess_chunk(
     rx_chunk: np.ndarray,
     sat_b: np.ndarray,
@@ -198,23 +211,34 @@ def _cpu_preprocess_chunk(
     mask_rad: float,
     terrain_mask: TerrainHorizonMask | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return (visible, sat_work) with point-major layout [n_p*n_t, n_sat]."""
+    """Return (visible, sat_work) with point-major layout [n_p*n_t, n_sat].
+
+    Elevation mask is vectorized per receiver (all epochs/sats in one matmul).
+    Terrain horizon is optional and much slower (kept for parity with area-map).
+    """
     n_p = rx_chunk.shape[0]
     sat_flat = np.tile(sat_b, (n_p, 1, 1))
     sat_work = np.array(sat_flat, copy=True)
     visible = np.zeros((n_p * n_t, n_sat), dtype=bool)
+
     for pi in range(n_p):
         rx = rx_chunk[pi]
-        for ti in range(n_t):
-            idx = pi * n_t + ti
-            sats = sat_b[ti]
-            el, _az = _sat_elevation_azimuth(rx, sats)
-            vis = el >= mask_rad
-            if terrain_mask is not None:
-                terr_vis = terrain_mask.terrain_visible_mask(rx, sats)
-                vis = np.logical_and(vis, terr_vis)
-            visible[idx] = vis
-            sat_work[idx][~vis] = np.nan
+        lat, lon, _alt = ecef_to_lla(float(rx[0]), float(rx[1]), float(rx[2]))
+        r_enu = _ecef_to_enu_matrix(float(lat), float(lon))
+        # sat_b: (n_t, n_sat, 3) → elevations for this receiver in one shot
+        diff = sat_b - rx.reshape(1, 1, 3)
+        enu = np.einsum("ij,tnj->tni", r_enu, diff)
+        horiz = np.hypot(enu[:, :, 0], enu[:, :, 1])
+        el = np.arctan2(enu[:, :, 2], horiz)
+        vis = el >= mask_rad  # (n_t, n_sat)
+        if terrain_mask is not None:
+            # Slow path: per-epoch terrain horizon (same cost model as area-map CPU).
+            for ti in range(n_t):
+                terr_vis = terrain_mask.terrain_visible_mask(rx, sat_b[ti])
+                vis[ti] = np.logical_and(vis[ti], terr_vis)
+        sl = slice(pi * n_t, (pi + 1) * n_t)
+        visible[sl] = vis
+        sat_work[sl][~vis] = np.nan
     return visible, sat_work
 
 
@@ -261,11 +285,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dem-auto-download", action="store_true")
     p.add_argument("--dem-auto-out", type=Path, default=Path("experiments/results/rqz_auto_dem.tif"))
     p.add_argument("--dem-auto-zoom", type=int, default=12)
+    p.add_argument(
+        "--terrain-prefilter",
+        action="store_true",
+        help="Enable DEM horizon prefilter (accurate but MUCH slower on CPU). "
+        "Default off: DEM is still used for --rx-alt-mode dem.",
+    )
     p.add_argument("--terrain-max-distance-m", type=float, default=20000.0)
     p.add_argument("--terrain-step-m", type=float, default=60.0)
     p.add_argument("--terrain-azimuth-step-deg", type=float, default=2.0)
     p.add_argument("--terrain-cache-resolution-m", type=float, default=50.0)
     p.add_argument("--terrain-margin-deg", type=float, default=0.0)
+    p.add_argument(
+        "--hdop-mode",
+        type=str,
+        choices=["rep", "none"],
+        default="rep",
+        help="rep=HDOP on one sample/way (default); none=skip HDOP (fastest, n_LOS only).",
+    )
     p.add_argument("--hdop-step", type=float, default=0.5)
     p.add_argument("--n-los-step", type=float, default=1.0)
     p.add_argument(
@@ -347,13 +384,14 @@ def main() -> None:
     )
     # One representative sample per way for HDOP (mid point). n_LOS still uses all samples.
     is_hdop_rep = np.zeros(len(points), dtype=bool)
-    for idxs in way_to_idxs.values():
-        if not idxs:
-            continue
-        is_hdop_rep[idxs[len(idxs) // 2]] = True
+    if str(args.hdop_mode) == "rep":
+        for idxs in way_to_idxs.values():
+            if not idxs:
+                continue
+            is_hdop_rep[idxs[len(idxs) // 2]] = True
     print(
         f"[rqz] ways with samples: {len(way_ids)} "
-        f"(HDOP on {int(np.count_nonzero(is_hdop_rep))} rep points, not every sample)",
+        f"hdop_mode={args.hdop_mode} hdop_reps={int(np.count_nonzero(is_hdop_rep))}",
         flush=True,
     )
 
@@ -404,21 +442,29 @@ def main() -> None:
     dem_grid: np.ndarray | None = None
     dem_meta: tuple[float, float, float, float] | None = None
     if dem_path is not None:
-        terrain_mask = TerrainHorizonMask(
-            dem_path,
-            HorizonConfig(
-                max_distance_m=float(args.terrain_max_distance_m),
-                sample_step_m=float(args.terrain_step_m),
-                azimuth_step_deg=float(args.terrain_azimuth_step_deg),
-                cache_resolution_m=float(args.terrain_cache_resolution_m),
-                margin_deg=float(args.terrain_margin_deg),
-            ),
-        )
         dem_grid, lat0, lon0, lat_step, lon_step = _load_dem_wgs84_grid(dem_path)
         dem_meta = (lat0, lon0, lat_step, lon_step)
-        print(f"[rqz] terrain prefilter: enabled ({dem_path})", flush=True)
+        print(f"[rqz] DEM loaded for altitude: {dem_path}", flush=True)
+        if bool(args.terrain_prefilter):
+            terrain_mask = TerrainHorizonMask(
+                dem_path,
+                HorizonConfig(
+                    max_distance_m=float(args.terrain_max_distance_m),
+                    sample_step_m=float(args.terrain_step_m),
+                    azimuth_step_deg=float(args.terrain_azimuth_step_deg),
+                    cache_resolution_m=float(args.terrain_cache_resolution_m),
+                    margin_deg=float(args.terrain_margin_deg),
+                ),
+            )
+            print("[rqz] terrain prefilter: ENABLED (slow CPU path)", flush=True)
+        else:
+            print(
+                "[rqz] terrain prefilter: disabled (fast). "
+                "Pass --terrain-prefilter to match area-map CPU horizon.",
+                flush=True,
+            )
     else:
-        print("[rqz] terrain prefilter: disabled", flush=True)
+        print("[rqz] DEM/terrain: disabled", flush=True)
 
     point_lats = np.asarray([float(p["lat_deg"]) for p in points], dtype=np.float64)
     point_lons = np.asarray([float(p["lon_deg"]) for p in points], dtype=np.float64)
@@ -578,11 +624,17 @@ def main() -> None:
             "include_pedestrian": bool(args.include_pedestrian),
             "elevation_mask_deg": float(args.elevation_mask_deg),
             "rx_alt_mode": str(args.rx_alt_mode),
+            "terrain_prefilter": bool(args.terrain_prefilter),
+            "hdop_mode": str(args.hdop_mode),
             "n_points": int(n_points),
             "n_epochs": int(n_epochs),
             "n_epochs_processed": int(n_epochs_processed),
             "start_utc": str(args.start_utc),
             "tow_start_s": float(tow_start),
+            "time_preprocess_s": float(t_pre),
+            "time_raytrace_s": float(t_ray),
+            "time_hdop_s": float(t_hdop),
+            "time_agg_s": float(t_agg),
         },
     )
     out = write_road_quality_pack(args.out, pack)

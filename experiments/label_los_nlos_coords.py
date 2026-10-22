@@ -25,9 +25,12 @@ Genova notes (from area-map / rqz pipeline)::
 
   - Prefer ``--rx-alt-mode dem --dem-auto-download`` (fixed alt=1.5 m
     ellipsoidal is wrong on hills).
-  - AWS elevation tiles → ``--geoid-correction none`` (default).
-  - When building OSM mesh, pass the same DEM to
-    ``fetch_osm_buildings_bbox.py --dem-path`` so footprints sit on terrain.
+  - ``dem_download`` AWS elevation tiles are **orthometric (EGM96-like)**.
+    For Genova / that auto-DEM use ``--geoid-correction egm96`` on **both**
+    labeling and OSM mesh fetch — otherwise RX+buildings sit ~45–50 m low
+    in ECEF and LOS/terrain collisions are wrong (not only the Cesium view).
+  - When building OSM mesh, pass the same DEM + same geoid flag to
+    ``fetch_osm_buildings_bbox.py --dem-path --geoid-correction egm96``.
   - Terrain horizon reaches ``--terrain-max-distance-m`` (default 20 km);
     DEM auto bbox buffer should cover that.
   - Typical city bbox used historically:

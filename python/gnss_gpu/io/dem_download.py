@@ -1,4 +1,11 @@
-"""Automatic DEM download utilities (public elevation tiles)."""
+"""Automatic DEM download utilities (public elevation tiles).
+
+AWS ``elevation-tiles-prod`` GeoTIFFs are typically **orthometric**
+(EGM96-like Terrarium heights), not WGS84 ellipsoidal. When using
+``download_dem_for_bbox`` for ECEF ray tracing / OSM bases, pass
+``geoid_correction="egm96"`` into ``NativeDemSampler`` / CLI
+``--geoid-correction egm96`` so ``h_ell = H + N``.
+"""
 
 from __future__ import annotations
 

@@ -20,12 +20,11 @@ Height datum (EPSG:6697):
     The ``geoid_correction`` kwarg on ``PlateauLoader`` / ``load_plateau``
     selects the model:
         - ``"egm96"`` (**default**): pyproj + PROJ ``egm96_15.gtx`` vertical
-          grid.  Tries the local PROJ data directory first; if the grid is
-          missing (minimal wheels, Colab), temporarily enables **PROJ
-          network** so the same GTX can be fetched from ``cdn.proj.org``
-          (same mechanism as ``PROJ_NETWORK=ON``).  Raises ``ImportError``
-          if pyproj is not installed, or ``RuntimeError`` if both local
-          and network-backed setup fail.
+          grid.  Order: local PROJ data → PROJ network → HTTP download of
+          ``egm96_15.gtx`` into ``~/.cache/gnss_gpu/proj`` (appended to
+          PROJ search path; never replaces ``proj.db``).  Raises
+          ``ImportError`` if pyproj is missing, or ``RuntimeError`` if all
+          attempts fail.
         - ``<float>``: a constant N in metres (use 36.7 for Tokyo
           quick-and-dirty work).
         - callable ``N(lat_deg, lon_deg) -> float``: custom geoid model
@@ -57,15 +56,83 @@ GeoidCorrection = Union[None, str, float, Callable[[float, float], float]]
 GEOID_CORRECTION_DEFAULT: str = "egm96"
 
 
+_EGM96_GTX_URL = "https://download.osgeo.org/proj/vdatum/egm96_15/egm96_15.gtx"
+_EGM96_GTX_NAME = "egm96_15.gtx"
+
+
+def _egm96_cache_dir() -> Path:
+    """Writable cache for the EGM96 GTX (does not replace PROJ's proj.db)."""
+    override = os.environ.get("GNSS_GPU_PROJ_GRID_DIR", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".cache" / "gnss_gpu" / "proj"
+
+
+def _ensure_egm96_gtx_downloaded() -> Path:
+    """Download ``egm96_15.gtx`` into the cache if missing; return its path."""
+    cache = _egm96_cache_dir()
+    cache.mkdir(parents=True, exist_ok=True)
+    dest = cache / _EGM96_GTX_NAME
+    if dest.is_file() and dest.stat().st_size > 1_000_000:
+        return dest
+
+    import urllib.error
+    import urllib.request
+
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    print(f"EGM96: downloading {_EGM96_GTX_URL} → {dest}", flush=True)
+    try:
+        with urllib.request.urlopen(_EGM96_GTX_URL, timeout=300) as resp:
+            data = resp.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"Failed to download EGM96 grid from {_EGM96_GTX_URL}: {exc}"
+        ) from exc
+    if len(data) < 1_000_000:
+        raise RuntimeError(
+            f"EGM96 download too small ({len(data)} bytes); expected egm96_15.gtx"
+        )
+    tmp.write_bytes(data)
+    tmp.replace(dest)
+    print(f"EGM96: saved {dest} ({dest.stat().st_size // (1024 * 1024)} MiB)", flush=True)
+    return dest
+
+
+def _prepend_proj_data_dir(extra: Path) -> None:
+    """Add ``extra`` to PROJ search path **without** dropping proj.db.
+
+    Setting ``PROJ_DATA`` to a folder that only contains the GTX breaks
+    CRS transforms (``Error creating Transformer from CRS``). Always
+    append alongside the existing pyproj data dir.
+    """
+    import pyproj
+
+    extra_s = str(extra.resolve())
+    current = pyproj.datadir.get_data_dir()
+    parts = [p for p in current.split(os.pathsep) if p]
+    if extra_s not in parts:
+        pyproj.datadir.append_data_dir(extra_s)
+    # Env for child processes: cache first, then full pyproj data dir(s).
+    merged = list(
+        dict.fromkeys(
+            [extra_s]
+            + [p for p in pyproj.datadir.get_data_dir().split(os.pathsep) if p]
+        )
+    )
+    os.environ["PROJ_DATA"] = os.pathsep.join(merged)
+
+
 def _make_egm96_lookup() -> Callable[[float, float], float]:
     """Return ``N(lat_deg, lon_deg)`` from EGM96 via PROJ ``egm96_15.gtx``.
 
-    Tries a local grid first.  If that fails (missing file / bad pipeline),
-    enables PROJ **network** temporarily so PROJ can download the same
-    grid from ``cdn.proj.org``, then restores the previous network flag.
+    Order:
+      1. local PROJ data / already-cached GTX
+      2. PROJ network (cdn.proj.org)
+      3. HTTP download of ``egm96_15.gtx`` into ``~/.cache/gnss_gpu/proj``
+         (prepended to PROJ_DATA — never replaces the default data dir)
 
     Raises ``ImportError`` if pyproj is not installed; ``RuntimeError`` if
-    both attempts fail.
+    all attempts fail.
     """
     try:
         import pyproj
@@ -75,6 +142,11 @@ def _make_egm96_lookup() -> Callable[[float, float], float]:
             "geoid_correction='egm96' requires pyproj; install with "
             "`pip install pyproj`"
         ) from exc
+
+    # If a previous Colab cell already downloaded the GTX, pick it up.
+    cache = _egm96_cache_dir()
+    if (cache / _EGM96_GTX_NAME).is_file():
+        _prepend_proj_data_dir(cache)
 
     def _from_grid() -> Callable[[float, float], float]:
         src = pyproj.CRS.from_proj4(
@@ -95,33 +167,47 @@ def _make_egm96_lookup() -> Callable[[float, float], float]:
         return _n
 
     _exc_types = (ProjError, RuntimeError, OSError, ValueError)
+    errors: list[BaseException] = []
 
     try:
         return _from_grid()
     except _exc_types as err_local:
-        prev_net = pyproj.network.is_network_enabled()
+        errors.append(err_local)
+
+    prev_net = pyproj.network.is_network_enabled()
+    try:
+        pyproj.network.set_network_enabled(True)
         try:
-            pyproj.network.set_network_enabled(True)
-            try:
-                fn = _from_grid()
-            except _exc_types as err_net:
-                raise RuntimeError(
-                    "EGM96 setup failed without local egm96_15.gtx; PROJ "
-                    "network retry also failed. local=%r; network=%r. "
-                    "Install OSGeo PROJ-data, set PROJ_DATA, or allow HTTPS "
-                    "to cdn.proj.org."
-                    % (err_local, err_net)
-                ) from err_net
-        finally:
-            pyproj.network.set_network_enabled(prev_net)
-        if not prev_net:
-            warnings.warn(
-                "PlateauLoader: local EGM96 grid missing; used PROJ network "
-                "to obtain egm96_15.gtx (same as PROJ_NETWORK=ON).",
-                UserWarning,
-                stacklevel=2,
-            )
-        return fn
+            fn = _from_grid()
+        except _exc_types as err_net:
+            errors.append(err_net)
+            fn = None
+        else:
+            if not prev_net:
+                warnings.warn(
+                    "PlateauLoader: local EGM96 grid missing; used PROJ network "
+                    "to obtain egm96_15.gtx (same as PROJ_NETWORK=ON).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            return fn
+    finally:
+        pyproj.network.set_network_enabled(prev_net)
+
+    # Explicit download (default path on Colab / minimal wheels).
+    try:
+        gtx = _ensure_egm96_gtx_downloaded()
+        _prepend_proj_data_dir(gtx.parent)
+        return _from_grid()
+    except _exc_types as err_dl:
+        errors.append(err_dl)
+        raise RuntimeError(
+            "EGM96 setup failed after local / PROJ-network / HTTP download "
+            f"attempts. errors={errors!r}. "
+            f"Manual: download {_EGM96_GTX_URL} into a folder and "
+            "pyproj.datadir.append_data_dir(that_folder) "
+            "(do NOT set PROJ_DATA to only that folder — you need proj.db)."
+        ) from err_dl
 
 
 def _resolve_geoid_correction(spec: GeoidCorrection):

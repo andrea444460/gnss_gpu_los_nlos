@@ -83,6 +83,8 @@ def download_dem_for_bbox(
     try:
         mosaic, transform = merge(srcs)
         profile = srcs[0].profile.copy()
+        # AWS elevation-tiles are Web Mercator; merge sometimes writes a bare
+        # LOCAL_CS that pyproj cannot transform from EPSG:4326. Force 3857.
         profile.update(
             driver="GTiff",
             height=mosaic.shape[1],
@@ -90,6 +92,7 @@ def download_dem_for_bbox(
             transform=transform,
             count=mosaic.shape[0],
             compress="deflate",
+            crs="EPSG:3857",
         )
     finally:
         for s in srcs:

@@ -24,6 +24,35 @@ def parse_geoid_correction_arg(value: str) -> GeoidCorrection:
             f"geoid_correction: expected 'none', 'egm96', or float; got {value!r}"
         ) from exc
 
+
+def _normalize_dem_crs(crs) -> object:
+    """Map broken AWS-tile LOCAL_CS Pseudo-Mercator WKT to EPSG:3857.
+
+    ``rasterio.merge`` of elevation-tiles sometimes writes a LOCAL_CS that
+    names Pseudo-Mercator but is not a PROJCRS, so pyproj cannot build
+    ``EPSG:4326 ↔ DEM`` transformers. Treat that (and missing CRS) as 3857.
+    """
+    if crs is None:
+        return "EPSG:3857"
+    try:
+        epsg = crs.to_epsg()
+    except Exception:
+        epsg = None
+    if epsg in (3857, 900913):
+        return "EPSG:3857"
+    wkt = ""
+    try:
+        wkt = crs.to_wkt() or ""
+    except Exception:
+        wkt = str(crs)
+    wkt_u = wkt.upper()
+    if "PSEUDO-MERCATOR" in wkt_u or "PSEUDO_MERCATOR" in wkt_u or "3857" in wkt_u:
+        return "EPSG:3857"
+    if "LOCAL_CS" in wkt_u:
+        # Ambiguous local frame from tile merge — AWS tiles are Web Mercator.
+        return "EPSG:3857"
+    return crs
+
 WGS84_A = 6378137.0
 WGS84_F = 1.0 / 298.257223563
 WGS84_E2 = 2.0 * WGS84_F - WGS84_F * WGS84_F
@@ -61,7 +90,7 @@ class NativeDemSampler:
     ) -> None:
         self.path = Path(dem_path)
         self._ds = rasterio.open(str(self.path))
-        self.crs = self._ds.crs or "EPSG:4326"
+        self.crs = _normalize_dem_crs(self._ds.crs)
         self.transform = self._ds.transform
         self.nodata = self._ds.nodata
         self.heights = np.asarray(self._ds.read(1), dtype=np.float64)
@@ -72,8 +101,7 @@ class NativeDemSampler:
         except Exception as exc:
             raise RuntimeError(
                 f"Cannot build CRS transformers for DEM {self.path} "
-                f"(crs={self.crs!r}). If PROJ_DATA was set to a folder that "
-                f"only contains egm96_15.gtx, unset it or put proj.db first. "
+                f"(crs={self.crs!r}, raw={self._ds.crs!r}). "
                 f"Underlying error: {exc}"
             ) from exc
         self._geoid_fn, self.geoid_label = _resolve_geoid_correction(geoid_correction)

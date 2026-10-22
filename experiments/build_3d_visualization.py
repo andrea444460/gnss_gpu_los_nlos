@@ -1757,8 +1757,8 @@ def generate_html(
       </label>
     </div>
     <div class="row" id="globeModeRow">
-      <label title="Ellipsoid globe matches WGS84 RX+LOS mesh. World Terrain often buries ellipsoidal geometry.">
-        <input type="checkbox" id="chkEllipsoidGlobe" checked/> Ellipsoid globe (align RX + buildings)
+      <label title="OFF (default): Cesium World Terrain under RX+LOS mesh. ON: bare ellipsoid — inland cities look like they float (h&gt;0 above the globe).">
+        <input type="checkbox" id="chkEllipsoidGlobe"/> Bare ellipsoid globe (debug only)
       </label>
     </div>
     <div class="row" id="stadiumTilesetToggleRow" style="display:none;">
@@ -1850,6 +1850,7 @@ const viewer = new Cesium.Viewer('cesiumContainer', {{
   selectionIndicator: false,
 }});
 
+// depthTest off: World Terrain can sit slightly above ellipsoidal LOS mesh and would hide it.
 viewer.scene.globe.depthTestAgainstTerrain = false;
 viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a5270');
 viewer.scene.globe.showGroundAtmosphere = true;
@@ -1875,27 +1876,35 @@ let localStadiumTileset = null;
 let losMeshModel = null;
 let worldTerrain = null;
 
-async function applyGlobeMode(useEllipsoid) {{
-  viewer.scene.globe.depthTestAgainstTerrain = !useEllipsoid;
-  if (useEllipsoid) {{
+async function applyGlobeMode(useBareEllipsoid) {{
+  // Bare ellipsoid: imagery sits at h≈0, so Genova (~50–200 m ellipsoidal) looks "flying".
+  // World Terrain: ground rises under the LOS mesh (preferred for viz).
+  if (useBareEllipsoid) {{
     viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
-  }} else if (ionToken) {{
-    try {{
-      if (!worldTerrain) {{
-        worldTerrain = await Cesium.createWorldTerrainAsync({{
-          requestWaterMask: true,
-          requestVertexNormals: true,
-        }});
-      }}
-      viewer.terrainProvider = worldTerrain;
-    }} catch (e) {{
-      console.warn('World terrain failed:', e);
+    viewer.scene.globe.depthTestAgainstTerrain = false;
+    return;
+  }}
+  if (!ionToken) {{
+    console.warn('No Ion token — cannot load World Terrain; staying on ellipsoid.');
+    return;
+  }}
+  try {{
+    if (!worldTerrain) {{
+      worldTerrain = await Cesium.createWorldTerrainAsync({{
+        requestWaterMask: true,
+        requestVertexNormals: true,
+      }});
     }}
+    viewer.terrainProvider = worldTerrain;
+    // Keep depth test off so slightly-low terrain does not bury RX/mesh.
+    viewer.scene.globe.depthTestAgainstTerrain = false;
+  }} catch (e) {{
+    console.warn('World terrain failed:', e);
   }}
 }}
 
-// Default: ellipsoid globe so RX + LOS mesh (WGS84 h) are not buried under Ion terrain.
-applyGlobeMode(true);
+// Default: World Terrain (not bare ellipsoid) so city meshes do not float above the map.
+applyGlobeMode(false);
 const chkEllipsoidGlobe = document.getElementById('chkEllipsoidGlobe');
 if (chkEllipsoidGlobe) {{
   chkEllipsoidGlobe.addEventListener('change', (e) => {{

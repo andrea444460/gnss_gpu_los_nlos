@@ -273,6 +273,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--default-alt-m", type=float, default=1.5)
     p.add_argument("--geoid-correction", default="none", help="egm96 | constant N [m] | none")
     p.add_argument("--az-step-deg", type=float, default=1.0)
+    p.add_argument(
+        "--fov-zero-deg",
+        type=float,
+        default=45.0,
+        help="Linear FOV x=0 azimuth from North, clockwise (default 45=NE; use 0 for North)",
+    )
     p.add_argument("--probe-m", type=float, default=8000.0, help="Synthetic ray length for building BVH")
     p.add_argument("--n-bisect", type=int, default=8, help="Binary-search iterations (~90/2^n deg)")
     p.add_argument("--terrain-max-distance-m", type=float, default=20000.0)
@@ -586,10 +592,17 @@ def main() -> int:
                 mono_tracks=bool(args.mono_tracks),
             )
             ax_f = fig.add_subplot(2, n, n + i + 1)
-            ax_f.plot(az_deg, el, color="C0", lw=1.0)
+            # Linear FOV: wrap so x=0 is --fov-zero-deg (default NE=45° from North).
+            fov0 = float(args.fov_zero_deg) % 360.0
+            az_fov = np.mod(az_deg - fov0, 360.0)
+            order = np.argsort(az_fov)
+            ax_f.plot(az_fov[order], el[order], color="C0", lw=1.0)
             ax_f.set_xlim(0, 360)
             ax_f.set_ylim(0, float(args.ylim_deg))
-            ax_f.set_xlabel("360° FOV (0°=N)")
+            zero_lbl = {0.0: "N", 45.0: "NE", 90.0: "E", 135.0: "SE", 180.0: "S", 225.0: "SW", 270.0: "W", 315.0: "NW"}.get(
+                fov0, f"{fov0:g}° from N"
+            )
+            ax_f.set_xlabel(f"360° FOV (Starting direction {zero_lbl})")
             ax_f.set_title(f"Receiver [{pt['lat']:.2f}, {pt['lon']:.2f}]")
             ax_f.grid(True, alpha=0.3)
             if i == 0:

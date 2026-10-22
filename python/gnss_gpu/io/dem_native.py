@@ -61,13 +61,21 @@ class NativeDemSampler:
     ) -> None:
         self.path = Path(dem_path)
         self._ds = rasterio.open(str(self.path))
-        self.crs = self._ds.crs
+        self.crs = self._ds.crs or "EPSG:4326"
         self.transform = self._ds.transform
         self.nodata = self._ds.nodata
         self.heights = np.asarray(self._ds.read(1), dtype=np.float64)
         self.rows, self.cols = self.heights.shape
-        self._to_dem = Transformer.from_crs("EPSG:4326", self.crs, always_xy=True)
-        self._to_wgs84 = Transformer.from_crs(self.crs, "EPSG:4326", always_xy=True)
+        try:
+            self._to_dem = Transformer.from_crs("EPSG:4326", self.crs, always_xy=True)
+            self._to_wgs84 = Transformer.from_crs(self.crs, "EPSG:4326", always_xy=True)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Cannot build CRS transformers for DEM {self.path} "
+                f"(crs={self.crs!r}). If PROJ_DATA was set to a folder that "
+                f"only contains egm96_15.gtx, unset it or put proj.db first. "
+                f"Underlying error: {exc}"
+            ) from exc
         self._geoid_fn, self.geoid_label = _resolve_geoid_correction(geoid_correction)
         valid = np.isfinite(self.heights)
         if self.nodata is not None and math.isfinite(float(self.nodata)):

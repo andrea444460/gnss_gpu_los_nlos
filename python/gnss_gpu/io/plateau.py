@@ -98,25 +98,49 @@ def _ensure_egm96_gtx_downloaded() -> Path:
     return dest
 
 
-def _prepend_proj_data_dir(extra: Path) -> None:
-    """Add ``extra`` to PROJ search path **without** dropping proj.db.
+def _register_egm96_grid_dir(extra: Path) -> None:
+    """Register a directory that contains ``egm96_15.gtx`` with PROJ/pyproj.
 
-    Setting ``PROJ_DATA`` to a folder that only contains the GTX breaks
-    CRS transforms (``Error creating Transformer from CRS``). Always
-    append alongside the existing pyproj data dir.
+    Critical: the pyproj ``share/proj`` dir (with ``proj.db``) must stay
+    **first** in ``PROJ_DATA``. Putting a GTX-only cache first breaks
+    ``Transformer.from_crs`` in this and child processes
+    (``Error creating Transformer from CRS``).
+
+    Prefer copying/symlinking the GTX into the real PROJ data dir when
+    writable; otherwise append the cache dir after the default data dir.
     """
     import pyproj
+    import shutil
 
-    extra_s = str(extra.resolve())
+    extra = extra.resolve()
+    gtx_src = extra / _EGM96_GTX_NAME
+    if not gtx_src.is_file():
+        return
+
+    # Prefer installing into the primary PROJ data dir (no PROJ_DATA surgery).
+    primary = Path(pyproj.datadir.get_data_dir().split(os.pathsep)[0])
+    gtx_dst = primary / _EGM96_GTX_NAME
+    if not gtx_dst.is_file():
+        try:
+            shutil.copy2(gtx_src, gtx_dst)
+            print(f"EGM96: installed grid → {gtx_dst}", flush=True)
+            return
+        except OSError:
+            pass
+
+    if gtx_dst.is_file():
+        return
+
+    # Fallback: append cache AFTER default dirs (never prepend).
+    extra_s = str(extra)
     current = pyproj.datadir.get_data_dir()
     parts = [p for p in current.split(os.pathsep) if p]
     if extra_s not in parts:
         pyproj.datadir.append_data_dir(extra_s)
-    # Env for child processes: cache first, then full pyproj data dir(s).
     merged = list(
         dict.fromkeys(
-            [extra_s]
-            + [p for p in pyproj.datadir.get_data_dir().split(os.pathsep) if p]
+            [p for p in pyproj.datadir.get_data_dir().split(os.pathsep) if p]
+            + [extra_s]
         )
     )
     os.environ["PROJ_DATA"] = os.pathsep.join(merged)
@@ -143,10 +167,10 @@ def _make_egm96_lookup() -> Callable[[float, float], float]:
             "`pip install pyproj`"
         ) from exc
 
-    # If a previous Colab cell already downloaded the GTX, pick it up.
+    # If a previous Colab cell already downloaded the GTX, register it.
     cache = _egm96_cache_dir()
     if (cache / _EGM96_GTX_NAME).is_file():
-        _prepend_proj_data_dir(cache)
+        _register_egm96_grid_dir(cache)
 
     def _from_grid() -> Callable[[float, float], float]:
         src = pyproj.CRS.from_proj4(
@@ -197,16 +221,15 @@ def _make_egm96_lookup() -> Callable[[float, float], float]:
     # Explicit download (default path on Colab / minimal wheels).
     try:
         gtx = _ensure_egm96_gtx_downloaded()
-        _prepend_proj_data_dir(gtx.parent)
+        _register_egm96_grid_dir(gtx.parent)
         return _from_grid()
     except _exc_types as err_dl:
         errors.append(err_dl)
         raise RuntimeError(
             "EGM96 setup failed after local / PROJ-network / HTTP download "
             f"attempts. errors={errors!r}. "
-            f"Manual: download {_EGM96_GTX_URL} into a folder and "
-            "pyproj.datadir.append_data_dir(that_folder) "
-            "(do NOT set PROJ_DATA to only that folder — you need proj.db)."
+            f"Manual: download {_EGM96_GTX_URL} into pyproj's share/proj "
+            "(same folder as proj.db). Do NOT set PROJ_DATA to a GTX-only folder."
         ) from err_dl
 
 

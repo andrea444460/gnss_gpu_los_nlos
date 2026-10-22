@@ -181,7 +181,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--reference-out",
         type=Path,
-        default="",
+        default=None,
         help="Where to write UrbanNav-style reference CSV (default: beside --out-html)",
     )
     p.add_argument(
@@ -274,9 +274,12 @@ def main() -> None:
             flush=True,
         )
 
+    # Path("") resolves to cwd (a directory) — never treat empty/None as a file path.
     ref_out = args.reference_out
-    if not str(ref_out):
+    if ref_out is None or str(ref_out).strip() in ("", "."):
         ref_out = args.out_html.with_name(args.out_html.stem + "_reference.csv")
+    elif ref_out.exists() and ref_out.is_dir():
+        raise SystemExit(f"--reference-out is a directory, need a .csv file path: {ref_out}")
 
     write_urbannav_reference_csv(
         out_path=ref_out.resolve(),
@@ -293,7 +296,13 @@ def main() -> None:
     )
 
     build_py = (args.repo_root / "experiments" / "build_3d_visualization.py").resolve()
-    py_path = str(args.repo_root / "python")
+    # Extensions live under build/ (same as Colab / TERF pipelines).
+    py_path = os.pathsep.join(
+        [
+            str(args.repo_root / "python"),
+            str(args.repo_root / "build"),
+        ]
+    )
     cmd = [
         str(args.python),
         str(build_py),

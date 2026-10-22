@@ -224,7 +224,8 @@ def _parse_args() -> argparse.Namespace:
         "--ellipsoid-height-offset-m",
         type=float,
         default=0.0,
-        help="Forwarded to build_3d_visualization (positive lifts RX/traj/rays vs WGS84 h when Ion terrain looks high).",
+        help="Forwarded to build_3d_visualization: lifts RX+rays+LOS mesh GLB together "
+        "(prefer Ellipsoid globe checkbox in the HTML first).",
     )
     viz.add_argument(
         "--cesium-tileset-dir",

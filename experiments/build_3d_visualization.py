@@ -1220,13 +1220,16 @@ def compute_all_epochs(
         lat, lon, alt = ecef_to_lla(*p)
         traj.append([math.degrees(lat), math.degrees(lon), alt])
 
-    pivot_ecef = np.mean(positions, axis=0).tolist()
+    # Pivot must match display frame (same offset as RX) so the LOS mesh GLB
+    # and receiver stay co-located in Cesium.
+    pivot_ecef = np.mean(positions_disp, axis=0).tolist()
 
     return {
         "epochs": epochs_data,
         "trajectory": traj,
         "area": area_name,
         "pivot_ecef": pivot_ecef,
+        "viewerHeightOffsetM": float(dh_off),
         "plateauModel": None,
         "cnrByPrn": cnr_by_prn,
         "cnrObsSource": cnr_obs_source or None,
@@ -1749,8 +1752,13 @@ def generate_html(
       </label>
     </div>
     <div class="row" id="osmToggleRow" style="display:none;">
-      <label title="Hide Cesium Ion OSM 3D buildings (compare with PLATEAU GLB)">
-        <input type="checkbox" id="chkHideOsm"/> Hide Ion OSM buildings
+      <label title="Hide Cesium Ion OSM 3D buildings (terrain-clamped; hide when comparing LOS mesh)">
+        <input type="checkbox" id="chkHideOsm" checked/> Hide Ion OSM buildings
+      </label>
+    </div>
+    <div class="row" id="globeModeRow">
+      <label title="Ellipsoid globe matches WGS84 RX+LOS mesh. World Terrain often buries ellipsoidal geometry.">
+        <input type="checkbox" id="chkEllipsoidGlobe" checked/> Ellipsoid globe (align RX + buildings)
       </label>
     </div>
     <div class="row" id="stadiumTilesetToggleRow" style="display:none;">
@@ -1842,7 +1850,7 @@ const viewer = new Cesium.Viewer('cesiumContainer', {{
   selectionIndicator: false,
 }});
 
-viewer.scene.globe.depthTestAgainstTerrain = true;
+viewer.scene.globe.depthTestAgainstTerrain = false;
 viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a5270');
 viewer.scene.globe.showGroundAtmosphere = true;
 viewer.scene.globe.enableLighting = false;
@@ -1858,6 +1866,43 @@ viewer.scene.globe.enableLighting = false;
   ];
 }})();
 
+const datasets = {data_json};
+const SHOW_TRAJECTORY_POLYLINE = {json.dumps(bool(show_trajectory_polyline))};
+const tilesetSpec = datasets[0] && datasets[0].cesiumTileset;
+const hasTexturedTileset = !!(tilesetSpec && tilesetSpec.url);
+const hasLosMesh = !!(datasets[0] && datasets[0].plateauModel && datasets[0].plateauModel.url);
+let localStadiumTileset = null;
+let losMeshModel = null;
+let worldTerrain = null;
+
+async function applyGlobeMode(useEllipsoid) {{
+  viewer.scene.globe.depthTestAgainstTerrain = !useEllipsoid;
+  if (useEllipsoid) {{
+    viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+  }} else if (ionToken) {{
+    try {{
+      if (!worldTerrain) {{
+        worldTerrain = await Cesium.createWorldTerrainAsync({{
+          requestWaterMask: true,
+          requestVertexNormals: true,
+        }});
+      }}
+      viewer.terrainProvider = worldTerrain;
+    }} catch (e) {{
+      console.warn('World terrain failed:', e);
+    }}
+  }}
+}}
+
+// Default: ellipsoid globe so RX + LOS mesh (WGS84 h) are not buried under Ion terrain.
+applyGlobeMode(true);
+const chkEllipsoidGlobe = document.getElementById('chkEllipsoidGlobe');
+if (chkEllipsoidGlobe) {{
+  chkEllipsoidGlobe.addEventListener('change', (e) => {{
+    applyGlobeMode(!!e.target.checked);
+  }});
+}}
+
 let osmBuildingsTileset = null;
 if (ionToken) {{
   const osmRow = document.getElementById('osmToggleRow');
@@ -1866,31 +1911,24 @@ if (ionToken) {{
     viewer.clock.shouldAnimate = false;
     viewer.clock.currentTime = Cesium.JulianDate.fromIso8601('2024-06-15T03:30:00Z');
     viewer.scene.globe.enableLighting = true;
-    viewer.scene.setTerrain(Cesium.Terrain.fromWorldTerrain({{
-      requestWaterMask: true,
-      requestVertexNormals: true,
-    }}));
   }} catch (e) {{
-    console.warn('World terrain failed:', e);
+    console.warn('Ion clock/lighting setup failed:', e);
   }}
   Cesium.createOsmBuildingsAsync()
     .then(tileset => {{
       osmBuildingsTileset = tileset;
+      // OSM is terrain-clamped; hide by default when showing LOS mesh.
+      tileset.show = !(hasLosMesh || (document.getElementById('chkHideOsm') || {{}}).checked);
+      if (hasLosMesh) {{
+        const chk = document.getElementById('chkHideOsm');
+        if (chk) chk.checked = true;
+      }}
       viewer.scene.primitives.add(tileset);
-      const chk = document.getElementById('chkHideOsm');
-      if (chk && chk.checked) tileset.show = false;
     }})
     .catch(e => console.warn('OSM Buildings (check Ion token assets):', e));
 }} else {{
   console.warn('No CESIUM_ION_TOKEN — terrain/buildings disabled. Open via http://localhost if Ion fails on file://');
 }}
-
-const datasets = {data_json};
-const SHOW_TRAJECTORY_POLYLINE = {json.dumps(bool(show_trajectory_polyline))};
-const tilesetSpec = datasets[0] && datasets[0].cesiumTileset;
-const hasTexturedTileset = !!(tilesetSpec && tilesetSpec.url);
-let localStadiumTileset = null;
-let losMeshModel = null;
 
 if (hasTexturedTileset) {{
   const tsRow = document.getElementById('stadiumTilesetToggleRow');
@@ -2617,7 +2655,13 @@ def _export_plateau_glb_sidecar(
     pivot = np.asarray(ds["pivot_ecef"], dtype=np.float64).reshape(3)
     loader = PlateauLoader(zone=int(plateau_zone))
     building = loader.load_directory(plateau_dir)
-    tri_ecef = building.triangles
+    tri_ecef = np.asarray(building.triangles, dtype=np.float64)
+    dh = float(ds.get("viewerHeightOffsetM") or 0.0)
+    if dh != 0.0:
+        flat = tri_ecef.reshape(-1, 3)
+        flat = apply_ellipsoid_height_shift_ecef(flat, dh)
+        tri_ecef = flat.reshape(tri_ecef.shape)
+        print(f"  PLATEAU GLB: applied ellipsoid height offset {dh:+.3f} m (match RX)")
     base = os.path.splitext(os.path.abspath(out_html))[0]
     glb_path = glb_out_explicit.strip() or (base + "_plateau.glb")
     n_kept, n_tot = export_plateau_roi_glb(
@@ -2633,6 +2677,7 @@ def _export_plateau_glb_sidecar(
         "lat": math.degrees(lat),
         "lon": math.degrees(lon),
         "height": float(h),
+        "alignLosViewer": True,
     }
     print(f"PLATEAU GLB: {glb_path} ({n_kept} / {n_tot} triangles in ROI)")
 
@@ -2652,6 +2697,13 @@ def _export_triangles_glb_sidecar(
     tri_ecef = np.asarray(np.load(triangles_npy), dtype=np.float64)
     if tri_ecef.ndim != 3 or tri_ecef.shape[1:] != (3, 3):
         raise ValueError(f"--triangles-npy must have shape [N,3,3], got {tri_ecef.shape}")
+    # Keep mesh in the same vertical frame as RX (viewerHeightOffsetM).
+    dh = float(ds.get("viewerHeightOffsetM") or 0.0)
+    if dh != 0.0:
+        flat = tri_ecef.reshape(-1, 3)
+        flat = apply_ellipsoid_height_shift_ecef(flat, dh)
+        tri_ecef = flat.reshape(tri_ecef.shape)
+        print(f"  Mesh GLB: applied ellipsoid height offset {dh:+.3f} m (match RX)")
     base = os.path.splitext(os.path.abspath(out_html))[0]
     glb_path = glb_out_explicit.strip() or (base + "_mesh.glb")
     n_kept, n_tot = export_plateau_roi_glb(
@@ -2668,6 +2720,7 @@ def _export_triangles_glb_sidecar(
         "lat": math.degrees(lat),
         "lon": math.degrees(lon),
         "height": float(h),
+        "alignLosViewer": True,
     }
     print(f"Mesh GLB: {glb_path} ({n_kept} / {n_tot} triangles in ROI)")
 
@@ -2852,8 +2905,9 @@ def main(argv=None):
         "--ellipsoid-height-offset-m",
         type=float,
         default=0.0,
-        help="Add this delta [m] to WGS84 ellipsoidal height for every trajectory point after load "
-        "(shifts RX + rays + optional yellow path consistently; try +5…+20 when Cesium terrain looks high vs survey).",
+        help="Add this delta [m] to WGS84 ellipsoidal height after load for RX, rays, trajectory, "
+        "AND the exported LOS mesh GLB (same ECEF normal shift). Prefer the viewer's "
+        "'Ellipsoid globe' checkbox first; use +5…+20 only if World Terrain still looks high.",
     )
     parser.add_argument(
         "--show-trajectory-polyline",

@@ -433,9 +433,14 @@ def main() -> int:
                 cache_resolution_m=float(args.terrain_cache_resolution_m),
                 margin_deg=float(args.terrain_margin_deg),
             )
-            terrain_mask = TerrainHorizonMask(dem_path, cfg)
+            # Same geoid as RX sampling — otherwise orthometric DEM vs ellipsoidal
+            # RX makes terrain look ~N m too low → terrain_blocked≈0.
+            terrain_mask = TerrainHorizonMask(
+                dem_path, cfg, geoid_correction=str(args.geoid_correction)
+            )
             print(
-                f"Terrain horizon: on (max_dist={cfg.max_distance_m:g}m, "
+                f"Terrain horizon: on (geoid={terrain_mask._geoid_label}, "
+                f"max_dist={cfg.max_distance_m:g}m, "
                 f"step={cfg.sample_step_m:g}m, az_step={cfg.azimuth_step_deg:g}deg)"
             )
         else:

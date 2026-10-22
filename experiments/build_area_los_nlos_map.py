@@ -405,8 +405,11 @@ def main() -> None:
                 cache_resolution_m=float(args.terrain_cache_resolution_m),
                 margin_deg=float(args.terrain_margin_deg),
             ),
+            geoid_correction=geoid_corr,
         )
-        print(f"[area] terrain prefilter: enabled ({dem_path})")
+        print(
+            f"[area] terrain prefilter: enabled ({dem_path}, geoid={terrain_mask._geoid_label})"
+        )
         if args.terrain_preprocess_mode == "cuda":
             dem_grid, lat0, lon0, lat_step, lon_step = _load_dem_wgs84_grid(dem_path)
             dem_meta = (lat0, lon0, lat_step, lon_step)

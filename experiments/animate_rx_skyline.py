@@ -15,11 +15,12 @@ Example (mask già calcolata)::
     --geoid-correction egm96 \\
     --nav /content/los_work/data/BRDC00IGS_R_20262820000_01D_MN.rnx \\
     --utc 2026-10-09T12:00:00Z \\
-    --mesh-radius-m 250 --max-tris 25000 \\
-    --terrain-grid-n 96 --imagery-zoom 18 \\
+    --mesh-radius-m 250 --max-tris 12000 \\
+    --terrain-grid-n 64 --imagery-zoom 18 --bake-views 36 \\
     --out-mp4 /content/los_work/results/rx_mask_anim.mp4
 
-Top-left 3D panel: DEM ground + Esri WorldImagery texture + OSM buildings (ENU).
+Top-left 3D panel: DEM + Esri WorldImagery + OSM buildings (ENU).
+Tiles download once; orbit is pre-baked to bitmaps so encode is not ~3 fps 3D redraw.
 """
 
 from __future__ import annotations
@@ -107,18 +108,156 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--systems", type=str, default="G,R,E,C,J")
     p.add_argument("--map-half-m", type=float, default=500.0)
     p.add_argument("--mesh-radius-m", type=float, default=250.0, help="Local 3D mesh clip radius around RX")
-    p.add_argument("--max-tris", type=int, default=25000, help="Max triangles in 3D panel")
-    p.add_argument("--terrain-grid-n", type=int, default=96, help="DEM+imagery grid resolution for 3D ground")
+    p.add_argument("--max-tris", type=int, default=12000, help="Max triangles in 3D panel")
+    p.add_argument("--terrain-grid-n", type=int, default=64, help="DEM+imagery grid resolution for 3D ground")
     p.add_argument("--imagery-zoom", type=int, default=18, help="Esri WorldImagery zoom for 3D ground texture")
+    p.add_argument("--bake-views", type=int, default=36, help="Pre-bake this many 3D orbit views (fast playback)")
     p.add_argument("--no-terrain-texture", action="store_true", help="Skip satellite-textured DEM under buildings")
     p.add_argument("--basemap", action="store_true", help="2D fallback: Esri tiles via contextily (if no mesh)")
     p.add_argument("--no-mesh-3d", action="store_true", help="Force 2D map even if --triangles is set")
+    p.add_argument("--live-3d", action="store_true", help="Slow: redraw matplotlib 3D every frame (debug)")
     p.add_argument("--out-mp4", type=Path, default=None)
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--dpi", type=int, default=120)
     p.add_argument("--title", type=str, default="GNSS obstruction mask")
     p.add_argument("--self-check", action="store_true")
     return p.parse_args()
+
+
+def _align_mesh_enu_to_dem(
+    mesh_enu: np.ndarray,
+    terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    *,
+    sit_on_top_m: float = 0.4,
+) -> np.ndarray:
+    """Shift buildings in Up so footprint bottoms match DEM (viz; fixes geoid mismatch)."""
+    Ee, Nn, Uu, _fcols = terrain_tex
+    verts = np.asarray(mesh_enu, dtype=np.float64).reshape(-1, 3)
+    if verts.size == 0 or not np.isfinite(Uu).any():
+        return mesh_enu
+    u15 = float(np.nanpercentile(verts[:, 2], 15))
+    ground = verts[verts[:, 2] <= u15 + 1.5]
+    if ground.shape[0] < 30:
+        ground = verts
+    rng = np.random.default_rng(0)
+    take = min(500, ground.shape[0])
+    g = ground[rng.choice(ground.shape[0], size=take, replace=False)]
+    e_flat, n_flat, u_flat = Ee.ravel(), Nn.ravel(), Uu.ravel()
+    finite = np.isfinite(u_flat)
+    e_flat, n_flat, u_flat = e_flat[finite], n_flat[finite], u_flat[finite]
+    if e_flat.size == 0:
+        return mesh_enu
+    deltas = np.empty(g.shape[0], dtype=np.float64)
+    for i, (e, n, u) in enumerate(g):
+        k = int(np.argmin((e_flat - e) ** 2 + (n_flat - n) ** 2))
+        deltas[i] = float(u_flat[k]) - float(u)
+    delta = float(np.median(deltas))
+    print(
+        f"[3d] mesh↔DEM align: median ΔU={delta:+.1f} m "
+        f"(buildings were {'under' if delta > 0 else 'above'} terrain) → shift +{sit_on_top_m:.1f} m seat",
+        flush=True,
+    )
+    out = np.asarray(mesh_enu, dtype=np.float64).copy()
+    out[:, :, 2] += delta + float(sit_on_top_m)
+    return out
+
+
+def _draw_cesiumish_3d(
+    ax,
+    *,
+    mesh_enu: np.ndarray | None,
+    terrain_tex: tuple | None,
+    map_half_m: float,
+) -> tuple[float, float, float]:
+    """Draw textured DEM + buildings on an Axes3D. Returns (lim, zmin, zmax)."""
+    lim = float(map_half_m)
+    zmin, zmax = -5.0, 40.0
+    # Matplotlib 3D depth sorting is broken with plot_surface; disable auto zorder
+    # so buildings (higher zorder) are not painted under the DEM texture.
+    try:
+        ax.computed_zorder = False
+    except Exception:
+        pass
+    if terrain_tex is not None:
+        Ee, Nn, Uu, fcols = terrain_tex
+        ax.plot_surface(
+            Ee,
+            Nn,
+            Uu,
+            facecolors=fcols,
+            linewidth=0,
+            antialiased=False,
+            shade=False,
+            rstride=1,
+            cstride=1,
+            zorder=1,
+        )
+        lim = max(lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
+        zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
+        zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
+    if mesh_enu is not None and mesh_enu.size > 0:
+        faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
+        coll = Poly3DCollection(
+            faces,
+            facecolors=(0.82, 0.86, 0.90, 0.78),
+            edgecolors=(0.12, 0.14, 0.18, 0.45),
+            linewidths=0.15,
+        )
+        coll.set_zorder(5)
+        ax.add_collection3d(coll)
+        lim = max(lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
+        zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
+        zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
+    lim = max(lim, 40.0)
+    ax.set_xlim(-lim, lim)
+    ax.set_ylim(-lim, lim)
+    ax.set_zlim(zmin, max(zmax, zmin + 25.0))
+    ax.set_facecolor("#0a1520")
+    for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+        axis.pane.fill = False
+        axis.pane.set_edgecolor("#1a2740")
+    ax.tick_params(colors=MUTED, labelsize=6)
+    ax.set_xlabel("E", color=MUTED, labelpad=-4)
+    ax.set_ylabel("N", color=MUTED, labelpad=-4)
+    ax.set_zlabel("U", color=MUTED, labelpad=-4)
+    ax.plot([0], [0], [1.5], "o", color=ACCENT, ms=6, zorder=10)
+    try:
+        ax.set_box_aspect((1, 1, 0.45))
+    except Exception:
+        pass
+    return lim, zmin, zmax
+
+
+def prebake_3d_orbit(
+    *,
+    mesh_enu: np.ndarray | None,
+    terrain_tex: tuple | None,
+    map_half_m: float,
+    n_views: int = 36,
+    dpi: int = 110,
+) -> list[np.ndarray]:
+    """Render orbit once → list of RGBA frames. Avoids re-drawing 3D every video frame."""
+    n_views = max(8, int(n_views))
+    print(
+        f"[3d] pre-bake {n_views} views (satellite/DEM already loaded once; "
+        f"this is CPU rasterize, not re-download)…",
+        flush=True,
+    )
+    t0 = time.perf_counter()
+    fig = plt.figure(figsize=(5.6, 4.3), dpi=dpi, facecolor=BG)
+    ax = fig.add_subplot(111, projection="3d")
+    _draw_cesiumish_3d(ax, mesh_enu=mesh_enu, terrain_tex=terrain_tex, map_half_m=map_half_m)
+    frames: list[np.ndarray] = []
+    azims = np.linspace(-60.0, 25.0, n_views)
+    for i, azim in enumerate(azims):
+        ax.view_init(elev=30.0, azim=float(azim))
+        fig.canvas.draw()
+        frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
+        if (i + 1) % 9 == 0 or i + 1 == n_views:
+            print(f"[3d] bake {i + 1}/{n_views}", flush=True)
+    plt.close(fig)
+    print(f"[3d] bake done in {time.perf_counter() - t0:.1f}s — playback will reuse these bitmaps", flush=True)
+    return frames
 
 
 def _local_tris_enu(
@@ -206,6 +345,8 @@ def _terrain_enu_textured(
 
     west, east_ll = float(lons.min()), float(lons.max())
     south, north_ll = float(lats.min()), float(lats.max())
+    print(f"[imagery] download Esri tiles once for bbox ({n}x{n} DEM)…", flush=True)
+    t_dl = time.perf_counter()
     try:
         img, _ext = cx.bounds2img(
             west,
@@ -219,6 +360,7 @@ def _terrain_enu_textured(
     except Exception as exc:
         print("satellite tile download failed:", exc)
         return None
+    print(f"[imagery] done in {time.perf_counter() - t_dl:.1f}s (cached for whole video)", flush=True)
 
     rgb = np.asarray(img)
     if rgb.ndim == 3 and rgb.shape[2] >= 3:
@@ -343,6 +485,9 @@ def build_animation(
     fps: int,
     mesh_enu: np.ndarray | None = None,
     terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
+    bake_views: int = 36,
+    live_3d: bool = False,
+    bake_dpi: int = 110,
 ):
     az = np.asarray(az_deg, dtype=np.float64)
     el = np.clip(np.asarray(el_deg, dtype=np.float64), 0.0, 90.0)
@@ -351,7 +496,10 @@ def build_animation(
     order = np.argsort(az_fov)
     az_s, el_s, az_fov_s = az[order], el[order], az_fov[order]
     n = len(az_s)
-    use_3d = (mesh_enu is not None and mesh_enu.size > 0) or (terrain_tex is not None)
+    has_3d = (mesh_enu is not None and mesh_enu.size > 0) or (terrain_tex is not None)
+    # Default: bake orbit once → imshow (fast). --live-3d keeps slow matplotlib 3D.
+    use_baked = has_3d and not live_3d
+    use_live_3d = has_3d and live_3d
 
     t_intro, t_map, t_sweep, t_tracks, t_hold = 1.6, 3.5, 9.5, 2.8, 2.2
     if not tracks:
@@ -361,8 +509,18 @@ def build_animation(
     edges = np.cumsum([0] + phase_frames)
     n_frames = int(edges[-1])
 
+    baked_frames: list[np.ndarray] | None = None
+    if use_baked:
+        baked_frames = prebake_3d_orbit(
+            mesh_enu=mesh_enu,
+            terrain_tex=terrain_tex,
+            map_half_m=float(map_half_m),
+            n_views=int(bake_views),
+            dpi=int(bake_dpi),
+        )
+
     dem_img = extent = None
-    if (not use_3d) and dem_path is not None and Path(dem_path).is_file():
+    if (not has_3d) and dem_path is not None and Path(dem_path).is_file():
         try:
             sampler = NativeDemSampler(dem_path, geoid_correction=parse_geoid_correction_arg(geoid))
             lons, lats, Z = _dem_grid(sampler, meta["lat"], meta["lon"], float(map_half_m), n=90)
@@ -373,7 +531,7 @@ def build_animation(
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
     gs = fig.add_gridspec(2, 2, height_ratios=[1.35, 1.0], hspace=0.30, wspace=0.22)
-    if use_3d:
+    if use_live_3d:
         ax_ctx = fig.add_subplot(gs[0, 0], projection="3d")
     else:
         ax_ctx = fig.add_subplot(gs[0, 0])
@@ -391,69 +549,26 @@ def build_animation(
         fontsize=11,
     )
 
-    # --- Top-left: 3D mesh OR 2D map ---
+    # --- Top-left: baked 3D bitmaps / live 3D / 2D map ---
     bear_line = rx_ring = None
     ray3d = None
-    if use_3d:
+    ctx_im = None
+    if use_baked and baked_frames:
         ax_ctx.set_facecolor("#0a1520")
         ax_ctx.set_title("3D scene (DEM + satellite + buildings)", color=TEXT, fontsize=11, pad=8)
-        lim = float(map_half_m)
-        zmin, zmax = -5.0, 40.0
-
-        # Ground first (Cesium-like textured DEM)
-        if terrain_tex is not None:
-            Ee, Nn, Uu, fcols = terrain_tex
-            ax_ctx.plot_surface(
-                Ee,
-                Nn,
-                Uu,
-                facecolors=fcols,
-                linewidth=0,
-                antialiased=False,
-                shade=False,
-                rstride=1,
-                cstride=1,
-                zorder=0,
-            )
-            lim = max(lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
-            zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
-            zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
-
-        if mesh_enu is not None and mesh_enu.size > 0:
-            faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
-            coll = Poly3DCollection(
-                faces,
-                facecolors=(0.82, 0.86, 0.90, 0.72),
-                edgecolors=(0.15, 0.18, 0.22, 0.35),
-                linewidths=0.12,
-            )
-            ax_ctx.add_collection3d(coll)
-            lim = max(lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
-            zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
-            zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
-
-        lim = max(lim, 40.0)
-        ax_ctx.set_xlim(-lim, lim)
-        ax_ctx.set_ylim(-lim, lim)
-        ax_ctx.set_zlim(zmin, max(zmax, zmin + 25.0))
-        ax_ctx.set_xlabel("East [m]", color=MUTED, labelpad=-2)
-        ax_ctx.set_ylabel("North [m]", color=MUTED, labelpad=-2)
-        ax_ctx.set_zlabel("Up [m]", color=MUTED, labelpad=-2)
-        ax_ctx.tick_params(colors=MUTED, labelsize=7)
-        ax_ctx.xaxis.pane.fill = False
-        ax_ctx.yaxis.pane.fill = False
-        ax_ctx.zaxis.pane.fill = False
-        ax_ctx.xaxis.pane.set_edgecolor("#1a2740")
-        ax_ctx.yaxis.pane.set_edgecolor("#1a2740")
-        ax_ctx.zaxis.pane.set_edgecolor("#1a2740")
-        ax_ctx.plot([0], [0], [1.5], "o", color=ACCENT, ms=7, zorder=10)
+        ctx_im = ax_ctx.imshow(baked_frames[0], aspect="auto", interpolation="bilinear")
+        ax_ctx.set_xticks([])
+        ax_ctx.set_yticks([])
+        for spine in ax_ctx.spines.values():
+            spine.set_visible(False)
+        print(f"3D panel: {len(baked_frames)} pre-baked views (imshow swap per frame)")
+    elif use_live_3d:
+        ax_ctx.set_facecolor("#0a1520")
+        ax_ctx.set_title("3D scene (DEM + satellite + buildings) [live]", color=TEXT, fontsize=11, pad=8)
+        _draw_cesiumish_3d(ax_ctx, mesh_enu=mesh_enu, terrain_tex=terrain_tex, map_half_m=float(map_half_m))
         (ray3d,) = ax_ctx.plot([0, 0], [0, 0], [1.5, 1.5], color=ACCENT2, lw=2.4, zorder=11)
         ax_ctx.view_init(elev=32, azim=-55)
-        try:
-            ax_ctx.set_box_aspect((1, 1, 0.45))
-        except Exception:
-            pass
-        print(f"3D panel ready lim=±{lim:.0f} m  z=[{zmin:.1f},{zmax:.1f}] m")
+        print("3D panel: live matplotlib (slow; omit --live-3d to bake)")
     else:
         ax_ctx.set_facecolor(PANEL)
         ax_ctx.set_title("Receiver in context", color=TEXT, fontsize=11, pad=8)
@@ -565,17 +680,22 @@ def build_animation(
         if rx_ring is not None:
             rx_ring.set_markersize(14 + 7 * (0.5 + 0.5 * math.sin(frame / max(1, fps) * 5.0)))
 
-        # Slow orbit on 3D during locate + sweep
-        if use_3d and phase >= 1:
-            azim = -60 + (frame / max(1, n_frames - 1)) * 75.0
-            elev = 26 + 6 * math.sin(frame / max(1, fps) * 0.7)
-            ax_ctx.view_init(elev=elev, azim=azim)
+        # 3D orbit: swap pre-baked bitmap, or live view_init (slow)
+        if has_3d and phase >= 1:
+            t = frame / max(1, n_frames - 1)
+            if ctx_im is not None and baked_frames:
+                idx = min(len(baked_frames) - 1, int(t * (len(baked_frames) - 1)))
+                ctx_im.set_data(baked_frames[idx])
+            elif use_live_3d:
+                azim = -60 + t * 75.0
+                elev = 26 + 6 * math.sin(frame / max(1, fps) * 0.7)
+                ax_ctx.view_init(elev=elev, azim=azim)
 
         if phase == 0:
             status.set_text("Intro")
             return ()
         if phase == 1:
-            status.set_text("1 · 3D city around RX" if use_3d else "1 · Locate receiver")
+            status.set_text("1 · 3D city around RX" if has_3d else "1 · Locate receiver")
             if bear_line is not None:
                 bear_line.set_data([], [])
             if ray3d is not None:
@@ -741,6 +861,13 @@ def _self_check() -> None:
 
 
 def main() -> int:
+    # Live logs even when stdout is piped (Colab subprocess).
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+        sys.stderr.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
     args = _parse_args()
     if args.self_check:
         _self_check()
@@ -791,6 +918,9 @@ def main() -> int:
         except Exception as exc:
             print("terrain+imagery skip:", exc)
 
+    if mesh_enu is not None and terrain_tex is not None:
+        mesh_enu = _align_mesh_enu_to_dem(mesh_enu, terrain_tex)
+
     fig, _anim, n_frames, update = build_animation(
         meta, az, el,
         fov_zero_deg=float(args.fov_zero_deg),
@@ -803,6 +933,9 @@ def main() -> int:
         fps=int(args.fps),
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
+        bake_views=int(args.bake_views),
+        live_3d=bool(args.live_3d),
+        bake_dpi=min(110, int(args.dpi)),
     )
     out = save_animation_progress(
         fig,

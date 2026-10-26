@@ -51,6 +51,7 @@ from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.terrain_horizon import HorizonConfig, TerrainHorizonMask
 from label_los_nlos_coords import _lla_deg_to_ecef, _parse_utc, _utc_to_gps_week_tow, load_coords
+from mpl_toolkits.mplot3d import proj3d
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from plot_rx_skyline import (
@@ -228,6 +229,14 @@ def _draw_cesiumish_3d(
     return lim, zmin, zmax
 
 
+def _enu_to_bake_xy(e: float, n: float, u: float, view: dict) -> tuple[float, float]:
+    """Project ENU → pixel xy on baked RGBA (imshow origin=upper, extent=(0,w,h,0))."""
+    xd, yd, _zd = proj3d.proj_transform(e, n, u, view["M"])
+    v = view["trans"] @ np.array([xd, yd, 1.0], dtype=np.float64)
+    # transData is display coords (y up from bottom); imshow upper has y down from top.
+    return float(v[0]), float(view["h"] - v[1])
+
+
 def prebake_3d_orbit(
     *,
     mesh_enu: np.ndarray | None,
@@ -235,8 +244,8 @@ def prebake_3d_orbit(
     map_half_m: float,
     n_views: int = 36,
     dpi: int = 110,
-) -> list[np.ndarray]:
-    """Render orbit once → list of RGBA frames. Avoids re-drawing 3D every video frame."""
+) -> tuple[list[np.ndarray], list[dict]]:
+    """Render orbit once → RGBA frames + per-view proj (for orange ray overlay)."""
     n_views = max(8, int(n_views))
     print(
         f"[3d] pre-bake {n_views} views (satellite/DEM already loaded once; "
@@ -248,16 +257,26 @@ def prebake_3d_orbit(
     ax = fig.add_subplot(111, projection="3d")
     _draw_cesiumish_3d(ax, mesh_enu=mesh_enu, terrain_tex=terrain_tex, map_half_m=map_half_m)
     frames: list[np.ndarray] = []
+    views: list[dict] = []
     azims = np.linspace(-60.0, 25.0, n_views)
     for i, azim in enumerate(azims):
         ax.view_init(elev=30.0, azim=float(azim))
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
+        w, h = fig.canvas.get_width_height()
+        views.append(
+            {
+                "M": np.asarray(ax.get_proj(), dtype=np.float64).copy(),
+                "trans": np.asarray(ax.transData.get_matrix(), dtype=np.float64).copy(),
+                "w": int(w),
+                "h": int(h),
+            }
+        )
         if (i + 1) % 9 == 0 or i + 1 == n_views:
             print(f"[3d] bake {i + 1}/{n_views}", flush=True)
     plt.close(fig)
     print(f"[3d] bake done in {time.perf_counter() - t0:.1f}s — playback will reuse these bitmaps", flush=True)
-    return frames
+    return frames, views
 
 
 def _local_tris_enu(
@@ -510,8 +529,9 @@ def build_animation(
     n_frames = int(edges[-1])
 
     baked_frames: list[np.ndarray] | None = None
+    baked_views: list[dict] | None = None
     if use_baked:
-        baked_frames = prebake_3d_orbit(
+        baked_frames, baked_views = prebake_3d_orbit(
             mesh_enu=mesh_enu,
             terrain_tex=terrain_tex,
             map_half_m=float(map_half_m),
@@ -552,16 +572,30 @@ def build_animation(
     # --- Top-left: baked 3D bitmaps / live 3D / 2D map ---
     bear_line = rx_ring = None
     ray3d = None
+    ray2d = None
     ctx_im = None
+    bake_idx = 0
     if use_baked and baked_frames:
         ax_ctx.set_facecolor("#0a1520")
         ax_ctx.set_title("3D scene (DEM + satellite + buildings)", color=TEXT, fontsize=11, pad=8)
-        ctx_im = ax_ctx.imshow(baked_frames[0], aspect="auto", interpolation="bilinear")
+        bh, bw = baked_frames[0].shape[:2]
+        # buffer_rgba is top-row-first → origin=upper; extent y goes bh→0
+        ctx_im = ax_ctx.imshow(
+            baked_frames[0],
+            origin="upper",
+            extent=(0, bw, bh, 0),
+            aspect="auto",
+            interpolation="bilinear",
+            zorder=1,
+        )
+        (ray2d,) = ax_ctx.plot([], [], color=ACCENT2, lw=2.6, solid_capstyle="round", zorder=5)
+        ax_ctx.set_xlim(0, bw)
+        ax_ctx.set_ylim(bh, 0)
         ax_ctx.set_xticks([])
         ax_ctx.set_yticks([])
         for spine in ax_ctx.spines.values():
             spine.set_visible(False)
-        print(f"3D panel: {len(baked_frames)} pre-baked views (imshow swap per frame)")
+        print(f"3D panel: {len(baked_frames)} pre-baked views + projected orange ray overlay")
     elif use_live_3d:
         ax_ctx.set_facecolor("#0a1520")
         ax_ctx.set_title("3D scene (DEM + satellite + buildings) [live]", color=TEXT, fontsize=11, pad=8)
@@ -681,11 +715,12 @@ def build_animation(
             rx_ring.set_markersize(14 + 7 * (0.5 + 0.5 * math.sin(frame / max(1, fps) * 5.0)))
 
         # 3D orbit: swap pre-baked bitmap, or live view_init (slow)
+        nonlocal bake_idx
         if has_3d and phase >= 1:
             t = frame / max(1, n_frames - 1)
             if ctx_im is not None and baked_frames:
-                idx = min(len(baked_frames) - 1, int(t * (len(baked_frames) - 1)))
-                ctx_im.set_data(baked_frames[idx])
+                bake_idx = min(len(baked_frames) - 1, int(t * (len(baked_frames) - 1)))
+                ctx_im.set_data(baked_frames[bake_idx])
             elif use_live_3d:
                 azim = -60 + t * 75.0
                 elev = 26 + 6 * math.sin(frame / max(1, fps) * 0.7)
@@ -700,6 +735,8 @@ def build_animation(
                 bear_line.set_data([], [])
             if ray3d is not None:
                 ray3d.set_data_3d([0, 0], [0, 0], [1.5, 1.5])
+            if ray2d is not None:
+                ray2d.set_data([], [])
             pol_sky.set_data([], [])
             pol_ray.set_data([], [])
             fov_line.set_data([], [])
@@ -726,9 +763,14 @@ def build_animation(
         if bear_line is not None:
             lon1, lat1 = _bearing_end(az_now)
             bear_line.set_data([meta["lon"], lon1], [meta["lat"], lat1])
+        e, nn, uu = _ray_enu(az_now, max(el_now, 5.0), length_m=min(0.85 * float(map_half_m), 200.0))
         if ray3d is not None:
-            e, nn, uu = _ray_enu(az_now, max(el_now, 5.0), length_m=min(0.85 * float(map_half_m), 200.0))
             ray3d.set_data_3d([0, e], [0, nn], [1.5, uu])
+        if ray2d is not None and baked_views:
+            view = baked_views[bake_idx]
+            x0, y0 = _enu_to_bake_xy(0.0, 0.0, 1.5, view)
+            x1, y1 = _enu_to_bake_xy(e, nn, uu, view)
+            ray2d.set_data([x0, x1], [y0, y1])
 
         th = np.radians(az_s[:k])
         rr = 90.0 - el_s[:k]

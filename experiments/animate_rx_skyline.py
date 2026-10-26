@@ -178,6 +178,25 @@ def _align_mesh_enu_to_dem(
     return out, shift
 
 
+def _clip_mesh_enu_to_lim(mesh_enu: np.ndarray, lim: float) -> np.ndarray:
+    """Keep triangles whose centroid is inside the camera half-extent.
+
+    mplot3d does NOT clip Poly3DCollection to xlim/ylim — far mesh otherwise
+    sticks out past the sat texture onto black.
+    """
+    tri = np.asarray(mesh_enu, dtype=np.float64)
+    if tri.ndim != 3 or tri.shape[0] == 0:
+        return tri
+    c = tri.mean(axis=1)
+    keep = np.hypot(c[:, 0], c[:, 1]) <= float(lim) * 1.02
+    out = tri[keep]
+    print(
+        f"[3d] clip mesh to ±{lim:.0f} m: {tri.shape[0]} → {out.shape[0]} tris",
+        flush=True,
+    )
+    return out
+
+
 def _draw_cesiumish_3d(
     ax,
     *,
@@ -189,10 +208,10 @@ def _draw_cesiumish_3d(
 ) -> tuple[float, float, float]:
     """Draw textured DEM + buildings on an Axes3D. Returns (lim, zmin, zmax).
 
-    ``view_half_m`` forces the camera box (zoom). Content may extend past it.
+    ``view_half_m`` forces the camera box (zoom). Mesh is clipped to that box
+    because mplot3d ignores xlim for Poly3DCollection.
     ``chrome=False`` hides axes/labels (for tight baked presentation frames).
     """
-    content_lim = float(map_half_m)
     zmin, zmax = -5.0, 40.0
     # Matplotlib 3D depth sorting is broken with plot_surface; disable auto zorder
     # so buildings (higher zorder) are not painted under the DEM texture.
@@ -200,21 +219,39 @@ def _draw_cesiumish_3d(
         ax.computed_zorder = False
     except Exception:
         pass
-    if terrain_tex is not None:
-        Ee, Nn, Uu, fcols = terrain_tex
-        content_lim = max(content_lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
-        zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
-        zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
-    if mesh_enu is not None and mesh_enu.size > 0:
-        content_lim = max(content_lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
-        zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
-        zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
+
     if view_half_m is not None and float(view_half_m) > 0:
         lim = max(float(view_half_m), 25.0)
     else:
-        lim = max(content_lim, 40.0)
+        lim = max(float(map_half_m), 40.0)
 
-    # Full-frame ground so the camera never shows empty black around a small DEM patch.
+    # CRITICAL: drop buildings outside the camera — mplot3d will not clip them.
+    mesh_draw = None
+    if mesh_enu is not None and mesh_enu.size > 0:
+        mesh_draw = _clip_mesh_enu_to_lim(mesh_enu, lim)
+
+    if terrain_tex is not None:
+        Ee, Nn, Uu, fcols = terrain_tex
+        # If texture is smaller than the camera, stretch E/N to fill ±lim (keeps U/tex).
+        e_max = float(np.nanmax(np.abs(Ee)))
+        n_max = float(np.nanmax(np.abs(Nn)))
+        span = max(e_max, n_max, 1.0)
+        if span < lim * 0.98:
+            scale = lim / span
+            Ee = Ee * scale
+            Nn = Nn * scale
+            print(
+                f"[3d] stretch terrain ENU ×{scale:.2f} to fill ±{lim:.0f} m "
+                f"(was ±{span:.0f} m)",
+                flush=True,
+            )
+        zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
+        zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
+    if mesh_draw is not None and mesh_draw.size > 0:
+        zmax = max(zmax, float(np.nanmax(mesh_draw[:, :, 2])) * 1.08)
+        zmin = min(zmin, float(np.nanmin(mesh_draw[:, :, 2])) - 1.0)
+
+    # Full-frame ground under everything.
     z_ground = float(zmin) + 0.2
     xx = np.array([[-lim, lim], [-lim, lim]], dtype=np.float64)
     yy = np.array([[-lim, -lim], [lim, lim]], dtype=np.float64)
@@ -222,7 +259,6 @@ def _draw_cesiumish_3d(
     ax.plot_surface(xx, yy, zz, color="#1a2838", linewidth=0, antialiased=False, shade=False, zorder=0)
 
     if terrain_tex is not None:
-        Ee, Nn, Uu, fcols = terrain_tex
         ax.plot_surface(
             Ee,
             Nn,
@@ -235,8 +271,8 @@ def _draw_cesiumish_3d(
             cstride=1,
             zorder=1,
         )
-    if mesh_enu is not None and mesh_enu.size > 0:
-        faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
+    if mesh_draw is not None and mesh_draw.size > 0:
+        faces = [mesh_draw[i] for i in range(mesh_draw.shape[0])]
         coll = Poly3DCollection(
             faces,
             facecolors=(0.82, 0.86, 0.90, 0.78),
@@ -1052,8 +1088,12 @@ def main() -> int:
     if args.triangles is not None and not args.no_mesh_3d and Path(args.triangles).is_file():
         try:
             tri = np.load(args.triangles)
+            # Match camera zoom — mplot3d won't clip far buildings for us.
             mesh_enu = _local_tris_enu(
-                tri, rx, radius_m=float(args.mesh_radius_m), max_tris=int(args.max_tris)
+                tri,
+                rx,
+                radius_m=max(float(args.view_half_m) * 1.05, 80.0),
+                max_tris=int(args.max_tris),
             )
         except Exception as exc:
             print("3D mesh load skip:", exc)

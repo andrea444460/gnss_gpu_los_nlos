@@ -618,8 +618,12 @@ def main() -> int:
         hit_probe_m=max(float(args.hit_probe_m), float(args.mesh_radius_m)),
     )
 
+    # Viz mesh only needs to cover the camera (full .npy still used for BVH above).
     mesh_enu = sky._local_tris_enu(
-        tri, rx, radius_m=float(args.mesh_radius_m), max_tris=int(args.max_tris)
+        tri,
+        rx,
+        radius_m=max(float(args.view_half_m) * 1.05, 80.0),
+        max_tris=int(args.max_tris),
     )
     terrain_tex = None
     if (

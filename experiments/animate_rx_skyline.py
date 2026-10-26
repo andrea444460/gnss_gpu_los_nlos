@@ -580,7 +580,9 @@ def build_animation(
 
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.35, 1.0], hspace=0.30, wspace=0.22)
+    gs = fig.add_gridspec(
+        2, 2, height_ratios=[2.1, 0.75], width_ratios=[1.35, 1.0], hspace=0.22, wspace=0.16
+    )
     if use_live_3d:
         ax_ctx = fig.add_subplot(gs[0, 0], projection="3d")
     else:

@@ -294,22 +294,25 @@ def build_animation(
 
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
-    gs = fig.add_gridspec(2, 2, height_ratios=[1.35, 1.0], hspace=0.30, wspace=0.22)
+    # Big 3D panel; skinny log strip at the bottom.
+    gs = fig.add_gridspec(
+        2, 2, height_ratios=[2.35, 0.55], width_ratios=[1.45, 1.0], hspace=0.18, wspace=0.16
+    )
     ax_ctx = fig.add_subplot(gs[0, 0])
     ax_pol = fig.add_subplot(gs[0, 1], projection="polar")
     ax_log = fig.add_subplot(gs[1, :])
     ax_log.set_facecolor(PANEL)
     ax_pol.set_facecolor(PANEL)
 
-    fig.suptitle(title, color=TEXT, fontsize=16, fontweight="bold", y=0.98)
+    fig.suptitle(title, color=TEXT, fontsize=15, fontweight="bold", y=0.985)
     fig.text(
         0.5,
-        0.935,
+        0.948,
         f"RX {meta['id']}  ·  {meta['lat']:.5f}°, {meta['lon']:.5f}°  ·  h={meta['alt']:.1f} m  ·  "
         f"BVH check_los  ·  {n_los} LOS / {n_nlos} NLOS",
         ha="center",
         color=MUTED,
-        fontsize=11,
+        fontsize=9,
     )
 
     bh, bw = baked_frames[0].shape[:2]
@@ -321,7 +324,7 @@ def build_animation(
         interpolation="bilinear",
         zorder=1,
     )
-    ax_ctx.set_title("3D · ray RX → satellite", color=TEXT, fontsize=11, pad=8)
+    ax_ctx.set_title("3D · ray RX → satellite", color=TEXT, fontsize=10, pad=4)
     ax_ctx.set_xlim(0, bw)
     ax_ctx.set_ylim(bh, 0)
     ax_ctx.set_xticks([])
@@ -361,7 +364,7 @@ def build_animation(
     ax_pol.set_yticklabels(["90", "60", "30", "0"], color=MUTED, fontsize=8)
     ax_pol.tick_params(colors=MUTED)
     ax_pol.grid(True, color="#ffffff33", lw=0.7)
-    ax_pol.set_title("Skyplot · LOS green / NLOS red", color=TEXT, fontsize=11, pad=14)
+    ax_pol.set_title("Skyplot · LOS green / NLOS red", color=TEXT, fontsize=10, pad=10)
     ax_pol.plot([0], [0], "o", color="#ff5c5c", ms=5, zorder=5)
     scat_los = ax_pol.scatter([], [], c=LOS, s=70, zorder=6, edgecolors="white", linewidths=0.6)
     scat_nlos = ax_pol.scatter([], [], c=NLOS, s=70, marker="s", zorder=6, edgecolors="white", linewidths=0.6)
@@ -377,17 +380,17 @@ def build_animation(
     ax_log.set_xlim(0, 1)
     ax_log.set_ylim(0, 1)
     ax_log.axis("off")
-    ax_log.set_title("Ray-trace log (buildings BVH)", color=TEXT, fontsize=11, pad=8)
+    ax_log.set_title("Ray-trace log (buildings BVH)", color=TEXT, fontsize=8, pad=2)
     log_txt = ax_log.text(
-        0.02,
-        0.92,
+        0.01,
+        0.88,
         "",
         va="top",
         ha="left",
         color=TEXT,
-        fontsize=11,
+        fontsize=8,
         family="DejaVu Sans Mono",
-        linespacing=1.45,
+        linespacing=1.25,
         transform=ax_log.transAxes,
     )
 

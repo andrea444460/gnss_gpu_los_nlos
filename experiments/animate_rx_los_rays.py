@@ -461,8 +461,9 @@ def build_animation(
     def _log_text(n_show: int) -> str:
         lines = []
         for i, s in enumerate(sats[:n_show]):
+            # LOS: no fake length (draw length ≠ physics). NLOS: real building hit.
             if s["is_los"]:
-                tag = f"LOS   ray={s['ray_m']:.0f}m"
+                tag = "LOS   clear"
             else:
                 tag = f"NLOS  hit≈{s['ray_m']:.0f}m"
             lines.append(

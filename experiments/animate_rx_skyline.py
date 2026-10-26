@@ -16,7 +16,10 @@ Example (mask già calcolata)::
     --nav /content/los_work/data/BRDC00IGS_R_20262820000_01D_MN.rnx \\
     --utc 2026-10-09T12:00:00Z \\
     --mesh-radius-m 250 --max-tris 25000 \\
+    --terrain-grid-n 96 --imagery-zoom 18 \\
     --out-mp4 /content/los_work/results/rx_mask_anim.mp4
+
+Top-left 3D panel: DEM ground + Esri WorldImagery texture + OSM buildings (ENU).
 """
 
 from __future__ import annotations
@@ -105,6 +108,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--map-half-m", type=float, default=500.0)
     p.add_argument("--mesh-radius-m", type=float, default=250.0, help="Local 3D mesh clip radius around RX")
     p.add_argument("--max-tris", type=int, default=25000, help="Max triangles in 3D panel")
+    p.add_argument("--terrain-grid-n", type=int, default=96, help="DEM+imagery grid resolution for 3D ground")
+    p.add_argument("--imagery-zoom", type=int, default=18, help="Esri WorldImagery zoom for 3D ground texture")
+    p.add_argument("--no-terrain-texture", action="store_true", help="Skip satellite-textured DEM under buildings")
     p.add_argument("--basemap", action="store_true", help="2D fallback: Esri tiles via contextily (if no mesh)")
     p.add_argument("--no-mesh-3d", action="store_true", help="Force 2D map even if --triangles is set")
     p.add_argument("--out-mp4", type=Path, default=None)
@@ -158,6 +164,84 @@ def _dem_grid(sampler: NativeDemSampler, lat0: float, lon0: float, half_m: float
             except Exception:
                 Z[i, j] = np.nan
     return lons, lats, Z
+
+
+def _terrain_enu_textured(
+    sampler: NativeDemSampler,
+    *,
+    lat0: float,
+    lon0: float,
+    rx_ecef: np.ndarray,
+    half_m: float,
+    n: int = 96,
+    zoom: int = 18,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """DEM patch in ENU + RGB facecolors from Esri World Imagery (Cesium-like ground).
+
+    Returns (E, N, U, facecolors) with E/N/U shape (n,n) and facecolors (n-1,n-1,4).
+    """
+    try:
+        import contextily as cx
+        from PIL import Image
+    except ImportError as exc:
+        print("terrain texture needs contextily+pillow:", exc)
+        return None
+
+    lons, lats, H = _dem_grid(sampler, lat0, lon0, half_m, n=n)
+    if not np.isfinite(H).any():
+        return None
+
+    rx = np.asarray(rx_ecef, dtype=np.float64).reshape(3)
+    east, north, up = _ecef_to_enu_basis(rx)
+    R = np.column_stack([east, north, up])
+    E = np.zeros((n, n), dtype=np.float64)
+    N_ = np.zeros((n, n), dtype=np.float64)
+    U = np.zeros((n, n), dtype=np.float64)
+    for i, la in enumerate(lats):
+        for j, lo in enumerate(lons):
+            h = float(H[i, j]) if np.isfinite(H[i, j]) else float(np.nanmedian(H))
+            ecef = _lla_deg_to_ecef(float(la), float(lo), h)
+            enu = (ecef - rx) @ R
+            E[i, j], N_[i, j], U[i, j] = float(enu[0]), float(enu[1]), float(enu[2])
+
+    west, east_ll = float(lons.min()), float(lons.max())
+    south, north_ll = float(lats.min()), float(lats.max())
+    try:
+        img, _ext = cx.bounds2img(
+            west,
+            south,
+            east_ll,
+            north_ll,
+            ll=True,
+            source=cx.providers.Esri.WorldImagery,
+            zoom=int(zoom),
+        )
+    except Exception as exc:
+        print("satellite tile download failed:", exc)
+        return None
+
+    rgb = np.asarray(img)
+    if rgb.ndim == 3 and rgb.shape[2] >= 3:
+        rgb = rgb[:, :, :3]
+    else:
+        return None
+    # plot_surface facecolors want (rows-1, cols-1, 3|4)
+    tex = np.asarray(
+        Image.fromarray(rgb.astype(np.uint8)).resize((n - 1, n - 1), Image.BILINEAR),
+        dtype=np.float64,
+    ) / 255.0
+    # Flip north-south: bounds2img rows are typically north-at-top; our lats increase with i
+    tex = np.flipud(tex)
+    if tex.shape[2] == 3:
+        alpha = np.full(tex.shape[:2] + (1,), 0.95, dtype=np.float64)
+        facecolors = np.concatenate([tex, alpha], axis=2)
+    else:
+        facecolors = tex
+    print(
+        f"3D terrain+imagery: {n}x{n} DEM, tex={facecolors.shape}, "
+        f"U=[{float(np.nanmin(U)):.1f},{float(np.nanmax(U)):.1f}] m"
+    )
+    return E, N_, U, facecolors
 
 
 def _maybe_tracks(args, lat: float, lon: float, alt: float):
@@ -258,6 +342,7 @@ def build_animation(
     title: str,
     fps: int,
     mesh_enu: np.ndarray | None = None,
+    terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None,
 ):
     az = np.asarray(az_deg, dtype=np.float64)
     el = np.clip(np.asarray(el_deg, dtype=np.float64), 0.0, 90.0)
@@ -266,7 +351,7 @@ def build_animation(
     order = np.argsort(az_fov)
     az_s, el_s, az_fov_s = az[order], el[order], az_fov[order]
     n = len(az_s)
-    use_3d = mesh_enu is not None and mesh_enu.size > 0
+    use_3d = (mesh_enu is not None and mesh_enu.size > 0) or (terrain_tex is not None)
 
     t_intro, t_map, t_sweep, t_tracks, t_hold = 1.6, 3.5, 9.5, 2.8, 2.2
     if not tracks:
@@ -310,35 +395,65 @@ def build_animation(
     bear_line = rx_ring = None
     ray3d = None
     if use_3d:
-        ax_ctx.set_facecolor(BG)
-        ax_ctx.set_title("3D city model (local ENU)", color=TEXT, fontsize=11, pad=8)
-        # mesh_enu: East, North, Up — plot as X=E, Y=N, Z=U
-        faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
-        coll = Poly3DCollection(
-            faces,
-            facecolors=(0.75, 0.80, 0.88, 0.55),
-            edgecolors=(0.55, 0.62, 0.72, 0.25),
-            linewidths=0.15,
-        )
-        ax_ctx.add_collection3d(coll)
-        lim = float(np.nanmax(np.abs(mesh_enu))) * 1.05
+        ax_ctx.set_facecolor("#0a1520")
+        ax_ctx.set_title("3D scene (DEM + satellite + buildings)", color=TEXT, fontsize=11, pad=8)
+        lim = float(map_half_m)
+        zmin, zmax = -5.0, 40.0
+
+        # Ground first (Cesium-like textured DEM)
+        if terrain_tex is not None:
+            Ee, Nn, Uu, fcols = terrain_tex
+            ax_ctx.plot_surface(
+                Ee,
+                Nn,
+                Uu,
+                facecolors=fcols,
+                linewidth=0,
+                antialiased=False,
+                shade=False,
+                rstride=1,
+                cstride=1,
+                zorder=0,
+            )
+            lim = max(lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
+            zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
+            zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
+
+        if mesh_enu is not None and mesh_enu.size > 0:
+            faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
+            coll = Poly3DCollection(
+                faces,
+                facecolors=(0.82, 0.86, 0.90, 0.72),
+                edgecolors=(0.15, 0.18, 0.22, 0.35),
+                linewidths=0.12,
+            )
+            ax_ctx.add_collection3d(coll)
+            lim = max(lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
+            zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
+            zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
+
         lim = max(lim, 40.0)
         ax_ctx.set_xlim(-lim, lim)
         ax_ctx.set_ylim(-lim, lim)
-        zmax = max(float(np.nanmax(mesh_enu[:, :, 2])), 30.0)
-        ax_ctx.set_zlim(0.0, zmax * 1.15)
+        ax_ctx.set_zlim(zmin, max(zmax, zmin + 25.0))
         ax_ctx.set_xlabel("East [m]", color=MUTED, labelpad=-2)
         ax_ctx.set_ylabel("North [m]", color=MUTED, labelpad=-2)
         ax_ctx.set_zlabel("Up [m]", color=MUTED, labelpad=-2)
         ax_ctx.tick_params(colors=MUTED, labelsize=7)
-        ax_ctx.plot([0], [0], [1.5], "o", color=ACCENT, ms=7)
-        (ray3d,) = ax_ctx.plot([0, 0], [0, 0], [1.5, 1.5], color=ACCENT2, lw=2.4)
-        ax_ctx.view_init(elev=28, azim=-60)
+        ax_ctx.xaxis.pane.fill = False
+        ax_ctx.yaxis.pane.fill = False
+        ax_ctx.zaxis.pane.fill = False
+        ax_ctx.xaxis.pane.set_edgecolor("#1a2740")
+        ax_ctx.yaxis.pane.set_edgecolor("#1a2740")
+        ax_ctx.zaxis.pane.set_edgecolor("#1a2740")
+        ax_ctx.plot([0], [0], [1.5], "o", color=ACCENT, ms=7, zorder=10)
+        (ray3d,) = ax_ctx.plot([0, 0], [0, 0], [1.5, 1.5], color=ACCENT2, lw=2.4, zorder=11)
+        ax_ctx.view_init(elev=32, azim=-55)
         try:
-            ax_ctx.set_box_aspect((1, 1, 0.55))
+            ax_ctx.set_box_aspect((1, 1, 0.45))
         except Exception:
             pass
-        print(f"3D panel ready lim=±{lim:.0f} m  zmax={zmax:.0f} m")
+        print(f"3D panel ready lim=±{lim:.0f} m  z=[{zmin:.1f},{zmax:.1f}] m")
     else:
         ax_ctx.set_facecolor(PANEL)
         ax_ctx.set_title("Receiver in context", color=TEXT, fontsize=11, pad=8)
@@ -616,7 +731,7 @@ def _self_check() -> None:
     fig, _anim, n_frames, update = build_animation(
         meta, az, el,
         fov_zero_deg=45.0, dem_path=None, geoid="none", map_half_m=400.0,
-        basemap=False, tracks=None, title="Self-check", fps=12, mesh_enu=None,
+        basemap=False, tracks=None, title="Self-check", fps=12, mesh_enu=None, terrain_tex=None,
     )
     out = _SCRIPT_DIR / "results" / "_anim_selfcheck.mp4"
     out = save_animation_progress(fig, update, n_frames=min(n_frames, 24), out=out, fps=12, dpi=80, log_every=5)
@@ -640,30 +755,54 @@ def main() -> int:
         f"mask max={float(np.max(el)):.1f}°  tracks={0 if not tracks else len(tracks)}"
     )
 
+    rx = _lla_deg_to_ecef(meta["lat"], meta["lon"], meta["alt"])
     mesh_enu = None
     if args.triangles is not None and not args.no_mesh_3d and Path(args.triangles).is_file():
         try:
             tri = np.load(args.triangles)
-            rx = _lla_deg_to_ecef(meta["lat"], meta["lon"], meta["alt"])
             mesh_enu = _local_tris_enu(
                 tri, rx, radius_m=float(args.mesh_radius_m), max_tris=int(args.max_tris)
             )
         except Exception as exc:
             print("3D mesh load skip:", exc)
     elif args.triangles is None:
-        print("No --triangles → top-left stays 2D map (pass genova_osm_triangles.npy for 3D)")
+        print("No --triangles → buildings skipped (DEM+imagery still possible)")
+
+    terrain_tex = None
+    if (
+        not args.no_terrain_texture
+        and args.dem_path is not None
+        and Path(args.dem_path).is_file()
+    ):
+        try:
+            sampler = NativeDemSampler(
+                args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
+            )
+            half = float(args.mesh_radius_m)
+            terrain_tex = _terrain_enu_textured(
+                sampler,
+                lat0=meta["lat"],
+                lon0=meta["lon"],
+                rx_ecef=rx,
+                half_m=half,
+                n=int(args.terrain_grid_n),
+                zoom=int(args.imagery_zoom),
+            )
+        except Exception as exc:
+            print("terrain+imagery skip:", exc)
 
     fig, _anim, n_frames, update = build_animation(
         meta, az, el,
         fov_zero_deg=float(args.fov_zero_deg),
         dem_path=args.dem_path,
         geoid=str(args.geoid_correction),
-        map_half_m=float(args.map_half_m),
+        map_half_m=float(args.mesh_radius_m),
         basemap=bool(args.basemap),
         tracks=tracks,
         title=str(args.title),
         fps=int(args.fps),
         mesh_enu=mesh_enu,
+        terrain_tex=terrain_tex,
     )
     out = save_animation_progress(
         fig,

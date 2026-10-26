@@ -119,7 +119,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=192,
+        default=224,
         help="DEM+imagery grid resolution for 3D ground (higher = sharper sat texture, slower bake)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19, help="Esri WorldImagery zoom for 3D ground texture")
@@ -179,19 +179,30 @@ def _align_mesh_enu_to_dem(
 
 
 def _clip_mesh_enu_to_lim(mesh_enu: np.ndarray, lim: float) -> np.ndarray:
-    """Keep triangles whose centroid is inside the camera half-extent.
+    """Keep whole triangles that intersect the camera square (may overhang).
 
-    mplot3d does NOT clip Poly3DCollection to xlim/ylim — far mesh otherwise
-    sticks out past the sat texture onto black.
+    Prefer a building sticking out past the sat tile over slicing it in half.
+    Still drop absurdly huge faces (bad OSM tris).
     """
     tri = np.asarray(mesh_enu, dtype=np.float64)
     if tri.ndim != 3 or tri.shape[0] == 0:
         return tri
-    c = tri.mean(axis=1)
-    keep = np.hypot(c[:, 0], c[:, 1]) <= float(lim) * 1.02
+    lim = float(lim)
+    # AABB overlap with [-lim, lim]^2  → keep entire triangle if it touches the view.
+    e_min = tri[:, :, 0].min(axis=1)
+    e_max = tri[:, :, 0].max(axis=1)
+    n_min = tri[:, :, 1].min(axis=1)
+    n_max = tri[:, :, 1].max(axis=1)
+    overlaps = (e_min <= lim) & (e_max >= -lim) & (n_min <= lim) & (n_max >= -lim)
+    e01 = np.linalg.norm(tri[:, 0] - tri[:, 1], axis=1)
+    e12 = np.linalg.norm(tri[:, 1] - tri[:, 2], axis=1)
+    e20 = np.linalg.norm(tri[:, 2] - tri[:, 0], axis=1)
+    max_edge = max(lim * 2.0, 120.0)
+    keep = overlaps & (e01 < max_edge) & (e12 < max_edge) & (e20 < max_edge)
     out = tri[keep]
     print(
-        f"[3d] clip mesh to ±{lim:.0f} m: {tri.shape[0]} → {out.shape[0]} tris",
+        f"[3d] keep tris touching ±{lim:.0f} m (whole face, may overhang): "
+        f"{tri.shape[0]} → {out.shape[0]}",
         flush=True,
     )
     return out
@@ -232,33 +243,20 @@ def _draw_cesiumish_3d(
 
     if terrain_tex is not None:
         Ee, Nn, Uu, fcols = terrain_tex
-        # If texture is smaller than the camera, stretch E/N to fill ±lim (keeps U/tex).
-        e_max = float(np.nanmax(np.abs(Ee)))
-        n_max = float(np.nanmax(np.abs(Nn)))
-        span = max(e_max, n_max, 1.0)
-        if span < lim * 0.98:
-            scale = lim / span
-            Ee = Ee * scale
-            Nn = Nn * scale
-            print(
-                f"[3d] stretch terrain ENU ×{scale:.2f} to fill ±{lim:.0f} m "
-                f"(was ±{span:.0f} m)",
-                flush=True,
-            )
+        # Always remesh E/N to exactly ±lim so the sat tile cannot be smaller than the camera.
+        n_tex = int(Ee.shape[0])
+        e_ax = np.linspace(-lim, lim, n_tex)
+        n_ax = np.linspace(-lim, lim, n_tex)
+        Ee, Nn = np.meshgrid(e_ax, n_ax)
         zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
         zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
+        print(f"[3d] terrain forced to ±{lim:.0f} m  grid={n_tex}x{n_tex}", flush=True)
     if mesh_draw is not None and mesh_draw.size > 0:
         zmax = max(zmax, float(np.nanmax(mesh_draw[:, :, 2])) * 1.08)
         zmin = min(zmin, float(np.nanmin(mesh_draw[:, :, 2])) - 1.0)
 
-    # Full-frame ground under everything.
-    z_ground = float(zmin) + 0.2
-    xx = np.array([[-lim, lim], [-lim, lim]], dtype=np.float64)
-    yy = np.array([[-lim, -lim], [lim, lim]], dtype=np.float64)
-    zz = np.full((2, 2), z_ground, dtype=np.float64)
-    ax.plot_surface(xx, yy, zz, color="#1a2838", linewidth=0, antialiased=False, shade=False, zorder=0)
-
     if terrain_tex is not None:
+        # Sat texture alone is the ground (no dark underlay — parallax made it look like a stamp).
         ax.plot_surface(
             Ee,
             Nn,
@@ -271,6 +269,14 @@ def _draw_cesiumish_3d(
             cstride=1,
             zorder=1,
         )
+    else:
+        # Fallback flat ground when imagery is missing.
+        z_ground = float(zmin) + 0.2
+        xx = np.array([[-lim, lim], [-lim, lim]], dtype=np.float64)
+        yy = np.array([[-lim, -lim], [lim, lim]], dtype=np.float64)
+        zz = np.full((2, 2), z_ground, dtype=np.float64)
+        ax.plot_surface(xx, yy, zz, color="#1a2838", linewidth=0, antialiased=False, shade=False, zorder=0)
+
     if mesh_draw is not None and mesh_draw.size > 0:
         faces = [mesh_draw[i] for i in range(mesh_draw.shape[0])]
         coll = Poly3DCollection(
@@ -327,8 +333,47 @@ def _enu_to_bake_xy(e: float, n: float, u: float, view: dict) -> tuple[float, fl
     return px, py
 
 
+def _crop_rgba_to_content(
+    rgba: np.ndarray,
+    *,
+    x0: int = 0,
+    y0_img: int = 0,
+    full_h: int | None = None,
+    bg_thresh: float = 28.0,
+    pad: int = 6,
+) -> tuple[np.ndarray, dict]:
+    """Crop to non-dark pixels (removes mplot3d padding inside the axes window)."""
+    h_full = int(full_h if full_h is not None else rgba.shape[0])
+    lum = rgba[:, :, :3].astype(np.float32).mean(axis=2)
+    mask = lum > float(bg_thresh)
+    if not np.any(mask):
+        return rgba, {
+            "x0": int(x0),
+            "y0_img": int(y0_img),
+            "full_h": h_full,
+            "w": int(rgba.shape[1]),
+            "h": int(rgba.shape[0]),
+        }
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    r0, r1 = int(np.where(rows)[0][0]), int(np.where(rows)[0][-1])
+    c0, c1 = int(np.where(cols)[0][0]), int(np.where(cols)[0][-1])
+    r0 = max(0, r0 - pad)
+    c0 = max(0, c0 - pad)
+    r1 = min(rgba.shape[0] - 1, r1 + pad)
+    c1 = min(rgba.shape[1] - 1, c1 + pad)
+    crop = rgba[r0 : r1 + 1, c0 : c1 + 1].copy()
+    return crop, {
+        "x0": int(x0) + c0,
+        "y0_img": int(y0_img) + r0,
+        "full_h": h_full,
+        "w": int(crop.shape[1]),
+        "h": int(crop.shape[0]),
+    }
+
+
 def _crop_rgba_to_axes(rgba: np.ndarray, ax, fig) -> tuple[np.ndarray, dict]:
-    """Crop figure RGBA to the 3D axes window (kills matplotlib's empty margins)."""
+    """Crop figure RGBA to the 3D axes window, then to drawn content."""
     bbox = ax.get_window_extent()
     w_full, h_full = fig.canvas.get_width_height()
     x0 = max(0, int(np.floor(bbox.x0)))
@@ -337,15 +382,9 @@ def _crop_rgba_to_axes(rgba: np.ndarray, ax, fig) -> tuple[np.ndarray, dict]:
     y0_img = max(0, int(np.floor(h_full - bbox.y1)))
     y1_img = min(int(h_full), int(np.ceil(h_full - bbox.y0)))
     if x1 <= x0 + 8 or y1_img <= y0_img + 8:
-        return rgba, {"x0": 0, "y0_img": 0, "full_h": int(h_full), "w": int(w_full), "h": int(h_full)}
-    crop = rgba[y0_img:y1_img, x0:x1].copy()
-    return crop, {
-        "x0": x0,
-        "y0_img": y0_img,
-        "full_h": int(h_full),
-        "w": int(crop.shape[1]),
-        "h": int(crop.shape[0]),
-    }
+        return _crop_rgba_to_content(rgba, full_h=int(h_full))
+    axes_crop = rgba[y0_img:y1_img, x0:x1]
+    return _crop_rgba_to_content(axes_crop, x0=x0, y0_img=y0_img, full_h=int(h_full))
 
 
 def prebake_3d_orbit(
@@ -359,7 +398,7 @@ def prebake_3d_orbit(
     elev: float = 32.0,
 ) -> tuple[list[np.ndarray], list[dict]]:
     """Render orbit once → RGBA frames + per-view proj (for orange ray overlay)."""
-    n_views = max(8, int(n_views))
+    n_views = max(1, int(n_views))
     vhalf = float(view_half_m) if view_half_m is not None else float(map_half_m)
     print(
         f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  dpi={dpi}  "
@@ -381,8 +420,8 @@ def prebake_3d_orbit(
     frames: list[np.ndarray] = []
     views: list[dict] = []
     azims = np.linspace(-55.0, 30.0, n_views)
-    # Slightly higher elev when zoomed so roofs don't dominate the frame.
-    elev_use = float(elev) if lim > 150 else max(float(elev), 40.0)
+    # Zoomed views: higher elev so the sat square fills the frame (less black corners).
+    elev_use = float(elev) if lim > 150 else max(float(elev), 55.0)
     for i, azim in enumerate(azims):
         ax.view_init(elev=elev_use, azim=float(azim))
         fig.canvas.draw()
@@ -488,6 +527,10 @@ def _terrain_enu_textured(
     e_ax = np.linspace(-float(half_m), float(half_m), n)
     n_ax = np.linspace(-float(half_m), float(half_m), n)
     E, N_ = np.meshgrid(e_ax, n_ax)
+    # Flatten height for viz: wrinkled DEM shrinks the projected footprint in mplot3d.
+    # Keep a little relief so hills remain visible without leaving black borders.
+    u_med = float(np.nanmedian(U))
+    U = u_med + 0.25 * (U - u_med)
 
     west, east_ll = float(lons.min()), float(lons.max())
     south, north_ll = float(lats.min()), float(lats.max())
@@ -1088,11 +1131,11 @@ def main() -> int:
     if args.triangles is not None and not args.no_mesh_3d and Path(args.triangles).is_file():
         try:
             tri = np.load(args.triangles)
-            # Match camera zoom — mplot3d won't clip far buildings for us.
+            # Load a bit past the camera so edge buildings stay whole (may overhang tile).
             mesh_enu = _local_tris_enu(
                 tri,
                 rx,
-                radius_m=max(float(args.view_half_m) * 1.05, 80.0),
+                radius_m=max(float(args.view_half_m) * 1.6, float(args.mesh_radius_m) * 0.6),
                 max_tris=int(args.max_tris),
             )
         except Exception as exc:

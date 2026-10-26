@@ -4,6 +4,12 @@
 Reuses the pre-baked 3D city panel from ``animate_rx_skyline`` and colours each
 RX→sat ray green (LOS / ``check_los`` clear) or red (NLOS / building hit).
 
+3D viz notes (shared with skyline bake):
+  - sat ground texture fills ``--view-half-m`` (not a small central stamp)
+  - buildings that touch the camera are kept whole (may overhang the tile)
+  - mesh load radius extends past the camera so edge buildings are complete
+  - baked frames are content-cropped (no matplotlib empty margins)
+
 Example::
 
   python experiments/animate_rx_los_rays.py \\
@@ -14,6 +20,7 @@ Example::
     --nav /content/los_work/data/BRDC00IGS_R_20262820000_01D_MN.rnx \\
     --utc 2026-10-09T12:00:00Z \\
     --point-index 0 \\
+    --view-half-m 100 --terrain-grid-n 224 \\
     --out-mp4 /content/los_work/results/rx_los_rays_p0.mp4
 """
 
@@ -95,7 +102,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=192,
+        default=224,
         help="DEM+imagery grid (higher = sharper ground texture)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19)
@@ -618,12 +625,11 @@ def main() -> int:
         hit_probe_m=max(float(args.hit_probe_m), float(args.mesh_radius_m)),
     )
 
-    # Viz mesh only needs to cover the camera (full .npy still used for BVH above).
+    view_half = float(args.view_half_m)
+    # Load past the camera so edge buildings stay whole (may overhang sat tile).
+    mesh_r = max(view_half * 1.6, float(args.mesh_radius_m) * 0.6)
     mesh_enu = sky._local_tris_enu(
-        tri,
-        rx,
-        radius_m=max(float(args.view_half_m) * 1.05, 80.0),
-        max_tris=int(args.max_tris),
+        tri, rx, radius_m=mesh_r, max_tris=int(args.max_tris)
     )
     terrain_tex = None
     if (
@@ -635,8 +641,8 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
-            # Same extent as the 3D camera so the sat texture fills the ground.
-            tex_half = max(float(args.view_half_m), 60.0)
+            # Sat ground fills the camera box (bake also remeshes E/N to ±view).
+            tex_half = max(view_half, 60.0)
             terrain_tex = sky._terrain_enu_textured(
                 sampler,
                 lat0=meta["lat"],
@@ -655,13 +661,18 @@ def main() -> int:
     for s in sats:
         s["u_shift"] = float(mesh_u_shift) if s.get("hit") else 0.0
 
+    print(
+        f"[los] 3D viz: view=±{view_half:.0f} m  mesh_load=±{mesh_r:.0f} m  "
+        f"tex_grid={args.terrain_grid_n}  (whole buildings if they touch the view)",
+        flush=True,
+    )
     fig, _anim, n_frames, update = build_animation(
         meta,
         sats,
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
-        map_half_m=float(args.mesh_radius_m),
-        view_half_m=float(args.view_half_m),
+        map_half_m=view_half,
+        view_half_m=view_half,
         bake_views=int(args.bake_views),
         bake_dpi=max(140, min(160, int(args.dpi) + 20)),
         title=str(args.title),

@@ -109,6 +109,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--systems", type=str, default="G,R,E,C,J")
     p.add_argument("--map-half-m", type=float, default=500.0)
     p.add_argument("--mesh-radius-m", type=float, default=250.0, help="Local 3D mesh clip radius around RX")
+    p.add_argument(
+        "--view-half-m",
+        type=float,
+        default=120.0,
+        help="3D camera half-extent [m] around RX (zoom; smaller = closer). Mesh/DEM can be larger.",
+    )
     p.add_argument("--max-tris", type=int, default=12000, help="Max triangles in 3D panel")
     p.add_argument("--terrain-grid-n", type=int, default=64, help="DEM+imagery grid resolution for 3D ground")
     p.add_argument("--imagery-zoom", type=int, default=18, help="Esri WorldImagery zoom for 3D ground texture")
@@ -169,9 +175,13 @@ def _draw_cesiumish_3d(
     mesh_enu: np.ndarray | None,
     terrain_tex: tuple | None,
     map_half_m: float,
+    view_half_m: float | None = None,
 ) -> tuple[float, float, float]:
-    """Draw textured DEM + buildings on an Axes3D. Returns (lim, zmin, zmax)."""
-    lim = float(map_half_m)
+    """Draw textured DEM + buildings on an Axes3D. Returns (lim, zmin, zmax).
+
+    ``view_half_m`` forces the camera box (zoom). Content may extend past it.
+    """
+    content_lim = float(map_half_m)
     zmin, zmax = -5.0, 40.0
     # Matplotlib 3D depth sorting is broken with plot_surface; disable auto zorder
     # so buildings (higher zorder) are not painted under the DEM texture.
@@ -193,7 +203,7 @@ def _draw_cesiumish_3d(
             cstride=1,
             zorder=1,
         )
-        lim = max(lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
+        content_lim = max(content_lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
         zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
         zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
     if mesh_enu is not None and mesh_enu.size > 0:
@@ -206,10 +216,13 @@ def _draw_cesiumish_3d(
         )
         coll.set_zorder(5)
         ax.add_collection3d(coll)
-        lim = max(lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
+        content_lim = max(content_lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
         zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
         zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
-    lim = max(lim, 40.0)
+    if view_half_m is not None and float(view_half_m) > 0:
+        lim = max(float(view_half_m), 25.0)
+    else:
+        lim = max(content_lim, 40.0)
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
     ax.set_zlim(zmin, max(zmax, zmin + 25.0))
@@ -223,7 +236,7 @@ def _draw_cesiumish_3d(
     ax.set_zlabel("U", color=MUTED, labelpad=-4)
     ax.plot([0], [0], [1.5], "o", color=ACCENT, ms=6, zorder=10)
     try:
-        ax.set_box_aspect((1, 1, 0.45))
+        ax.set_box_aspect((1, 1, 0.55 if lim <= 150 else 0.45))
     except Exception:
         pass
     return lim, zmin, zmax
@@ -242,25 +255,36 @@ def prebake_3d_orbit(
     mesh_enu: np.ndarray | None,
     terrain_tex: tuple | None,
     map_half_m: float,
+    view_half_m: float | None = None,
     n_views: int = 36,
     dpi: int = 110,
+    elev: float = 32.0,
 ) -> tuple[list[np.ndarray], list[dict]]:
     """Render orbit once → RGBA frames + per-view proj (for orange ray overlay)."""
     n_views = max(8, int(n_views))
+    vhalf = float(view_half_m) if view_half_m is not None else float(map_half_m)
     print(
-        f"[3d] pre-bake {n_views} views (satellite/DEM already loaded once; "
-        f"this is CPU rasterize, not re-download)…",
+        f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  "
+        f"(satellite/DEM already loaded once; CPU rasterize, not re-download)…",
         flush=True,
     )
     t0 = time.perf_counter()
     fig = plt.figure(figsize=(5.6, 4.3), dpi=dpi, facecolor=BG)
     ax = fig.add_subplot(111, projection="3d")
-    _draw_cesiumish_3d(ax, mesh_enu=mesh_enu, terrain_tex=terrain_tex, map_half_m=map_half_m)
+    lim, _z0, _z1 = _draw_cesiumish_3d(
+        ax,
+        mesh_enu=mesh_enu,
+        terrain_tex=terrain_tex,
+        map_half_m=map_half_m,
+        view_half_m=view_half_m,
+    )
     frames: list[np.ndarray] = []
     views: list[dict] = []
     azims = np.linspace(-60.0, 25.0, n_views)
+    # Slightly higher elev when zoomed so roofs don't dominate the frame.
+    elev_use = float(elev) if lim > 150 else max(float(elev), 38.0)
     for i, azim in enumerate(azims):
-        ax.view_init(elev=30.0, azim=float(azim))
+        ax.view_init(elev=elev_use, azim=float(azim))
         fig.canvas.draw()
         frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
         w, h = fig.canvas.get_width_height()
@@ -507,6 +531,7 @@ def build_animation(
     bake_views: int = 36,
     live_3d: bool = False,
     bake_dpi: int = 110,
+    view_half_m: float | None = 120.0,
 ):
     az = np.asarray(az_deg, dtype=np.float64)
     el = np.clip(np.asarray(el_deg, dtype=np.float64), 0.0, 90.0)
@@ -535,6 +560,7 @@ def build_animation(
             mesh_enu=mesh_enu,
             terrain_tex=terrain_tex,
             map_half_m=float(map_half_m),
+            view_half_m=view_half_m,
             n_views=int(bake_views),
             dpi=int(bake_dpi),
         )
@@ -599,7 +625,13 @@ def build_animation(
     elif use_live_3d:
         ax_ctx.set_facecolor("#0a1520")
         ax_ctx.set_title("3D scene (DEM + satellite + buildings) [live]", color=TEXT, fontsize=11, pad=8)
-        _draw_cesiumish_3d(ax_ctx, mesh_enu=mesh_enu, terrain_tex=terrain_tex, map_half_m=float(map_half_m))
+        _draw_cesiumish_3d(
+            ax_ctx,
+            mesh_enu=mesh_enu,
+            terrain_tex=terrain_tex,
+            map_half_m=float(map_half_m),
+            view_half_m=view_half_m,
+        )
         (ray3d,) = ax_ctx.plot([0, 0], [0, 0], [1.5, 1.5], color=ACCENT2, lw=2.4, zorder=11)
         ax_ctx.view_init(elev=32, azim=-55)
         print("3D panel: live matplotlib (slow; omit --live-3d to bake)")
@@ -978,6 +1010,7 @@ def main() -> int:
         bake_views=int(args.bake_views),
         live_3d=bool(args.live_3d),
         bake_dpi=min(110, int(args.dpi)),
+        view_half_m=float(args.view_half_m),
     )
     out = save_animation_progress(
         fig,

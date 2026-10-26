@@ -71,8 +71,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--systems", type=str, default="G,R,E,C,J")
     p.add_argument("--elevation-mask-deg", type=float, default=10.0)
     p.add_argument("--max-sats", type=int, default=14, help="Cap visible sats in the video")
-    p.add_argument("--ray-length-m", type=float, default=220.0)
+    p.add_argument("--ray-length-m", type=float, default=160.0)
     p.add_argument("--mesh-radius-m", type=float, default=250.0)
+    p.add_argument(
+        "--view-half-m",
+        type=float,
+        default=100.0,
+        help="3D camera half-extent [m] (zoom; smaller = closer to RX)",
+    )
     p.add_argument("--max-tris", type=int, default=12000)
     p.add_argument("--terrain-grid-n", type=int, default=64)
     p.add_argument("--imagery-zoom", type=int, default=18)
@@ -180,6 +186,7 @@ def build_animation(
     mesh_enu: np.ndarray | None,
     terrain_tex: tuple | None,
     map_half_m: float,
+    view_half_m: float,
     ray_length_m: float,
     bake_views: int,
     bake_dpi: int,
@@ -207,6 +214,7 @@ def build_animation(
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
         map_half_m=float(map_half_m),
+        view_half_m=float(view_half_m),
         n_views=int(bake_views),
         dpi=int(bake_dpi),
     )
@@ -442,7 +450,8 @@ def _self_check() -> None:
         mesh_enu=None,
         terrain_tex=None,
         map_half_m=200.0,
-        ray_length_m=120.0,
+        view_half_m=80.0,
+        ray_length_m=90.0,
         bake_views=8,
         bake_dpi=72,
         title="Self-check LOS rays",
@@ -529,7 +538,8 @@ def main() -> int:
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
         map_half_m=float(args.mesh_radius_m),
-        ray_length_m=min(float(args.ray_length_m), 0.9 * float(args.mesh_radius_m)),
+        view_half_m=float(args.view_half_m),
+        ray_length_m=min(float(args.ray_length_m), 0.95 * float(args.view_half_m)),
         bake_views=int(args.bake_views),
         bake_dpi=min(110, int(args.dpi)),
         title=str(args.title),

@@ -119,8 +119,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=224,
-        help="DEM+imagery grid resolution for 3D ground (higher = sharper sat texture, slower bake)",
+        default=288,
+        help="DEM+imagery grid for 3D ground (higher = sharper sat; softness is cell size, not tile cache)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19, help="Esri WorldImagery zoom for 3D ground texture")
     p.add_argument("--bake-views", type=int, default=36, help="Pre-bake this many 3D orbit views (fast playback)")
@@ -136,6 +136,44 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _ground_u_near_origin(terrain_tex: tuple) -> float:
+    """DEM Up [m] at the grid cell closest to ENU (0,0)."""
+    Ee, Nn, Uu, _fcols = terrain_tex
+    e = np.asarray(Ee, dtype=np.float64).ravel()
+    n = np.asarray(Nn, dtype=np.float64).ravel()
+    u = np.asarray(Uu, dtype=np.float64).ravel()
+    ok = np.isfinite(u)
+    if not np.any(ok):
+        return 0.0
+    e, n, u = e[ok], n[ok], u[ok]
+    k = int(np.argmin(e * e + n * n))
+    return float(u[k])
+
+
+def _normalize_terrain_u(
+    terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Rezero DEM so ground at RX is U≈0 (keeps antenna/rays at u=1.5 on the map)."""
+    Ee, Nn, Uu, fcols = terrain_tex
+    u0 = _ground_u_near_origin(terrain_tex)
+    if abs(u0) < 0.05:
+        return terrain_tex
+    U2 = np.asarray(Uu, dtype=np.float64).copy() - u0
+    print(
+        f"[3d] terrain U rezero: {(-u0):+.1f} m → ground@RX U≈0 "
+        f"(was U=[{float(np.nanmin(Uu)):.1f},{float(np.nanmax(Uu)):.1f}])",
+        flush=True,
+    )
+    return Ee, Nn, U2, fcols
+
+
+def _rx_antenna_u(terrain_tex: tuple | None, *, agl_m: float = 1.5) -> float:
+    """Antenna Up in ENU for overlays (on DEM after normalize, else AGL only)."""
+    if terrain_tex is None:
+        return float(agl_m)
+    return _ground_u_near_origin(terrain_tex) + float(agl_m)
+
+
 def _align_mesh_enu_to_dem(
     mesh_enu: np.ndarray,
     terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
@@ -145,6 +183,7 @@ def _align_mesh_enu_to_dem(
     """Shift buildings in Up so footprint bottoms match DEM (viz; fixes geoid mismatch).
 
     Returns ``(mesh_enu_shifted, delta_u)`` so overlays (hit markers) can match.
+    Call ``_normalize_terrain_u`` first so RX at u≈1.5 sits on the textured ground.
     """
     Ee, Nn, Uu, _fcols = terrain_tex
     verts = np.asarray(mesh_enu, dtype=np.float64).reshape(-1, 3)
@@ -170,7 +209,7 @@ def _align_mesh_enu_to_dem(
     shift = delta + float(sit_on_top_m)
     print(
         f"[3d] mesh↔DEM align: median ΔU={delta:+.1f} m "
-        f"(buildings were {'under' if delta > 0 else 'above'} terrain) → shift +{sit_on_top_m:.1f} m seat",
+        f"(buildings were {'under' if delta > 0 else 'above'} terrain) → shift {shift:+.1f} m",
         flush=True,
     )
     out = np.asarray(mesh_enu, dtype=np.float64).copy()
@@ -314,7 +353,10 @@ def _draw_cesiumish_3d(
             ax.grid(False)
         except Exception:
             pass
-    ax.plot([0], [0], [1.5], "o", color=ACCENT, ms=6, zorder=10)
+    # RX marker is drawn as a 2D overlay after bake (same proj as rays) — avoid a second
+    # baked dot that drifts when crop/DPI scaling is off.
+    if chrome:
+        ax.plot([0], [0], [1.5], "o", color=ACCENT, ms=6, zorder=10)
     try:
         ax.set_box_aspect((1, 1, 0.55 if lim <= 150 else 0.45))
     except Exception:
@@ -322,69 +364,53 @@ def _draw_cesiumish_3d(
     return lim, zmin, zmax
 
 
+def _buffer_scale(fig, rgba: np.ndarray) -> tuple[float, float, int, int]:
+    """Map display coords → buffer pixels (handles HiDPI where buffer ≠ get_width_height)."""
+    h_buf, w_buf = int(rgba.shape[0]), int(rgba.shape[1])
+    w_disp, h_disp = fig.canvas.get_width_height()
+    sx = w_buf / max(1.0, float(w_disp))
+    sy = h_buf / max(1.0, float(h_disp))
+    return sx, sy, int(w_disp), int(h_disp)
+
+
 def _enu_to_bake_xy(e: float, n: float, u: float, view: dict) -> tuple[float, float]:
     """Project ENU → pixel xy on baked RGBA (imshow origin=upper, extent=(0,w,h,0))."""
     xd, yd, _zd = proj3d.proj_transform(e, n, u, view["M"])
     v = view["trans"] @ np.array([xd, yd, 1.0], dtype=np.float64)
-    # Display coords (y up from bottom of full figure) → cropped image (y down from top).
-    full_h = float(view.get("full_h", view["h"]))
-    px = float(v[0]) - float(view.get("x0", 0.0))
-    py = (full_h - float(v[1])) - float(view.get("y0_img", 0.0))
+    sx = float(view.get("sx", 1.0))
+    sy = float(view.get("sy", 1.0))
+    h_disp = float(view.get("h_disp", view.get("full_h", view["h"])))
+    # Display (y up from bottom) → buffer (y down from top), then subtract crop origin.
+    px = float(v[0]) * sx - float(view.get("x0", 0.0))
+    py = (h_disp - float(v[1])) * sy - float(view.get("y0_img", 0.0))
     return px, py
 
 
-def _crop_rgba_to_content(
-    rgba: np.ndarray,
-    *,
-    x0: int = 0,
-    y0_img: int = 0,
-    full_h: int | None = None,
-    bg_thresh: float = 28.0,
-    pad: int = 6,
-) -> tuple[np.ndarray, dict]:
-    """Crop to non-dark pixels (removes mplot3d padding inside the axes window)."""
-    h_full = int(full_h if full_h is not None else rgba.shape[0])
-    lum = rgba[:, :, :3].astype(np.float32).mean(axis=2)
-    mask = lum > float(bg_thresh)
-    if not np.any(mask):
-        return rgba, {
-            "x0": int(x0),
-            "y0_img": int(y0_img),
-            "full_h": h_full,
-            "w": int(rgba.shape[1]),
-            "h": int(rgba.shape[0]),
-        }
-    rows = np.any(mask, axis=1)
-    cols = np.any(mask, axis=0)
-    r0, r1 = int(np.where(rows)[0][0]), int(np.where(rows)[0][-1])
-    c0, c1 = int(np.where(cols)[0][0]), int(np.where(cols)[0][-1])
-    r0 = max(0, r0 - pad)
-    c0 = max(0, c0 - pad)
-    r1 = min(rgba.shape[0] - 1, r1 + pad)
-    c1 = min(rgba.shape[1] - 1, c1 + pad)
-    crop = rgba[r0 : r1 + 1, c0 : c1 + 1].copy()
+def _crop_rgba_to_axes(rgba: np.ndarray, ax, fig) -> tuple[np.ndarray, dict]:
+    """Crop figure RGBA to the 3D axes window in *buffer* pixels (stable size across views)."""
+    sx, sy, w_disp, h_disp = _buffer_scale(fig, rgba)
+    bbox = ax.get_window_extent()
+    h_buf, w_buf = int(rgba.shape[0]), int(rgba.shape[1])
+    x0 = max(0, int(np.floor(bbox.x0 * sx)))
+    x1 = min(w_buf, int(np.ceil(bbox.x1 * sx)))
+    # window_extent y from bottom (display); buffer row 0 is top.
+    y0_img = max(0, int(np.floor((h_disp - bbox.y1) * sy)))
+    y1_img = min(h_buf, int(np.ceil((h_disp - bbox.y0) * sy)))
+    if x1 <= x0 + 8 or y1_img <= y0_img + 8:
+        crop = rgba
+        x0, y0_img = 0, 0
+    else:
+        crop = rgba[y0_img:y1_img, x0:x1].copy()
     return crop, {
-        "x0": int(x0) + c0,
-        "y0_img": int(y0_img) + r0,
-        "full_h": h_full,
+        "x0": int(x0),
+        "y0_img": int(y0_img),
+        "sx": float(sx),
+        "sy": float(sy),
+        "h_disp": int(h_disp),
+        "full_h": int(h_buf),
         "w": int(crop.shape[1]),
         "h": int(crop.shape[0]),
     }
-
-
-def _crop_rgba_to_axes(rgba: np.ndarray, ax, fig) -> tuple[np.ndarray, dict]:
-    """Crop figure RGBA to the 3D axes window, then to drawn content."""
-    bbox = ax.get_window_extent()
-    w_full, h_full = fig.canvas.get_width_height()
-    x0 = max(0, int(np.floor(bbox.x0)))
-    x1 = min(int(w_full), int(np.ceil(bbox.x1)))
-    # Agg buffer row 0 is top; window_extent y is from bottom.
-    y0_img = max(0, int(np.floor(h_full - bbox.y1)))
-    y1_img = min(int(h_full), int(np.ceil(h_full - bbox.y0)))
-    if x1 <= x0 + 8 or y1_img <= y0_img + 8:
-        return _crop_rgba_to_content(rgba, full_h=int(h_full))
-    axes_crop = rgba[y0_img:y1_img, x0:x1]
-    return _crop_rgba_to_content(axes_crop, x0=x0, y0_img=y0_img, full_h=int(h_full))
 
 
 def prebake_3d_orbit(
@@ -396,13 +422,15 @@ def prebake_3d_orbit(
     n_views: int = 36,
     dpi: int = 140,
     elev: float = 32.0,
+    rx_u: float | None = None,
 ) -> tuple[list[np.ndarray], list[dict]]:
-    """Render orbit once → RGBA frames + per-view proj (for orange ray overlay)."""
+    """Render orbit once → RGBA frames + per-view proj (for ray overlay)."""
     n_views = max(1, int(n_views))
     vhalf = float(view_half_m) if view_half_m is not None else float(map_half_m)
+    u_rx = float(rx_u) if rx_u is not None else _rx_antenna_u(terrain_tex, agl_m=1.5)
     print(
-        f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  dpi={dpi}  "
-        f"(tight crop; satellite/DEM already loaded)…",
+        f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  dpi={dpi}  rx_u={u_rx:.2f} m  "
+        f"(axes crop; sat texture sharpness = terrain-grid-n, not tile cache)…",
         flush=True,
     )
     t0 = time.perf_counter()
@@ -427,14 +455,16 @@ def prebake_3d_orbit(
         fig.canvas.draw()
         rgba = np.asarray(fig.canvas.buffer_rgba())
         crop, crop_meta = _crop_rgba_to_axes(rgba, ax, fig)
+        meta = {
+            "M": np.asarray(ax.get_proj(), dtype=np.float64).copy(),
+            "trans": np.asarray(ax.transData.get_matrix(), dtype=np.float64).copy(),
+            "rx_u": float(u_rx),
+            **crop_meta,
+        }
+        # RX in the same pixel space as overlaid rays (no baked 3D dot — that drifted).
+        meta["rx_xy"] = _enu_to_bake_xy(0.0, 0.0, u_rx, meta)
         frames.append(crop)
-        views.append(
-            {
-                "M": np.asarray(ax.get_proj(), dtype=np.float64).copy(),
-                "trans": np.asarray(ax.transData.get_matrix(), dtype=np.float64).copy(),
-                **crop_meta,
-            }
-        )
+        views.append(meta)
         if (i + 1) % 9 == 0 or i + 1 == n_views:
             print(f"[3d] bake {i + 1}/{n_views}  crop={crop.shape[1]}x{crop.shape[0]}", flush=True)
     plt.close(fig)
@@ -565,7 +595,11 @@ def _terrain_enu_textured(
         except Exception as exc2:
             print("satellite tile download failed:", exc2)
             return None
-    print(f"[imagery] done in {time.perf_counter() - t_dl:.1f}s (cached for whole video)", flush=True)
+    print(
+        f"[imagery] tiles ready in {time.perf_counter() - t_dl:.1f}s "
+        f"(one download, reused for every bake frame — not a low-res cache)",
+        flush=True,
+    )
 
     rgb = np.asarray(img)
     if rgb.ndim == 3 and rgb.shape[2] >= 3:
@@ -731,6 +765,7 @@ def build_animation(
             view_half_m=view_half_m,
             n_views=int(bake_views),
             dpi=int(bake_dpi),
+            rx_u=_rx_antenna_u(terrain_tex, agl_m=1.5),
         )
 
     dem_img = extent = None
@@ -769,6 +804,7 @@ def build_animation(
     bear_line = rx_ring = None
     ray3d = None
     ray2d = None
+    rx_dot2d = None
     ctx_im = None
     bake_idx = 0
     if use_baked and baked_frames:
@@ -785,6 +821,9 @@ def build_animation(
             zorder=1,
         )
         (ray2d,) = ax_ctx.plot([], [], color=ACCENT2, lw=2.6, solid_capstyle="round", zorder=5)
+        (rx_dot2d,) = ax_ctx.plot(
+            [], [], "o", color=ACCENT, ms=7, mec="white", mew=0.9, zorder=6, linestyle="None"
+        )
         ax_ctx.set_xlim(0, bw)
         ax_ctx.set_ylim(bh, 0)
         ax_ctx.set_xticks([])
@@ -895,12 +934,16 @@ def build_animation(
         )
         return meta["lon"] + dlon, meta["lat"] + dlat
 
-    def _ray_enu(az_from_n_deg: float, el_deg: float, length_m: float = 180.0):
+    _u_rx_default = float(
+        baked_views[0]["rx_u"] if baked_views else _rx_antenna_u(terrain_tex, agl_m=1.5)
+    )
+
+    def _ray_enu(az_from_n_deg: float, el_deg: float, length_m: float = 180.0, u0: float | None = None):
         azr = math.radians(az_from_n_deg)
         elr = math.radians(el_deg)
         e = length_m * math.sin(azr) * math.cos(elr)
         n_ = length_m * math.cos(azr) * math.cos(elr)
-        u = 1.5 + length_m * math.sin(elr)
+        u = float(u0 if u0 is not None else _u_rx_default) + length_m * math.sin(elr)
         return e, n_, u
 
     def update(frame: int):
@@ -939,6 +982,8 @@ def build_animation(
                 ray3d.set_data_3d([0, 0], [0, 0], [1.5, 1.5])
             if ray2d is not None:
                 ray2d.set_data([], [])
+            if rx_dot2d is not None:
+                rx_dot2d.set_data([], [])
             pol_sky.set_data([], [])
             pol_ray.set_data([], [])
             fov_line.set_data([], [])
@@ -965,14 +1010,22 @@ def build_animation(
         if bear_line is not None:
             lon1, lat1 = _bearing_end(az_now)
             bear_line.set_data([meta["lon"], lon1], [meta["lat"], lat1])
-        e, nn, uu = _ray_enu(az_now, max(el_now, 5.0), length_m=min(0.85 * float(map_half_m), 200.0))
+        u_rx = float(baked_views[bake_idx].get("rx_u", _u_rx_default)) if baked_views else _u_rx_default
+        e, nn, uu = _ray_enu(
+            az_now, max(el_now, 5.0), length_m=min(0.85 * float(map_half_m), 200.0), u0=u_rx
+        )
         if ray3d is not None:
-            ray3d.set_data_3d([0, e], [0, nn], [1.5, uu])
+            ray3d.set_data_3d([0, e], [0, nn], [u_rx, uu])
         if ray2d is not None and baked_views:
             view = baked_views[bake_idx]
-            x0, y0 = _enu_to_bake_xy(0.0, 0.0, 1.5, view)
+            if "rx_xy" in view:
+                x0, y0 = float(view["rx_xy"][0]), float(view["rx_xy"][1])
+            else:
+                x0, y0 = _enu_to_bake_xy(0.0, 0.0, u_rx, view)
             x1, y1 = _enu_to_bake_xy(e, nn, uu, view)
             ray2d.set_data([x0, x1], [y0, y1])
+            if rx_dot2d is not None:
+                rx_dot2d.set_data([x0], [y0])
 
         th = np.radians(az_s[:k])
         rr = 90.0 - el_s[:k]
@@ -1167,6 +1220,8 @@ def main() -> int:
         except Exception as exc:
             print("terrain+imagery skip:", exc)
 
+    if terrain_tex is not None:
+        terrain_tex = _normalize_terrain_u(terrain_tex)
     if mesh_enu is not None and terrain_tex is not None:
         mesh_enu, _ = _align_mesh_enu_to_dem(mesh_enu, terrain_tex)
 

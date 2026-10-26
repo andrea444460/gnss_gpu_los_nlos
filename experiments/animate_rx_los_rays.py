@@ -102,8 +102,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=224,
-        help="DEM+imagery grid (higher = sharper ground texture)",
+        default=288,
+        help="DEM+imagery grid (higher = sharper sat ground; softness is plot_surface cells, not tile cache)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19)
     p.add_argument("--bake-views", type=int, default=36)
@@ -194,12 +194,14 @@ def _collect_sats(
     return rows
 
 
-def _tip_enu(az_deg: float, el_deg: float, length_m: float) -> tuple[float, float, float]:
+def _tip_enu(
+    az_deg: float, el_deg: float, length_m: float, *, u0: float = 1.5
+) -> tuple[float, float, float]:
     azr = math.radians(az_deg)
     elr = math.radians(el_deg)
     e = length_m * math.sin(azr) * math.cos(elr)
     n = length_m * math.cos(azr) * math.cos(elr)
-    u = 1.5 + length_m * math.sin(elr)
+    u = float(u0) + length_m * math.sin(elr)
     return e, n, u
 
 
@@ -268,6 +270,7 @@ def build_animation(
     bake_dpi: int,
     title: str,
     fps: int,
+    rx_u: float = 1.5,
 ):
     n_sat = len(sats)
     if n_sat == 0:
@@ -287,7 +290,8 @@ def build_animation(
     edges = np.cumsum([0] + phase_frames)
     n_frames = int(edges[-1])
 
-    print(f"[los] baking 3D panel for {n_sat} sats…", flush=True)
+    u_rx = float(rx_u)
+    print(f"[los] baking 3D panel for {n_sat} sats (rx_u={u_rx:.2f} m)…", flush=True)
     baked_frames, baked_views = sky.prebake_3d_orbit(
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
@@ -295,11 +299,13 @@ def build_animation(
         view_half_m=float(view_half_m),
         n_views=int(bake_views),
         dpi=int(bake_dpi),
+        rx_u=u_rx,
     )
 
     tips = []
     for s in sats:
-        e, nn, uu = _tip_enu(s["az_deg"], s["el_deg"], float(s["ray_m"]))
+        e, nn, uu = _tip_enu(s["az_deg"], s["el_deg"], float(s["ray_m"]), u0=u_rx)
+        # NLOS: tip U follows viz-aligned mesh (ECEF hit + mesh↔DEM shift).
         tips.append((e, nn, uu + float(s.get("u_shift", 0.0))))
     n_los = sum(1 for s in sats if s["is_los"])
     n_nlos = n_sat - n_los
@@ -367,6 +373,10 @@ def build_animation(
         mew=0.8,
         zorder=6,
         linestyle="None",
+    )
+    # RX marker in the SAME projected coords as rays (not the old baked 3D dot).
+    (rx_dot,) = ax_ctx.plot(
+        [], [], "o", color=ACCENT, ms=8, mec="white", mew=1.0, zorder=7, linestyle="None"
     )
 
     ax_pol.set_theta_zero_location("N")
@@ -459,7 +469,12 @@ def build_animation(
         scat_nlos.set_offsets(np.array(nlos_pts) if nlos_pts else np.empty((0, 2)))
 
     def _set_rays(n_show: int, view: dict):
-        x0, y0 = sky._enu_to_bake_xy(0.0, 0.0, 1.5, view)
+        u0 = float(view.get("rx_u", u_rx))
+        if "rx_xy" in view:
+            x0, y0 = float(view["rx_xy"][0]), float(view["rx_xy"][1])
+        else:
+            x0, y0 = sky._enu_to_bake_xy(0.0, 0.0, u0, view)
+        rx_dot.set_data([x0], [y0])
         hx, hy = [], []
         for i, ln in enumerate(ray_lines):
             if i >= n_show:
@@ -655,15 +670,19 @@ def main() -> int:
         except Exception as exc:
             print("terrain+imagery skip:", exc)
     mesh_u_shift = 0.0
+    if terrain_tex is not None:
+        terrain_tex = sky._normalize_terrain_u(terrain_tex)
     if mesh_enu is not None and terrain_tex is not None:
         mesh_enu, mesh_u_shift = sky._align_mesh_enu_to_dem(mesh_enu, terrain_tex)
+    rx_u = sky._rx_antenna_u(terrain_tex, agl_m=1.5)
     # Hit tips are ECEF-true; nudge U so markers land on the viz-aligned mesh.
     for s in sats:
         s["u_shift"] = float(mesh_u_shift) if s.get("hit") else 0.0
 
     print(
         f"[los] 3D viz: view=±{view_half:.0f} m  mesh_load=±{mesh_r:.0f} m  "
-        f"tex_grid={args.terrain_grid_n}  (whole buildings if they touch the view)",
+        f"tex_grid={args.terrain_grid_n}  rx_u={rx_u:.2f} m  "
+        f"(whole buildings if they touch the view)",
         flush=True,
     )
     fig, _anim, n_frames, update = build_animation(
@@ -677,6 +696,7 @@ def main() -> int:
         bake_dpi=max(140, min(160, int(args.dpi) + 20)),
         title=str(args.title),
         fps=int(args.fps),
+        rx_u=rx_u,
     )
     out = sky.save_animation_progress(
         fig,

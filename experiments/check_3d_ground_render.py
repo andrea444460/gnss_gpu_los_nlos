@@ -117,8 +117,10 @@ def main() -> int:
     if terrain_tex is None:
         raise SystemExit("terrain+imagery failed")
 
+    terrain_tex = sky._normalize_terrain_u(terrain_tex)
     mesh_enu, shift = sky._align_mesh_enu_to_dem(mesh_enu, terrain_tex)
-    print(f"mesh align ΔU={shift:+.2f} m", flush=True)
+    rx_u = sky._rx_antenna_u(terrain_tex, agl_m=1.5)
+    print(f"mesh align ΔU={shift:+.2f} m  rx_u={rx_u:.2f} m", flush=True)
 
     Ee, Nn, Uu, fcols = terrain_tex
     terr_span = max(float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
@@ -143,14 +145,24 @@ def main() -> int:
     checks.append(("texture_grid", ok_tex, f"facecolors={fcols.shape}"))
 
     print("[check] baking one view…", flush=True)
-    frames, _views = sky.prebake_3d_orbit(
+    frames, views = sky.prebake_3d_orbit(
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
         map_half_m=view,
         view_half_m=view,
         n_views=1,
         dpi=int(args.dpi),
+        rx_u=rx_u,
     )
+    # Stamp overlay RX (same proj as rays) — must sit on the textured ground near origin.
+    rgba = frames[0].copy()
+    x0, y0 = views[0]["rx_xy"]
+    ix, iy = int(round(x0)), int(round(y0))
+    if 3 <= ix < rgba.shape[1] - 3 and 3 <= iy < rgba.shape[0] - 3:
+        rgba[iy - 3 : iy + 4, ix - 3 : ix + 4, :3] = (0x3D, 0xD6, 0xC6)
+    frames = [rgba]
+    ok_rx = 0 <= ix < rgba.shape[1] and 0 <= iy < rgba.shape[0]
+    checks.append(("rx_proj_in_frame", ok_rx, f"rx_xy=({x0:.1f},{y0:.1f})  rx_u={rx_u:.2f}"))
     rgba = frames[0]
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -45,6 +45,7 @@ from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.urban_signal_sim import _sat_elevation_azimuth
 from label_los_nlos_coords import _lla_deg_to_ecef, _parse_utc, _utc_to_gps_week_tow
+from plot_rx_skyline import _ecef_to_enu_basis
 
 import animate_rx_skyline as sky
 
@@ -71,7 +72,18 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--systems", type=str, default="G,R,E,C,J")
     p.add_argument("--elevation-mask-deg", type=float, default=10.0)
     p.add_argument("--max-sats", type=int, default=14, help="Cap visible sats in the video")
-    p.add_argument("--ray-length-m", type=float, default=160.0)
+    p.add_argument(
+        "--ray-length-m",
+        type=float,
+        default=280.0,
+        help="LOS ray draw length [m] (can exceed --view-half-m so rays leave the frame)",
+    )
+    p.add_argument(
+        "--hit-probe-m",
+        type=float,
+        default=400.0,
+        help="Max distance to search building hit for NLOS rays [m]",
+    )
     p.add_argument("--mesh-radius-m", type=float, default=250.0)
     p.add_argument(
         "--view-half-m",
@@ -179,6 +191,59 @@ def _tip_enu(az_deg: float, el_deg: float, length_m: float) -> tuple[float, floa
     return e, n, u
 
 
+def _nlos_hit_length_m(
+    bvh: BVHAccelerator,
+    rx_ecef: np.ndarray,
+    az_deg: float,
+    el_deg: float,
+    *,
+    probe_m: float,
+    n_bisect: int = 14,
+) -> float:
+    """Approx first building-hit distance along RX→sat (metres)."""
+    east, north, up = _ecef_to_enu_basis(rx_ecef)
+    azr = math.radians(az_deg)
+    elr = math.radians(el_deg)
+    e = math.sin(azr) * math.cos(elr)
+    n = math.cos(azr) * math.cos(elr)
+    u = math.sin(elr)
+    d = e * east + n * north + u * up
+    lo, hi = 1.0, float(probe_m)
+    rx = np.asarray(rx_ecef, dtype=np.float64).reshape(3)
+    for _ in range(int(n_bisect)):
+        mid = 0.5 * (lo + hi)
+        probe = (rx + mid * d).reshape(1, 3)
+        clear = bool(np.asarray(bvh.check_los(rx, probe), dtype=bool).ravel()[0])
+        if clear:
+            lo = mid
+        else:
+            hi = mid
+    return float(hi)
+
+
+def _assign_ray_lengths(
+    sats: list[dict],
+    *,
+    bvh: BVHAccelerator | None,
+    rx_ecef: np.ndarray | None,
+    los_m: float,
+    hit_probe_m: float,
+) -> None:
+    """Set ``ray_m`` on each sat: long for LOS, hit distance for NLOS."""
+    for s in sats:
+        if s["is_los"] or bvh is None or rx_ecef is None:
+            s["ray_m"] = float(los_m)
+            s["hit"] = False
+            continue
+        hit = _nlos_hit_length_m(
+            bvh, rx_ecef, s["az_deg"], s["el_deg"], probe_m=float(hit_probe_m)
+        )
+        # Keep a minimum stub so very-near hits stay visible.
+        s["ray_m"] = max(8.0, float(hit))
+        s["hit"] = True
+        print(f"[los] {s['id']} NLOS hit ≈ {s['ray_m']:.1f} m", flush=True)
+
+
 def build_animation(
     meta: dict,
     sats: list[dict],
@@ -187,7 +252,6 @@ def build_animation(
     terrain_tex: tuple | None,
     map_half_m: float,
     view_half_m: float,
-    ray_length_m: float,
     bake_views: int,
     bake_dpi: int,
     title: str,
@@ -196,6 +260,8 @@ def build_animation(
     n_sat = len(sats)
     if n_sat == 0:
         raise SystemExit("No visible satellites to animate")
+    if any("ray_m" not in s for s in sats):
+        raise SystemExit("sats missing ray_m — call _assign_ray_lengths first")
 
     t_intro, t_city, t_per, t_all, t_hold = 1.4, 2.0, 0.85, 3.2, 2.0
     phase_frames = [
@@ -219,7 +285,10 @@ def build_animation(
         dpi=int(bake_dpi),
     )
 
-    tips = [_tip_enu(s["az_deg"], s["el_deg"], float(ray_length_m)) for s in sats]
+    tips = []
+    for s in sats:
+        e, nn, uu = _tip_enu(s["az_deg"], s["el_deg"], float(s["ray_m"]))
+        tips.append((e, nn, uu + float(s.get("u_shift", 0.0))))
     n_los = sum(1 for s in sats if s["is_los"])
     n_nlos = n_sat - n_los
 
@@ -266,12 +335,24 @@ def build_animation(
             [],
             [],
             color=LOS if s["is_los"] else NLOS,
-            lw=2.4,
+            lw=2.6 if s["is_los"] else 2.8,
             solid_capstyle="round",
             zorder=5,
             alpha=0.95,
         )
         ray_lines.append(ln)
+    # NLOS impact markers (filled) on building hit
+    (hit_scat,) = ax_ctx.plot(
+        [],
+        [],
+        "o",
+        color=NLOS,
+        ms=7,
+        mec="white",
+        mew=0.8,
+        zorder=6,
+        linestyle="None",
+    )
 
     ax_pol.set_theta_zero_location("N")
     ax_pol.set_theta_direction(-1)
@@ -364,6 +445,7 @@ def build_animation(
 
     def _set_rays(n_show: int, view: dict):
         x0, y0 = sky._enu_to_bake_xy(0.0, 0.0, 1.5, view)
+        hx, hy = [], []
         for i, ln in enumerate(ray_lines):
             if i >= n_show:
                 ln.set_data([], [])
@@ -371,11 +453,18 @@ def build_animation(
             e, nn, uu = tips[i]
             x1, y1 = sky._enu_to_bake_xy(e, nn, uu, view)
             ln.set_data([x0, x1], [y0, y1])
+            if sats[i].get("hit"):
+                hx.append(x1)
+                hy.append(y1)
+        hit_scat.set_data(hx, hy)
 
     def _log_text(n_show: int) -> str:
         lines = []
         for i, s in enumerate(sats[:n_show]):
-            tag = "LOS " if s["is_los"] else "NLOS"
+            if s["is_los"]:
+                tag = f"LOS   ray={s['ray_m']:.0f}m"
+            else:
+                tag = f"NLOS  hit≈{s['ray_m']:.0f}m"
             lines.append(
                 f"{s['id']:<5}  az={s['az_deg']:6.1f}°  el={s['el_deg']:5.1f}°  →  {tag}"
             )
@@ -443,7 +532,13 @@ def _self_check() -> None:
         {"id": "E05", "az_deg": 210.0, "el_deg": 48.0, "is_los": True},
         {"id": "C06", "az_deg": 300.0, "el_deg": 18.0, "is_los": False},
     ]
-    # Tiny fake bake: empty terrain, no mesh → still runs prebake with empty scene
+    _assign_ray_lengths(sats, bvh=None, rx_ecef=None, los_m=120.0, hit_probe_m=200.0)
+    # Fake NLOS stubs (no BVH in self-check)
+    for s in sats:
+        if not s["is_los"]:
+            s["ray_m"] = 35.0
+            s["hit"] = True
+        s["u_shift"] = 0.0
     fig, _a, n_frames, update = build_animation(
         meta,
         sats,
@@ -451,7 +546,6 @@ def _self_check() -> None:
         terrain_tex=None,
         map_half_m=200.0,
         view_half_m=80.0,
-        ray_length_m=90.0,
         bake_views=8,
         bake_dpi=72,
         title="Self-check LOS rays",
@@ -505,6 +599,16 @@ def main() -> int:
         flush=True,
     )
 
+    # LOS: long rays (may leave the zoomed frame). NLOS: stop at building hit.
+    los_draw_m = max(float(args.ray_length_m), 1.6 * float(args.view_half_m))
+    _assign_ray_lengths(
+        sats,
+        bvh=bvh,
+        rx_ecef=rx,
+        los_m=los_draw_m,
+        hit_probe_m=max(float(args.hit_probe_m), float(args.mesh_radius_m)),
+    )
+
     mesh_enu = sky._local_tris_enu(
         tri, rx, radius_m=float(args.mesh_radius_m), max_tris=int(args.max_tris)
     )
@@ -529,8 +633,12 @@ def main() -> int:
             )
         except Exception as exc:
             print("terrain+imagery skip:", exc)
+    mesh_u_shift = 0.0
     if mesh_enu is not None and terrain_tex is not None:
-        mesh_enu = sky._align_mesh_enu_to_dem(mesh_enu, terrain_tex)
+        mesh_enu, mesh_u_shift = sky._align_mesh_enu_to_dem(mesh_enu, terrain_tex)
+    # Hit tips are ECEF-true; nudge U so markers land on the viz-aligned mesh.
+    for s in sats:
+        s["u_shift"] = float(mesh_u_shift) if s.get("hit") else 0.0
 
     fig, _anim, n_frames, update = build_animation(
         meta,
@@ -539,7 +647,6 @@ def main() -> int:
         terrain_tex=terrain_tex,
         map_half_m=float(args.mesh_radius_m),
         view_half_m=float(args.view_half_m),
-        ray_length_m=min(float(args.ray_length_m), 0.95 * float(args.view_half_m)),
         bake_views=int(args.bake_views),
         bake_dpi=min(110, int(args.dpi)),
         title=str(args.title),

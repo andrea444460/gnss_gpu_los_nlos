@@ -136,12 +136,15 @@ def _align_mesh_enu_to_dem(
     terrain_tex: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     *,
     sit_on_top_m: float = 0.4,
-) -> np.ndarray:
-    """Shift buildings in Up so footprint bottoms match DEM (viz; fixes geoid mismatch)."""
+) -> tuple[np.ndarray, float]:
+    """Shift buildings in Up so footprint bottoms match DEM (viz; fixes geoid mismatch).
+
+    Returns ``(mesh_enu_shifted, delta_u)`` so overlays (hit markers) can match.
+    """
     Ee, Nn, Uu, _fcols = terrain_tex
     verts = np.asarray(mesh_enu, dtype=np.float64).reshape(-1, 3)
     if verts.size == 0 or not np.isfinite(Uu).any():
-        return mesh_enu
+        return mesh_enu, 0.0
     u15 = float(np.nanpercentile(verts[:, 2], 15))
     ground = verts[verts[:, 2] <= u15 + 1.5]
     if ground.shape[0] < 30:
@@ -153,20 +156,21 @@ def _align_mesh_enu_to_dem(
     finite = np.isfinite(u_flat)
     e_flat, n_flat, u_flat = e_flat[finite], n_flat[finite], u_flat[finite]
     if e_flat.size == 0:
-        return mesh_enu
+        return mesh_enu, 0.0
     deltas = np.empty(g.shape[0], dtype=np.float64)
     for i, (e, n, u) in enumerate(g):
         k = int(np.argmin((e_flat - e) ** 2 + (n_flat - n) ** 2))
         deltas[i] = float(u_flat[k]) - float(u)
     delta = float(np.median(deltas))
+    shift = delta + float(sit_on_top_m)
     print(
         f"[3d] mesh↔DEM align: median ΔU={delta:+.1f} m "
         f"(buildings were {'under' if delta > 0 else 'above'} terrain) → shift +{sit_on_top_m:.1f} m seat",
         flush=True,
     )
     out = np.asarray(mesh_enu, dtype=np.float64).copy()
-    out[:, :, 2] += delta + float(sit_on_top_m)
-    return out
+    out[:, :, 2] += shift
+    return out, shift
 
 
 def _draw_cesiumish_3d(
@@ -993,7 +997,7 @@ def main() -> int:
             print("terrain+imagery skip:", exc)
 
     if mesh_enu is not None and terrain_tex is not None:
-        mesh_enu = _align_mesh_enu_to_dem(mesh_enu, terrain_tex)
+        mesh_enu, _ = _align_mesh_enu_to_dem(mesh_enu, terrain_tex)
 
     fig, _anim, n_frames, update = build_animation(
         meta, az, el,

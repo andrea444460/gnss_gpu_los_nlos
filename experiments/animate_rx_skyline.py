@@ -9,12 +9,13 @@ Example (mask già calcolata)::
 
   python experiments/animate_rx_skyline.py \\
     --mask-json /content/los_work/results/rx_skyline_mask.json \\
+    --triangles /content/los_work/results/genova_osm_triangles.npy \\
     --point-index 0 \\
     --dem-path /content/los_work/results/genova_area_dem.tif \\
     --geoid-correction egm96 \\
     --nav /content/los_work/data/BRDC00IGS_R_20262820000_01D_MN.rnx \\
     --utc 2026-10-09T12:00:00Z \\
-    --basemap \\
+    --mesh-radius-m 250 --max-tris 25000 \\
     --out-mp4 /content/los_work/results/rx_mask_anim.mp4
 """
 
@@ -24,6 +25,7 @@ import argparse
 import json
 import math
 import sys
+import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -45,7 +47,10 @@ from gnss_gpu.io.nav_rinex import read_nav_rinex_multi
 from gnss_gpu.raytrace import BuildingModel
 from gnss_gpu.terrain_horizon import HorizonConfig, TerrainHorizonMask
 from label_los_nlos_coords import _lla_deg_to_ecef, _parse_utc, _utc_to_gps_week_tow, load_coords
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
 from plot_rx_skyline import (
+    _ecef_to_enu_basis,
     building_skyline_deg,
     collect_nav_tracks,
     draw_sat_tracks,
@@ -98,13 +103,46 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--dt-s", type=float, default=120.0)
     p.add_argument("--systems", type=str, default="G,R,E,C,J")
     p.add_argument("--map-half-m", type=float, default=500.0)
-    p.add_argument("--basemap", action="store_true", help="OSM/Esri tiles via contextily")
+    p.add_argument("--mesh-radius-m", type=float, default=250.0, help="Local 3D mesh clip radius around RX")
+    p.add_argument("--max-tris", type=int, default=25000, help="Max triangles in 3D panel")
+    p.add_argument("--basemap", action="store_true", help="2D fallback: Esri tiles via contextily (if no mesh)")
+    p.add_argument("--no-mesh-3d", action="store_true", help="Force 2D map even if --triangles is set")
     p.add_argument("--out-mp4", type=Path, default=None)
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--dpi", type=int, default=120)
     p.add_argument("--title", type=str, default="GNSS obstruction mask")
     p.add_argument("--self-check", action="store_true")
     return p.parse_args()
+
+
+def _local_tris_enu(
+    triangles_ecef: np.ndarray,
+    rx_ecef: np.ndarray,
+    *,
+    radius_m: float,
+    max_tris: int,
+) -> np.ndarray | None:
+    """Return [M,3,3] ENU triangles around RX, or None."""
+    tri = np.asarray(triangles_ecef, dtype=np.float64)
+    if tri.ndim != 3 or tri.shape[1:] != (3, 3) or tri.shape[0] == 0:
+        return None
+    rx = np.asarray(rx_ecef, dtype=np.float64).reshape(3)
+    cents = tri.mean(axis=1)
+    d = np.linalg.norm(cents - rx.reshape(1, 3), axis=1)
+    sel = np.nonzero(d <= float(radius_m))[0]
+    if sel.size == 0:
+        # fallback: nearest max_tris
+        sel = np.argsort(d)[: min(int(max_tris), d.size)]
+    elif sel.size > int(max_tris):
+        # keep closest
+        sel = sel[np.argsort(d[sel])[: int(max_tris)]]
+    east, north, up = _ecef_to_enu_basis(rx)
+    R = np.column_stack([east, north, up])  # ECEF -> ENU columns
+    local = tri[sel] - rx.reshape(1, 1, 3)
+    # [M,3,3] @ R -> ENU
+    enu = local @ R
+    print(f"3D mesh panel: {enu.shape[0]} tris within {radius_m:.0f} m")
+    return enu
 
 
 def _dem_grid(sampler: NativeDemSampler, lat0: float, lon0: float, half_m: float, n: int = 100):
@@ -219,6 +257,7 @@ def build_animation(
     tracks: dict | None,
     title: str,
     fps: int,
+    mesh_enu: np.ndarray | None = None,
 ):
     az = np.asarray(az_deg, dtype=np.float64)
     el = np.clip(np.asarray(el_deg, dtype=np.float64), 0.0, 90.0)
@@ -227,8 +266,9 @@ def build_animation(
     order = np.argsort(az_fov)
     az_s, el_s, az_fov_s = az[order], el[order], az_fov[order]
     n = len(az_s)
+    use_3d = mesh_enu is not None and mesh_enu.size > 0
 
-    t_intro, t_map, t_sweep, t_tracks, t_hold = 1.6, 3.2, 9.5, 2.8, 2.2
+    t_intro, t_map, t_sweep, t_tracks, t_hold = 1.6, 3.5, 9.5, 2.8, 2.2
     if not tracks:
         t_hold += t_tracks
         t_tracks = 0.0
@@ -237,7 +277,7 @@ def build_animation(
     n_frames = int(edges[-1])
 
     dem_img = extent = None
-    if dem_path is not None and Path(dem_path).is_file():
+    if (not use_3d) and dem_path is not None and Path(dem_path).is_file():
         try:
             sampler = NativeDemSampler(dem_path, geoid_correction=parse_geoid_correction_arg(geoid))
             lons, lats, Z = _dem_grid(sampler, meta["lat"], meta["lon"], float(map_half_m), n=90)
@@ -248,11 +288,13 @@ def build_animation(
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
     gs = fig.add_gridspec(2, 2, height_ratios=[1.35, 1.0], hspace=0.30, wspace=0.22)
-    ax_map = fig.add_subplot(gs[0, 0])
+    if use_3d:
+        ax_ctx = fig.add_subplot(gs[0, 0], projection="3d")
+    else:
+        ax_ctx = fig.add_subplot(gs[0, 0])
     ax_pol = fig.add_subplot(gs[0, 1], projection="polar")
     ax_fov = fig.add_subplot(gs[1, :])
-    for ax in (ax_map, ax_fov):
-        ax.set_facecolor(PANEL)
+    ax_fov.set_facecolor(PANEL)
     ax_pol.set_facecolor(PANEL)
     fig.suptitle(title, color=TEXT, fontsize=16, fontweight="bold", y=0.98)
     fig.text(
@@ -264,31 +306,73 @@ def build_animation(
         fontsize=11,
     )
 
-    # Map
-    ax_map.set_title("Receiver in context", color=TEXT, fontsize=11, pad=8)
-    pad = float(map_half_m) / 111_320.0
-    ax_map.set_xlim(meta["lon"] - pad / max(1e-6, math.cos(math.radians(meta["lat"]))), meta["lon"] + pad / max(1e-6, math.cos(math.radians(meta["lat"]))))
-    ax_map.set_ylim(meta["lat"] - pad, meta["lat"] + pad)
-    if dem_img is not None and extent is not None:
-        ax_map.imshow(dem_img, origin="lower", extent=extent, cmap="terrain", alpha=0.75, aspect="auto", zorder=0)
-        ax_map.set_xlim(extent[0], extent[1])
-        ax_map.set_ylim(extent[2], extent[3])
-    if basemap:
+    # --- Top-left: 3D mesh OR 2D map ---
+    bear_line = rx_ring = None
+    ray3d = None
+    if use_3d:
+        ax_ctx.set_facecolor(BG)
+        ax_ctx.set_title("3D city model (local ENU)", color=TEXT, fontsize=11, pad=8)
+        # mesh_enu: East, North, Up — plot as X=E, Y=N, Z=U
+        faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
+        coll = Poly3DCollection(
+            faces,
+            facecolors=(0.75, 0.80, 0.88, 0.55),
+            edgecolors=(0.55, 0.62, 0.72, 0.25),
+            linewidths=0.15,
+        )
+        ax_ctx.add_collection3d(coll)
+        lim = float(np.nanmax(np.abs(mesh_enu))) * 1.05
+        lim = max(lim, 40.0)
+        ax_ctx.set_xlim(-lim, lim)
+        ax_ctx.set_ylim(-lim, lim)
+        zmax = max(float(np.nanmax(mesh_enu[:, :, 2])), 30.0)
+        ax_ctx.set_zlim(0.0, zmax * 1.15)
+        ax_ctx.set_xlabel("East [m]", color=MUTED, labelpad=-2)
+        ax_ctx.set_ylabel("North [m]", color=MUTED, labelpad=-2)
+        ax_ctx.set_zlabel("Up [m]", color=MUTED, labelpad=-2)
+        ax_ctx.tick_params(colors=MUTED, labelsize=7)
+        ax_ctx.plot([0], [0], [1.5], "o", color=ACCENT, ms=7)
+        (ray3d,) = ax_ctx.plot([0, 0], [0, 0], [1.5, 1.5], color=ACCENT2, lw=2.4)
+        ax_ctx.view_init(elev=28, azim=-60)
         try:
-            import contextily as cx
+            ax_ctx.set_box_aspect((1, 1, 0.55))
+        except Exception:
+            pass
+        print(f"3D panel ready lim=±{lim:.0f} m  zmax={zmax:.0f} m")
+    else:
+        ax_ctx.set_facecolor(PANEL)
+        ax_ctx.set_title("Receiver in context", color=TEXT, fontsize=11, pad=8)
+        pad = float(map_half_m) / 111_320.0
+        clat = max(1e-6, math.cos(math.radians(meta["lat"])))
+        ax_ctx.set_xlim(meta["lon"] - pad / clat, meta["lon"] + pad / clat)
+        ax_ctx.set_ylim(meta["lat"] - pad, meta["lat"] + pad)
+        if dem_img is not None and extent is not None:
+            ax_ctx.imshow(dem_img, origin="lower", extent=extent, cmap="terrain", alpha=0.75, aspect="auto", zorder=0)
+            ax_ctx.set_xlim(extent[0], extent[1])
+            ax_ctx.set_ylim(extent[2], extent[3])
+        if basemap:
+            try:
+                import contextily as cx
 
-            cx.add_basemap(ax_map, crs="EPSG:4326", source=cx.providers.Esri.WorldImagery, zoom="auto", attribution=False)
-            print("basemap: Esri.WorldImagery")
-        except Exception as exc:
-            print("basemap skip (pip install contextily):", exc)
-    ax_map.set_xlabel("Longitude", color=MUTED)
-    ax_map.set_ylabel("Latitude", color=MUTED)
-    ax_map.tick_params(colors=MUTED)
-    ax_map.grid(True, color="#ffffff22", lw=0.6)
-    ax_map.plot([meta["lon"]], [meta["lat"]], "o", color=ACCENT, ms=10, zorder=5)
-    (rx_ring,) = ax_map.plot([meta["lon"]], [meta["lat"]], "o", mfc="none", mec=ACCENT, ms=18, mew=1.6, zorder=5)
-    (bear_line,) = ax_map.plot([], [], color=ACCENT2, lw=2.2, zorder=4)
-    ax_map.annotate("RX", (meta["lon"], meta["lat"]), textcoords="offset points", xytext=(8, 8), color=ACCENT, fontsize=10, fontweight="bold")
+                cx.add_basemap(
+                    ax_ctx, crs="EPSG:4326", source=cx.providers.Esri.WorldImagery, zoom="auto", attribution=False
+                )
+                print("basemap: Esri.WorldImagery")
+            except Exception as exc:
+                print("basemap skip (pip install contextily):", exc)
+        ax_ctx.set_xlabel("Longitude", color=MUTED)
+        ax_ctx.set_ylabel("Latitude", color=MUTED)
+        ax_ctx.tick_params(colors=MUTED)
+        ax_ctx.grid(True, color="#ffffff22", lw=0.6)
+        ax_ctx.plot([meta["lon"]], [meta["lat"]], "o", color=ACCENT, ms=10, zorder=5)
+        (rx_ring,) = ax_ctx.plot(
+            [meta["lon"]], [meta["lat"]], "o", mfc="none", mec=ACCENT, ms=18, mew=1.6, zorder=5
+        )
+        (bear_line,) = ax_ctx.plot([], [], color=ACCENT2, lw=2.2, zorder=4)
+        ax_ctx.annotate(
+            "RX", (meta["lon"], meta["lat"]), textcoords="offset points", xytext=(8, 8),
+            color=ACCENT, fontsize=10, fontweight="bold",
+        )
 
     # Polar
     ax_pol.set_theta_zero_location("N")
@@ -338,13 +422,20 @@ def build_animation(
         return 4, 1.0
 
     def _bearing_end(az_from_n_deg: float):
-        # ~350 m ray on map
         dist_m = min(0.75 * float(map_half_m), 350.0)
         dlat = (dist_m * math.cos(math.radians(az_from_n_deg))) / 111_320.0
         dlon = (dist_m * math.sin(math.radians(az_from_n_deg))) / (
             111_320.0 * max(1e-6, math.cos(math.radians(meta["lat"])))
         )
         return meta["lon"] + dlon, meta["lat"] + dlat
+
+    def _ray_enu(az_from_n_deg: float, el_deg: float, length_m: float = 180.0):
+        azr = math.radians(az_from_n_deg)
+        elr = math.radians(el_deg)
+        e = length_m * math.sin(azr) * math.cos(elr)
+        n_ = length_m * math.cos(azr) * math.cos(elr)
+        u = 1.5 + length_m * math.sin(elr)
+        return e, n_, u
 
     def update(frame: int):
         nonlocal pol_fill, fov_fill
@@ -353,17 +444,27 @@ def build_animation(
         intro_box.set_visible(show_intro)
         intro_txt.set_visible(show_intro)
         intro_sub.set_visible(show_intro)
-        for ax in (ax_map, ax_pol, ax_fov):
+        for ax in (ax_ctx, ax_pol, ax_fov):
             ax.set_visible(not show_intro)
 
-        rx_ring.set_markersize(14 + 7 * (0.5 + 0.5 * math.sin(frame / max(1, fps) * 5.0)))
+        if rx_ring is not None:
+            rx_ring.set_markersize(14 + 7 * (0.5 + 0.5 * math.sin(frame / max(1, fps) * 5.0)))
+
+        # Slow orbit on 3D during locate + sweep
+        if use_3d and phase >= 1:
+            azim = -60 + (frame / max(1, n_frames - 1)) * 75.0
+            elev = 26 + 6 * math.sin(frame / max(1, fps) * 0.7)
+            ax_ctx.view_init(elev=elev, azim=azim)
 
         if phase == 0:
             status.set_text("Intro")
             return ()
         if phase == 1:
-            status.set_text("1 · Locate receiver")
-            bear_line.set_data([], [])
+            status.set_text("1 · 3D city around RX" if use_3d else "1 · Locate receiver")
+            if bear_line is not None:
+                bear_line.set_data([], [])
+            if ray3d is not None:
+                ray3d.set_data_3d([0, 0], [0, 0], [1.5, 1.5])
             pol_sky.set_data([], [])
             pol_ray.set_data([], [])
             fov_line.set_data([], [])
@@ -387,8 +488,12 @@ def build_animation(
         k = min(n, max(1, int(round(prog * (n - 1))) + 1))
         az_now = float(az_s[k - 1])
         el_now = float(el_s[k - 1])
-        lon1, lat1 = _bearing_end(az_now)
-        bear_line.set_data([meta["lon"], lon1], [meta["lat"], lat1])
+        if bear_line is not None:
+            lon1, lat1 = _bearing_end(az_now)
+            bear_line.set_data([meta["lon"], lon1], [meta["lat"], lat1])
+        if ray3d is not None:
+            e, nn, uu = _ray_enu(az_now, max(el_now, 5.0), length_m=min(0.85 * float(map_half_m), 200.0))
+            ray3d.set_data_3d([0, e], [0, nn], [1.5, uu])
 
         th = np.radians(az_s[:k])
         rr = 90.0 - el_s[:k]
@@ -429,8 +534,78 @@ def build_animation(
                     track_artists.append(ln)
         return ()
 
+    # Keep a FuncAnimation only for compatibility; we render frame-by-frame for progress logs.
     anim = animation.FuncAnimation(fig, update, frames=n_frames, interval=1000 / fps, blit=False)
-    return fig, anim, n_frames
+    return fig, anim, n_frames, update
+
+
+def _fmt_eta(seconds: float) -> str:
+    s = max(0, int(round(seconds)))
+    m, s = divmod(s, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+def save_animation_progress(
+    fig: plt.Figure,
+    update,
+    *,
+    n_frames: int,
+    out: Path,
+    fps: int,
+    dpi: int,
+    log_every: int = 10,
+) -> Path:
+    """Render frames one-by-one with remaining-frame + ETA logs."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    writers = []
+    try:
+        writers.append(
+            (
+                out,
+                animation.FFMpegWriter(fps=fps, bitrate=4500, metadata={"artist": "gnss_gpu"}),
+            )
+        )
+    except Exception:
+        pass
+    writers.append((out.with_suffix(".gif"), animation.PillowWriter(fps=fps)))
+
+    last_err: Exception | None = None
+    for path, writer in writers:
+        try:
+            print(f"[render] writer={type(writer).__name__}  frames={n_frames}  fps={fps}  → {path}")
+            t0 = time.perf_counter()
+            with writer.saving(fig, str(path), dpi=dpi):
+                for i in range(n_frames):
+                    t_frame = time.perf_counter()
+                    update(i)
+                    fig.canvas.draw()
+                    writer.grab_frame()
+                    dt = time.perf_counter() - t_frame
+                    done = i + 1
+                    left = n_frames - done
+                    elapsed = time.perf_counter() - t0
+                    avg = elapsed / done
+                    eta = avg * left
+                    if done == 1 or done == n_frames or done % max(1, log_every) == 0:
+                        print(
+                            f"[render] frame {done}/{n_frames}  left={left}  "
+                            f"this={dt:.2f}s  avg={avg:.2f}s/frame  "
+                            f"elapsed={_fmt_eta(elapsed)}  ETA={_fmt_eta(eta)}",
+                            flush=True,
+                        )
+            print(f"[render] done {path} ({path.stat().st_size / 1e6:.2f} MB)", flush=True)
+            return path
+        except Exception as exc:
+            last_err = exc
+            print(f"[render] failed with {type(writer).__name__}: {exc}", flush=True)
+            continue
+    raise RuntimeError(f"Could not save animation: {last_err}")
 
 
 def _self_check() -> None:
@@ -438,19 +613,13 @@ def _self_check() -> None:
     az = np.arange(360.0)
     el = 12.0 + 35.0 * (np.sin(np.radians(az - 45.0)) ** 2)
     meta = {"id": "demo", "lat": 44.42, "lon": 8.93, "alt": 50.0}
-    fig, anim, _n = build_animation(
+    fig, _anim, n_frames, update = build_animation(
         meta, az, el,
         fov_zero_deg=45.0, dem_path=None, geoid="none", map_half_m=400.0,
-        basemap=False, tracks=None, title="Self-check", fps=12,
+        basemap=False, tracks=None, title="Self-check", fps=12, mesh_enu=None,
     )
     out = _SCRIPT_DIR / "results" / "_anim_selfcheck.mp4"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        writer = animation.FFMpegWriter(fps=12, bitrate=2500)
-        anim.save(out, writer=writer, dpi=80)
-    except Exception:
-        out = out.with_suffix(".gif")
-        anim.save(out, writer=animation.PillowWriter(fps=12), dpi=80)
+    out = save_animation_progress(fig, update, n_frames=min(n_frames, 24), out=out, fps=12, dpi=80, log_every=5)
     plt.close(fig)
     assert out.exists() and out.stat().st_size > 1000
     print("self-check OK:", out)
@@ -470,7 +639,21 @@ def main() -> int:
         f"RX {meta['id']}: {meta['lat']:.5f},{meta['lon']:.5f} h={meta['alt']:.1f} m  "
         f"mask max={float(np.max(el)):.1f}°  tracks={0 if not tracks else len(tracks)}"
     )
-    fig, anim, n_frames = build_animation(
+
+    mesh_enu = None
+    if args.triangles is not None and not args.no_mesh_3d and Path(args.triangles).is_file():
+        try:
+            tri = np.load(args.triangles)
+            rx = _lla_deg_to_ecef(meta["lat"], meta["lon"], meta["alt"])
+            mesh_enu = _local_tris_enu(
+                tri, rx, radius_m=float(args.mesh_radius_m), max_tris=int(args.max_tris)
+            )
+        except Exception as exc:
+            print("3D mesh load skip:", exc)
+    elif args.triangles is None:
+        print("No --triangles → top-left stays 2D map (pass genova_osm_triangles.npy for 3D)")
+
+    fig, _anim, n_frames, update = build_animation(
         meta, az, el,
         fov_zero_deg=float(args.fov_zero_deg),
         dem_path=args.dem_path,
@@ -480,17 +663,17 @@ def main() -> int:
         tracks=tracks,
         title=str(args.title),
         fps=int(args.fps),
+        mesh_enu=mesh_enu,
     )
-    out = Path(args.out_mp4)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Rendering {n_frames} frames → {out}")
-    try:
-        writer = animation.FFMpegWriter(fps=int(args.fps), bitrate=4500, metadata={"artist": "gnss_gpu"})
-        anim.save(out, writer=writer, dpi=int(args.dpi))
-    except Exception as exc:
-        print("MP4 failed, GIF fallback:", exc)
-        out = out.with_suffix(".gif")
-        anim.save(out, writer=animation.PillowWriter(fps=int(args.fps)), dpi=int(args.dpi))
+    out = save_animation_progress(
+        fig,
+        update,
+        n_frames=n_frames,
+        out=Path(args.out_mp4),
+        fps=int(args.fps),
+        dpi=int(args.dpi),
+        log_every=max(1, int(args.fps) // 2),  # ~2 logs/sec of video
+    )
     plt.close(fig)
     print(f"Wrote {out} ({out.stat().st_size / 1e6:.2f} MB)")
     return 0

@@ -116,8 +116,13 @@ def _parse_args() -> argparse.Namespace:
         help="3D camera half-extent [m] around RX (zoom; smaller = closer). Mesh/DEM can be larger.",
     )
     p.add_argument("--max-tris", type=int, default=12000, help="Max triangles in 3D panel")
-    p.add_argument("--terrain-grid-n", type=int, default=64, help="DEM+imagery grid resolution for 3D ground")
-    p.add_argument("--imagery-zoom", type=int, default=18, help="Esri WorldImagery zoom for 3D ground texture")
+    p.add_argument(
+        "--terrain-grid-n",
+        type=int,
+        default=112,
+        help="DEM+imagery grid resolution for 3D ground (higher = sharper sat texture, slower bake)",
+    )
+    p.add_argument("--imagery-zoom", type=int, default=19, help="Esri WorldImagery zoom for 3D ground texture")
     p.add_argument("--bake-views", type=int, default=36, help="Pre-bake this many 3D orbit views (fast playback)")
     p.add_argument("--no-terrain-texture", action="store_true", help="Skip satellite-textured DEM under buildings")
     p.add_argument("--basemap", action="store_true", help="2D fallback: Esri tiles via contextily (if no mesh)")
@@ -985,7 +990,11 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
-            half = float(args.mesh_radius_m)
+            # Pack texels into the zoomed view (not the full mesh radius).
+            half = min(
+                float(args.mesh_radius_m),
+                max(float(args.view_half_m) * 1.35, 80.0),
+            )
             terrain_tex = _terrain_enu_textured(
                 sampler,
                 lat0=meta["lat"],

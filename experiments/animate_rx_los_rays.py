@@ -92,8 +92,13 @@ def _parse_args() -> argparse.Namespace:
         help="3D camera half-extent [m] (zoom; smaller = closer to RX)",
     )
     p.add_argument("--max-tris", type=int, default=12000)
-    p.add_argument("--terrain-grid-n", type=int, default=64)
-    p.add_argument("--imagery-zoom", type=int, default=18)
+    p.add_argument(
+        "--terrain-grid-n",
+        type=int,
+        default=112,
+        help="DEM+imagery grid (higher = sharper ground texture)",
+    )
+    p.add_argument("--imagery-zoom", type=int, default=19)
     p.add_argument("--bake-views", type=int, default=36)
     p.add_argument("--no-terrain-texture", action="store_true")
     p.add_argument("--out-mp4", type=Path, default=None)
@@ -626,12 +631,16 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
+            tex_half = min(
+                float(args.mesh_radius_m),
+                max(float(args.view_half_m) * 1.35, 80.0),
+            )
             terrain_tex = sky._terrain_enu_textured(
                 sampler,
                 lat0=meta["lat"],
                 lon0=meta["lon"],
                 rx_ecef=rx,
-                half_m=float(args.mesh_radius_m),
+                half_m=tex_half,
                 n=int(args.terrain_grid_n),
                 zoom=int(args.imagery_zoom),
             )

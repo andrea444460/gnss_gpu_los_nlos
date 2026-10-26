@@ -119,7 +119,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=112,
+        default=160,
         help="DEM+imagery grid resolution for 3D ground (higher = sharper sat texture, slower bake)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19, help="Esri WorldImagery zoom for 3D ground texture")
@@ -185,10 +185,12 @@ def _draw_cesiumish_3d(
     terrain_tex: tuple | None,
     map_half_m: float,
     view_half_m: float | None = None,
+    chrome: bool = True,
 ) -> tuple[float, float, float]:
     """Draw textured DEM + buildings on an Axes3D. Returns (lim, zmin, zmax).
 
     ``view_half_m`` forces the camera box (zoom). Content may extend past it.
+    ``chrome=False`` hides axes/labels (for tight baked presentation frames).
     """
     content_lim = float(map_half_m)
     zmin, zmax = -5.0, 40.0
@@ -238,11 +240,26 @@ def _draw_cesiumish_3d(
     ax.set_facecolor("#0a1520")
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
         axis.pane.fill = False
-        axis.pane.set_edgecolor("#1a2740")
-    ax.tick_params(colors=MUTED, labelsize=6)
-    ax.set_xlabel("E", color=MUTED, labelpad=-4)
-    ax.set_ylabel("N", color=MUTED, labelpad=-4)
-    ax.set_zlabel("U", color=MUTED, labelpad=-4)
+        axis.pane.set_edgecolor("#1a2740" if chrome else "#0a1520")
+        if not chrome:
+            axis.pane.set_alpha(0.0)
+            axis.line.set_color("#0a1520")
+    if chrome:
+        ax.tick_params(colors=MUTED, labelsize=6)
+        ax.set_xlabel("E", color=MUTED, labelpad=-4)
+        ax.set_ylabel("N", color=MUTED, labelpad=-4)
+        ax.set_zlabel("U", color=MUTED, labelpad=-4)
+    else:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+        ax.set_zlabel("")
+        try:
+            ax.grid(False)
+        except Exception:
+            pass
     ax.plot([0], [0], [1.5], "o", color=ACCENT, ms=6, zorder=10)
     try:
         ax.set_box_aspect((1, 1, 0.55 if lim <= 150 else 0.45))
@@ -255,8 +272,32 @@ def _enu_to_bake_xy(e: float, n: float, u: float, view: dict) -> tuple[float, fl
     """Project ENU → pixel xy on baked RGBA (imshow origin=upper, extent=(0,w,h,0))."""
     xd, yd, _zd = proj3d.proj_transform(e, n, u, view["M"])
     v = view["trans"] @ np.array([xd, yd, 1.0], dtype=np.float64)
-    # transData is display coords (y up from bottom); imshow upper has y down from top.
-    return float(v[0]), float(view["h"] - v[1])
+    # Display coords (y up from bottom of full figure) → cropped image (y down from top).
+    full_h = float(view.get("full_h", view["h"]))
+    px = float(v[0]) - float(view.get("x0", 0.0))
+    py = (full_h - float(v[1])) - float(view.get("y0_img", 0.0))
+    return px, py
+
+
+def _crop_rgba_to_axes(rgba: np.ndarray, ax, fig) -> tuple[np.ndarray, dict]:
+    """Crop figure RGBA to the 3D axes window (kills matplotlib's empty margins)."""
+    bbox = ax.get_window_extent()
+    w_full, h_full = fig.canvas.get_width_height()
+    x0 = max(0, int(np.floor(bbox.x0)))
+    x1 = min(int(w_full), int(np.ceil(bbox.x1)))
+    # Agg buffer row 0 is top; window_extent y is from bottom.
+    y0_img = max(0, int(np.floor(h_full - bbox.y1)))
+    y1_img = min(int(h_full), int(np.ceil(h_full - bbox.y0)))
+    if x1 <= x0 + 8 or y1_img <= y0_img + 8:
+        return rgba, {"x0": 0, "y0_img": 0, "full_h": int(h_full), "w": int(w_full), "h": int(h_full)}
+    crop = rgba[y0_img:y1_img, x0:x1].copy()
+    return crop, {
+        "x0": x0,
+        "y0_img": y0_img,
+        "full_h": int(h_full),
+        "w": int(crop.shape[1]),
+        "h": int(crop.shape[0]),
+    }
 
 
 def prebake_3d_orbit(
@@ -266,47 +307,49 @@ def prebake_3d_orbit(
     map_half_m: float,
     view_half_m: float | None = None,
     n_views: int = 36,
-    dpi: int = 110,
+    dpi: int = 140,
     elev: float = 32.0,
 ) -> tuple[list[np.ndarray], list[dict]]:
     """Render orbit once → RGBA frames + per-view proj (for orange ray overlay)."""
     n_views = max(8, int(n_views))
     vhalf = float(view_half_m) if view_half_m is not None else float(map_half_m)
     print(
-        f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  "
-        f"(satellite/DEM already loaded once; CPU rasterize, not re-download)…",
+        f"[3d] pre-bake {n_views} views  view=±{vhalf:.0f} m  dpi={dpi}  "
+        f"(tight crop; satellite/DEM already loaded)…",
         flush=True,
     )
     t0 = time.perf_counter()
-    fig = plt.figure(figsize=(5.6, 4.3), dpi=dpi, facecolor=BG)
-    ax = fig.add_subplot(111, projection="3d")
+    # Large canvas so the cropped 3D box stays sharp when stretched into the video panel.
+    fig = plt.figure(figsize=(7.2, 6.2), dpi=dpi, facecolor=BG)
+    ax = fig.add_axes([0.02, 0.02, 0.96, 0.96], projection="3d")
     lim, _z0, _z1 = _draw_cesiumish_3d(
         ax,
         mesh_enu=mesh_enu,
         terrain_tex=terrain_tex,
         map_half_m=map_half_m,
         view_half_m=view_half_m,
+        chrome=False,
     )
     frames: list[np.ndarray] = []
     views: list[dict] = []
-    azims = np.linspace(-60.0, 25.0, n_views)
+    azims = np.linspace(-55.0, 30.0, n_views)
     # Slightly higher elev when zoomed so roofs don't dominate the frame.
-    elev_use = float(elev) if lim > 150 else max(float(elev), 38.0)
+    elev_use = float(elev) if lim > 150 else max(float(elev), 40.0)
     for i, azim in enumerate(azims):
         ax.view_init(elev=elev_use, azim=float(azim))
         fig.canvas.draw()
-        frames.append(np.asarray(fig.canvas.buffer_rgba()).copy())
-        w, h = fig.canvas.get_width_height()
+        rgba = np.asarray(fig.canvas.buffer_rgba())
+        crop, crop_meta = _crop_rgba_to_axes(rgba, ax, fig)
+        frames.append(crop)
         views.append(
             {
                 "M": np.asarray(ax.get_proj(), dtype=np.float64).copy(),
                 "trans": np.asarray(ax.transData.get_matrix(), dtype=np.float64).copy(),
-                "w": int(w),
-                "h": int(h),
+                **crop_meta,
             }
         )
         if (i + 1) % 9 == 0 or i + 1 == n_views:
-            print(f"[3d] bake {i + 1}/{n_views}", flush=True)
+            print(f"[3d] bake {i + 1}/{n_views}  crop={crop.shape[1]}x{crop.shape[0]}", flush=True)
     plt.close(fig)
     print(f"[3d] bake done in {time.perf_counter() - t0:.1f}s — playback will reuse these bitmaps", flush=True)
     return frames, views
@@ -586,7 +629,7 @@ def build_animation(
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
     gs = fig.add_gridspec(
-        2, 2, height_ratios=[2.1, 0.75], width_ratios=[1.35, 1.0], hspace=0.22, wspace=0.16
+        2, 2, height_ratios=[2.8, 0.65], width_ratios=[1.75, 1.0], hspace=0.14, wspace=0.12
     )
     if use_live_3d:
         ax_ctx = fig.add_subplot(gs[0, 0], projection="3d")
@@ -990,10 +1033,10 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
-            # Pack texels into the zoomed view (not the full mesh radius).
+            # Pack texels tightly into the zoomed view (not the full mesh radius).
             half = min(
                 float(args.mesh_radius_m),
-                max(float(args.view_half_m) * 1.35, 80.0),
+                max(float(args.view_half_m) * 1.12, 70.0),
             )
             terrain_tex = _terrain_enu_textured(
                 sampler,
@@ -1024,7 +1067,7 @@ def main() -> int:
         terrain_tex=terrain_tex,
         bake_views=int(args.bake_views),
         live_3d=bool(args.live_3d),
-        bake_dpi=min(110, int(args.dpi)),
+        bake_dpi=max(140, min(160, int(args.dpi) + 20)),
         view_half_m=float(args.view_half_m),
     )
     out = save_animation_progress(

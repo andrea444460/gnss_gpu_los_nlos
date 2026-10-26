@@ -95,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=112,
+        default=160,
         help="DEM+imagery grid (higher = sharper ground texture)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19)
@@ -299,9 +299,9 @@ def build_animation(
 
     plt.rcParams.update({"font.family": "DejaVu Sans", "text.color": TEXT})
     fig = plt.figure(figsize=(12.8, 7.2), facecolor=BG)
-    # Big 3D panel; skinny log strip at the bottom.
+    # Dominate with 3D; skyplot secondary; thin log strip.
     gs = fig.add_gridspec(
-        2, 2, height_ratios=[2.35, 0.55], width_ratios=[1.45, 1.0], hspace=0.18, wspace=0.16
+        2, 2, height_ratios=[3.1, 0.38], width_ratios=[1.95, 1.0], hspace=0.12, wspace=0.10
     )
     ax_ctx = fig.add_subplot(gs[0, 0])
     ax_pol = fig.add_subplot(gs[0, 1], projection="polar")
@@ -326,10 +326,10 @@ def build_animation(
         origin="upper",
         extent=(0, bw, bh, 0),
         aspect="auto",
-        interpolation="bilinear",
+        interpolation="bicubic",
         zorder=1,
     )
-    ax_ctx.set_title("3D · ray RX → satellite", color=TEXT, fontsize=10, pad=4)
+    ax_ctx.set_title("3D · ray RX → satellite", color=TEXT, fontsize=9, pad=2)
     ax_ctx.set_xlim(0, bw)
     ax_ctx.set_ylim(bh, 0)
     ax_ctx.set_xticks([])
@@ -633,7 +633,7 @@ def main() -> int:
             )
             tex_half = min(
                 float(args.mesh_radius_m),
-                max(float(args.view_half_m) * 1.35, 80.0),
+                max(float(args.view_half_m) * 1.12, 70.0),
             )
             terrain_tex = sky._terrain_enu_textured(
                 sampler,
@@ -661,7 +661,7 @@ def main() -> int:
         map_half_m=float(args.mesh_radius_m),
         view_half_m=float(args.view_half_m),
         bake_views=int(args.bake_views),
-        bake_dpi=min(110, int(args.dpi)),
+        bake_dpi=max(140, min(160, int(args.dpi) + 20)),
         title=str(args.title),
         fps=int(args.fps),
     )

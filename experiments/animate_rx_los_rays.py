@@ -95,7 +95,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=160,
+        default=192,
         help="DEM+imagery grid (higher = sharper ground texture)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19)
@@ -631,10 +631,8 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
-            tex_half = min(
-                float(args.mesh_radius_m),
-                max(float(args.view_half_m) * 1.12, 70.0),
-            )
+            # Same extent as the 3D camera so the sat texture fills the ground.
+            tex_half = max(float(args.view_half_m), 60.0)
             terrain_tex = sky._terrain_enu_textured(
                 sampler,
                 lat0=meta["lat"],

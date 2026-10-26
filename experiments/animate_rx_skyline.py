@@ -119,7 +119,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--terrain-grid-n",
         type=int,
-        default=160,
+        default=192,
         help="DEM+imagery grid resolution for 3D ground (higher = sharper sat texture, slower bake)",
     )
     p.add_argument("--imagery-zoom", type=int, default=19, help="Esri WorldImagery zoom for 3D ground texture")
@@ -202,6 +202,27 @@ def _draw_cesiumish_3d(
         pass
     if terrain_tex is not None:
         Ee, Nn, Uu, fcols = terrain_tex
+        content_lim = max(content_lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
+        zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
+        zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
+    if mesh_enu is not None and mesh_enu.size > 0:
+        content_lim = max(content_lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
+        zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
+        zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
+    if view_half_m is not None and float(view_half_m) > 0:
+        lim = max(float(view_half_m), 25.0)
+    else:
+        lim = max(content_lim, 40.0)
+
+    # Full-frame ground so the camera never shows empty black around a small DEM patch.
+    z_ground = float(zmin) + 0.2
+    xx = np.array([[-lim, lim], [-lim, lim]], dtype=np.float64)
+    yy = np.array([[-lim, -lim], [lim, lim]], dtype=np.float64)
+    zz = np.full((2, 2), z_ground, dtype=np.float64)
+    ax.plot_surface(xx, yy, zz, color="#1a2838", linewidth=0, antialiased=False, shade=False, zorder=0)
+
+    if terrain_tex is not None:
+        Ee, Nn, Uu, fcols = terrain_tex
         ax.plot_surface(
             Ee,
             Nn,
@@ -214,9 +235,6 @@ def _draw_cesiumish_3d(
             cstride=1,
             zorder=1,
         )
-        content_lim = max(content_lim, float(np.nanmax(np.abs(Ee))), float(np.nanmax(np.abs(Nn))))
-        zmin = min(zmin, float(np.nanmin(Uu)) - 2.0)
-        zmax = max(zmax, float(np.nanmax(Uu)) + 5.0)
     if mesh_enu is not None and mesh_enu.size > 0:
         faces = [mesh_enu[i] for i in range(mesh_enu.shape[0])]
         coll = Poly3DCollection(
@@ -227,13 +245,7 @@ def _draw_cesiumish_3d(
         )
         coll.set_zorder(5)
         ax.add_collection3d(coll)
-        content_lim = max(content_lim, float(np.nanmax(np.abs(mesh_enu[:, :, :2]))) * 1.02)
-        zmax = max(zmax, float(np.nanmax(mesh_enu[:, :, 2])) * 1.08)
-        zmin = min(zmin, float(np.nanmin(mesh_enu[:, :, 2])) - 1.0)
-    if view_half_m is not None and float(view_half_m) > 0:
-        lim = max(float(view_half_m), 25.0)
-    else:
-        lim = max(content_lim, 40.0)
+
     ax.set_xlim(-lim, lim)
     ax.set_ylim(-lim, lim)
     ax.set_zlim(zmin, max(zmax, zmin + 25.0))
@@ -428,19 +440,25 @@ def _terrain_enu_textured(
     rx = np.asarray(rx_ecef, dtype=np.float64).reshape(3)
     east, north, up = _ecef_to_enu_basis(rx)
     R = np.column_stack([east, north, up])
-    E = np.zeros((n, n), dtype=np.float64)
-    N_ = np.zeros((n, n), dtype=np.float64)
     U = np.zeros((n, n), dtype=np.float64)
     for i, la in enumerate(lats):
         for j, lo in enumerate(lons):
             h = float(H[i, j]) if np.isfinite(H[i, j]) else float(np.nanmedian(H))
             ecef = _lla_deg_to_ecef(float(la), float(lo), h)
             enu = (ecef - rx) @ R
-            E[i, j], N_[i, j], U[i, j] = float(enu[0]), float(enu[1]), float(enu[2])
+            U[i, j] = float(enu[2])
+    # Force regular ENU grid spanning exactly ±half_m so the textured surface
+    # always fills the camera (ECEF→ENU warping otherwise leaves black margins).
+    e_ax = np.linspace(-float(half_m), float(half_m), n)
+    n_ax = np.linspace(-float(half_m), float(half_m), n)
+    E, N_ = np.meshgrid(e_ax, n_ax)
 
     west, east_ll = float(lons.min()), float(lons.max())
     south, north_ll = float(lats.min()), float(lats.max())
-    print(f"[imagery] download Esri tiles once for bbox ({n}x{n} DEM)…", flush=True)
+    print(
+        f"[imagery] download Esri tiles once  half=±{half_m:.0f} m  grid={n}x{n}  zoom={zoom}…",
+        flush=True,
+    )
     t_dl = time.perf_counter()
     try:
         img, _ext = cx.bounds2img(
@@ -453,8 +471,21 @@ def _terrain_enu_textured(
             zoom=int(zoom),
         )
     except Exception as exc:
-        print("satellite tile download failed:", exc)
-        return None
+        # Zoom 19 can fail on some bboxes — retry one step coarser.
+        try:
+            img, _ext = cx.bounds2img(
+                west,
+                south,
+                east_ll,
+                north_ll,
+                ll=True,
+                source=cx.providers.Esri.WorldImagery,
+                zoom=max(15, int(zoom) - 1),
+            )
+            print(f"[imagery] zoom {zoom} failed ({exc}); used zoom {max(15, int(zoom) - 1)}", flush=True)
+        except Exception as exc2:
+            print("satellite tile download failed:", exc2)
+            return None
     print(f"[imagery] done in {time.perf_counter() - t_dl:.1f}s (cached for whole video)", flush=True)
 
     rgb = np.asarray(img)
@@ -463,20 +494,26 @@ def _terrain_enu_textured(
     else:
         return None
     # plot_surface facecolors want (rows-1, cols-1, 3|4)
+    try:
+        resample = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample = Image.LANCZOS
     tex = np.asarray(
-        Image.fromarray(rgb.astype(np.uint8)).resize((n - 1, n - 1), Image.BILINEAR),
+        Image.fromarray(rgb.astype(np.uint8)).resize((n - 1, n - 1), resample),
         dtype=np.float64,
     ) / 255.0
     # Flip north-south: bounds2img rows are typically north-at-top; our lats increase with i
     tex = np.flipud(tex)
     if tex.shape[2] == 3:
-        alpha = np.full(tex.shape[:2] + (1,), 0.95, dtype=np.float64)
+        alpha = np.full(tex.shape[:2] + (1,), 0.98, dtype=np.float64)
         facecolors = np.concatenate([tex, alpha], axis=2)
     else:
         facecolors = tex
     print(
-        f"3D terrain+imagery: {n}x{n} DEM, tex={facecolors.shape}, "
-        f"U=[{float(np.nanmin(U)):.1f},{float(np.nanmax(U)):.1f}] m"
+        f"3D terrain+imagery: {n}x{n}  ±{half_m:.0f} m  tex={facecolors.shape}  "
+        f"U=[{float(np.nanmin(U)):.1f},{float(np.nanmax(U)):.1f}] m  "
+        f"src={rgb.shape[1]}x{rgb.shape[0]}px",
+        flush=True,
     )
     return E, N_, U, facecolors
 
@@ -1033,11 +1070,8 @@ def main() -> int:
             sampler = NativeDemSampler(
                 args.dem_path, geoid_correction=parse_geoid_correction_arg(str(args.geoid_correction))
             )
-            # Pack texels tightly into the zoomed view (not the full mesh radius).
-            half = min(
-                float(args.mesh_radius_m),
-                max(float(args.view_half_m) * 1.12, 70.0),
-            )
+            # Cover the whole camera frame (never smaller than --view-half-m).
+            half = max(float(args.view_half_m), 60.0)
             terrain_tex = _terrain_enu_textured(
                 sampler,
                 lat0=meta["lat"],
